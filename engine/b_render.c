@@ -32,7 +32,7 @@ typedef struct BrushRenderState {
   int locSpecStrength;
   int locLinearize;
   int locLightVP, locShadowMap, locShadowEnabled;
-  int locShadowSoftness, locShadowTexel;
+  int locShadowSoftness, locShadowTexel, locShadowStrength;
 
   Vector3 sunDir;   // the directional LIGHT (sun by day, moon at night)
   Vector3 sunColor;
@@ -70,6 +70,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locShadowEnabled = GetShaderLocation(g_r.lit, "uShadowEnabled");
   g_r.locShadowSoftness = GetShaderLocation(g_r.lit, "uShadowSoftness");
   g_r.locShadowTexel = GetShaderLocation(g_r.lit, "uShadowTexel");
+  g_r.locShadowStrength = GetShaderLocation(g_r.lit, "uShadowStrength");
 
   // Pleasant default morning sun; games override via BrushSetSun or drive it
   // from a clock with BrushRenderApplyTimeOfDay.
@@ -175,8 +176,18 @@ void BrushRenderExecute(Camera3D camera) {
   // SHADOW — depth-only pass from the sun over this frame's casters. Runs
   // before the scene target opens; receivers then sample the map via PCSS.
   int shadowCount = g_r.cmdCount[BRUSH_LAYER_SHADOW];
-  bool shadowsOn =
-      g_r.shadowsEnabled && g_r.shadow.ready && shadowCount > 0;
+  // Horizon fade (industry-standard sun/moon rig detail): near-horizontal
+  // light stretches every caster into a shimmering sliver across the whole
+  // scene, and the sun->moon handover happens at elevation 0 — so shadow
+  // strength eases in between ~1 and ~7 degrees of elevation. Below that the
+  // depth pass is skipped entirely (shadows would be invisible anyway).
+  float elev = g_r.sunDir.y;
+  float st = (elev - 0.02f) / (0.12f - 0.02f);
+  if (st < 0.0f) st = 0.0f;
+  if (st > 1.0f) st = 1.0f;
+  float shadowStrength = st * st * (3.0f - 2.0f * st);
+  bool shadowsOn = g_r.shadowsEnabled && g_r.shadow.ready &&
+                   shadowCount > 0 && shadowStrength > 0.001f;
   float shOff = 0.0f;
   SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOff, SHADER_UNIFORM_FLOAT);
   if (shadowsOn) {
@@ -198,6 +209,8 @@ void BrushRenderExecute(Camera3D camera) {
                    SHADER_UNIFORM_FLOAT);
     SetShaderValue(g_r.lit, g_r.locShadowMap, &g_r.shadow.slot,
                    SHADER_UNIFORM_INT);
+    SetShaderValue(g_r.lit, g_r.locShadowStrength, &shadowStrength,
+                   SHADER_UNIFORM_FLOAT);
     BrushShadowBindMap(&g_r.shadow);
   }
 

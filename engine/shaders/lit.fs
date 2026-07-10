@@ -33,6 +33,7 @@ uniform sampler2D shadowMap; // sun depth map (depth-only FBO)
 uniform float uShadowEnabled;
 uniform float uShadowSoftness; // light size in shadow texels
 uniform float uShadowTexel;    // 1.0 / shadow map resolution
+uniform float uShadowStrength; // horizon fade: 1 = full shadows, 0 = none
 
 // Returns 0 = fully lit, 1 = fully shadowed.
 float ShadowFactor(vec3 fragPos, float ndotl) {
@@ -70,7 +71,7 @@ float ShadowFactor(vec3 fragPos, float ndotl) {
         if (receiver >
             texture(shadowMap, proj.xy + (vec2(x, y) - 1.5) * radius).r)
             sh += 1.0;
-    return sh / 16.0;
+    return (sh / 16.0) * uShadowStrength;
 }
 
 out vec4 finalColor;
