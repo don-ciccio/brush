@@ -91,8 +91,12 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->sharpenAmount = EnvF("BRUSH_SHARPEN", 0.10f);
   pp->ssaoEnabled = (getenv("BRUSH_NO_SSAO") == NULL);
   pp->ssaoRadius = EnvF("BRUSH_SSAO_RADIUS", 0.5f);
-  pp->ssaoBias = EnvF("BRUSH_SSAO_BIAS", 0.025f);
-  pp->ssaoStrength = EnvF("BRUSH_SSAO_STRENGTH", 0.9f);
+  // Bias/strength are the donor's TUNED values. The bias operates in the
+  // shader's reconstructed view-Z units (not the textbook ~0.025 world-space
+  // bias) — dropping it to that caused depth-quantization self-occlusion:
+  // visible stripe banding across large tilted surfaces.
+  pp->ssaoBias = EnvF("BRUSH_SSAO_BIAS", 1.50f);
+  pp->ssaoStrength = EnvF("BRUSH_SSAO_STRENGTH", 0.50f);
   pp->smaaEnabled = (getenv("BRUSH_NO_SMAA") == NULL);
   pp->smaaThreshold = EnvF("BRUSH_SMAA_THRESH", 0.08f);
   pp->projectionMatrix = MatrixIdentity();
