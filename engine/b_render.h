@@ -76,10 +76,19 @@ struct BrushPost *BrushRenderGetPost(void);
 //   model.materials[i].shader = BrushGetLitShader();
 Shader BrushGetLitShader(void);
 
-// Single directional sun shared by the lit shader and the sky. `dir` points
-// TOWARD the sun. `ambient` is a flat ambient term (0..1).
-void BrushSetSun(Vector3 dir, Vector3 color, float ambient);
+// Single directional light shared by the lit shader, shadow pass, and (by
+// default) the sky. `dir` points TOWARD the light. `ambient` is the ambient
+// fill color (linear).
+void BrushSetSun(Vector3 dir, Vector3 color, Vector3 ambient);
 Vector3 BrushGetSunDir(void);
+
+// Drive the whole frame's lighting from a day/night clock (see b_tod.h):
+// sun direction/color, ambient fill, sky sun+moon, post exposure. At night
+// (sun below the horizon) the MOON becomes the directional light — the
+// engine's one light authority is animated, never duplicated. Call once per
+// frame after BrushTodUpdate; games with a static sun just never call it.
+struct BrushTimeOfDay;
+void BrushRenderApplyTimeOfDay(const struct BrushTimeOfDay *tod);
 
 void BrushSetSkyEnabled(bool enabled);
 

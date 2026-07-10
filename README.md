@@ -60,6 +60,7 @@ Run from the repo root (shaders load from `engine/shaders/`).
 | **F2** | Cycle render layer view |
 | **F3** | Toggle HDR post pipeline |
 | **F4** | Toggle sun shadows |
+| **[** / **]** | Scrub the time of day |
 
 ## Layout
 
@@ -70,6 +71,7 @@ engine/     the brush library — never includes game code
   b_render    the layer stack + lit shader
   b_post      HDR pipeline: bloom, ACES + grade composite, CAS upscale
   b_shadow    sun shadow map: ortho depth pass, texel-snapped follow, PCSS
+  b_tod       day/night clock: solar geometry + swappable look palette
   b_anim      skeletal animator: named clips, 1-D gait blend, jump phases
   b_sky       procedural atmospheric-scattering sky + FBM clouds
   b_camera    third-person orbit camera with hybrid auto-follow
@@ -87,7 +89,8 @@ Environment toggles: `BRUSH_PERF=1` (uncapped fps + frame-time logs),
 `BRUSH_NO_POST`, `BRUSH_RENDER_SCALE=0.75`, `BRUSH_EXPOSURE`,
 `BRUSH_BLOOM_THRESH`, `BRUSH_BLOOM_INT`, `BRUSH_SHARPEN`, `BRUSH_NO_SHARPEN`,
 `BRUSH_NO_P3` / `BRUSH_DISPLAY_P3`, `BRUSH_P3_STRENGTH`, `BRUSH_NO_SHADOW`,
-`BRUSH_SHADOW_RES=2048`, `BRUSH_SHADOW_SOFT=4`.
+`BRUSH_SHADOW_RES=2048`, `BRUSH_SHADOW_SOFT=4`, `BRUSH_TIME=<0..24h>`,
+`BRUSH_DAY_LENGTH=<seconds>`.
 
 ## License
 

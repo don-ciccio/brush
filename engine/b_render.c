@@ -8,6 +8,7 @@
 #include "b_post.h"
 #include "b_shadow.h"
 #include "b_sky.h"
+#include "b_tod.h"
 
 #include <raymath.h>
 #include <rlgl.h>
@@ -33,9 +34,11 @@ typedef struct BrushRenderState {
   int locLightVP, locShadowMap, locShadowEnabled;
   int locShadowSoftness, locShadowTexel;
 
-  Vector3 sunDir;
+  Vector3 sunDir;   // the directional LIGHT (sun by day, moon at night)
   Vector3 sunColor;
-  float ambient;
+  Vector3 ambient;  // ambient fill color (linear)
+  Vector3 skySunDir; // the actual sun, even below the horizon (sky shading)
+  Vector3 moonDir;
   bool skyEnabled;
 
   BrushLayerView layerView;
@@ -68,9 +71,11 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locShadowSoftness = GetShaderLocation(g_r.lit, "uShadowSoftness");
   g_r.locShadowTexel = GetShaderLocation(g_r.lit, "uShadowTexel");
 
-  // Pleasant default morning sun; games override via BrushSetSun.
-  BrushSetSun((Vector3){0.45f, 0.55f, 0.35f},
-              (Vector3){1.0f, 0.96f, 0.88f}, 0.38f);
+  // Pleasant default morning sun; games override via BrushSetSun or drive it
+  // from a clock with BrushRenderApplyTimeOfDay.
+  BrushSetSun((Vector3){0.45f, 0.55f, 0.35f}, (Vector3){1.0f, 0.96f, 0.88f},
+              (Vector3){0.36f, 0.38f, 0.42f});
+  g_r.moonDir = (Vector3){0.0f, -1.0f, 0.0f};
 
   float spec = 0.35f;
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
@@ -98,14 +103,36 @@ void BrushRenderShutdown(void) {
 
 Shader BrushGetLitShader(void) { return g_r.lit; }
 
-void BrushSetSun(Vector3 dir, Vector3 color, float ambient) {
+void BrushSetSun(Vector3 dir, Vector3 color, Vector3 ambient) {
   g_r.sunDir = Vector3Normalize(dir);
   g_r.sunColor = color;
   g_r.ambient = ambient;
+  g_r.skySunDir = g_r.sunDir; // static-sun games: sky follows the light
   SetShaderValue(g_r.lit, g_r.locSunDir, &g_r.sunDir, SHADER_UNIFORM_VEC3);
   SetShaderValue(g_r.lit, g_r.locSunColor, &g_r.sunColor,
                  SHADER_UNIFORM_VEC3);
-  SetShaderValue(g_r.lit, g_r.locAmbient, &g_r.ambient, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locAmbient, &g_r.ambient, SHADER_UNIFORM_VEC3);
+}
+
+void BrushRenderApplyTimeOfDay(const struct BrushTimeOfDay *tod) {
+  Vector3 sunDir = BrushTodSunDir(tod);
+  Vector3 moonDir = BrushTodMoonDir(tod);
+  Vector3 sunColor = BrushTodSunColor(tod);
+  Vector3 moonColor = BrushTodMoonColor(tod);
+
+  // Single-light handover: the sun is the directional light while up; once it
+  // sets, the moon (if risen) takes the same slot. The LUTs ramp both colors
+  // through black at the horizon, so the swap never pops.
+  bool moonlight = (sunDir.y <= 0.0f && moonDir.y > 0.0f);
+  BrushSetSun(moonlight ? moonDir : sunDir,
+              moonlight ? moonColor : sunColor, BrushTodAmbientColor(tod));
+
+  // The sky always shades from the TRUE sun (scattering needs it below the
+  // horizon too) plus the moon for night clouds/stars.
+  g_r.skySunDir = sunDir;
+  g_r.moonDir = moonDir;
+
+  if (g_r.post.ready) g_r.post.exposure = BrushTodExposure(tod);
 }
 
 Vector3 BrushGetSunDir(void) { return g_r.sunDir; }
@@ -193,7 +220,7 @@ void BrushRenderExecute(Camera3D camera) {
   // SKY — after opaque so the far-plane dome is early-Z rejected everywhere
   // geometry already wrote depth (only visible sky pixels pay for clouds).
   if (g_r.skyEnabled && g_r.layerView == BRUSH_VIEW_FINAL)
-    BrushSkyDraw(camera, g_r.sunDir);
+    BrushSkyDraw(camera, g_r.skySunDir, g_r.moonDir);
 
   // TRANSPARENT — back-to-front, depth-test on, depth-write off.
   int tCount = g_r.cmdCount[BRUSH_LAYER_TRANSPARENT];

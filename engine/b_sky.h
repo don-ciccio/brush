@@ -21,8 +21,9 @@
 void BrushSkyInit(void);
 void BrushSkyShutdown(void);
 
-// Draw the dome centered on the camera. `sunDir` points toward the sun.
-void BrushSkyDraw(Camera3D camera, Vector3 sunDir);
+// Draw the dome centered on the camera. `sunDir`/`moonDir` point toward the
+// bodies; the moon drives night cloud shading and star masking.
+void BrushSkyDraw(Camera3D camera, Vector3 sunDir, Vector3 moonDir);
 
 // Cloud drift (world XZ direction * speed) and haze factor.
 void BrushSkySetWind(Vector2 windDir);

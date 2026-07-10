@@ -45,9 +45,6 @@ void BrushSkyInit(void) {
                  SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_sky.shader, g_sky.locTurbidity, &g_sky.turbidity,
                  SHADER_UNIFORM_FLOAT);
-  Vector3 moonDown = {0.0f, -1.0f, 0.0f}; // below horizon until a moon exists
-  SetShaderValue(g_sky.shader, g_sky.locMoonDir, &moonDown,
-                 SHADER_UNIFORM_VEC3);
 }
 
 void BrushSkyShutdown(void) {
@@ -63,10 +60,12 @@ void BrushSkySetTurbidity(float turbidity) {
                  SHADER_UNIFORM_FLOAT);
 }
 
-void BrushSkyDraw(Camera3D camera, Vector3 sunDir) {
+void BrushSkyDraw(Camera3D camera, Vector3 sunDir, Vector3 moonDir) {
   float t = (float)GetTime();
   SetShaderValue(g_sky.shader, g_sky.locTime, &t, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_sky.shader, g_sky.locSunDir, &sunDir, SHADER_UNIFORM_VEC3);
+  SetShaderValue(g_sky.shader, g_sky.locMoonDir, &moonDir,
+                 SHADER_UNIFORM_VEC3);
   SetShaderValue(g_sky.shader, g_sky.locWindDir, &g_sky.windDir,
                  SHADER_UNIFORM_VEC2);
 

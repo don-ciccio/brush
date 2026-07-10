@@ -53,7 +53,18 @@ landing absorption, 2-D strafe blends.
    joined the F2 layer views. Future work when the world grows: cascades.
 3. ~~Render scale~~ — DONE, part of b_post (`BrushConfig.renderScale`,
    `BRUSH_RENDER_SCALE`). The HUD stays at native res.
-4. **Time of day**: animated sun + moon driving sky, shadows, exposure.
+4. ~~Time of day~~ — DONE (b_tod): 0..24h clock -> sun/moon directions from
+   real solar geometry (hour angle, seasonal declination, latitude), and an
+   elevation-keyed LUT palette (sun color, ambient color+level, fog color,
+   exposure). The palette is per-instance data — games swap in their own
+   keyframes to restyle the cycle; engine ships a neutral default (the donor
+   game's tuned meadow palette stays in the donor).
+   `BrushRenderApplyTimeOfDay` animates the single light authority: sun by
+   day, the moon takes the same directional slot at night (both colors ramp
+   through black at the horizon so the handover never pops). Ambient
+   generalized from a scalar to a color (indigo night fill). BRUSH_TIME /
+   BRUSH_DAY_LENGTH envs; sandbox scrubs with [ ]. Fog color query is ready
+   for the volumetric fog port.
 
 ## v1 — the open-world core
 

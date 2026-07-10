@@ -17,7 +17,7 @@ uniform vec4 colDiffuse;
 
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
-uniform float uAmbient;
+uniform vec3 uAmbient; // ambient fill color (linear)
 uniform vec3 viewPos;
 uniform float uSpecStrength;
 uniform int uLayerView;

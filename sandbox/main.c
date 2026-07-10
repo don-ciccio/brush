@@ -41,6 +41,7 @@ typedef struct Sandbox {
   float renderYaw;
 
   BrushOrbitCam camera;
+  BrushTimeOfDay tod;
 
   Model floor;
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
@@ -89,6 +90,8 @@ static void SandboxInit(void *user) {
 
   s->pos = s->prevPos = s->renderPos = (Vector3){0.0f, 0.0f, 0.0f};
   s->grounded = true;
+
+  BrushTodInit(&s->tod);
 
   BrushOrbitCamInit(&s->camera, s->pos);
 
@@ -198,6 +201,13 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   while (yawDiff < -PI) yawDiff += 2.0f * PI;
   s->renderYaw = s->prevYaw + yawDiff * alpha;
 
+  // Day/night clock drives the frame's whole lighting rig (sun/moon light,
+  // ambient, sky, exposure). [ and ] scrub the clock by the hour.
+  if (IsKeyDown(KEY_LEFT_BRACKET)) s->tod.timeHours -= 2.4f * dt;
+  if (IsKeyDown(KEY_RIGHT_BRACKET)) s->tod.timeHours += 2.4f * dt;
+  BrushTodUpdate(&s->tod, dt);
+  BrushRenderApplyTimeOfDay(&s->tod);
+
   BrushOrbitCamUpdate(&s->camera, s->renderPos, s->vel, dt);
 
   // Drive the animator from gameplay state (per rendered frame).
@@ -248,6 +258,10 @@ static void SandboxDrawUI(void *user) {
   DrawText(TextFormat("Press [F4] to toggle sun shadows: %s",
                       BrushRenderShadowsEnabled() ? "on" : "off"),
            16, 144, 20, DARKGRAY);
+  DrawText(TextFormat("Hold [ or ] to scrub time: %02d:%02d",
+                      (int)s->tod.timeHours,
+                      (int)(fmodf(s->tod.timeHours, 1.0f) * 60.0f)),
+           16, 170, 20, DARKGRAY);
   DrawText(TextFormat("%d FPS", GetFPS()), GetScreenWidth() - 110, 14, 24,
            (Color){90, 120, 200, 255});
 
