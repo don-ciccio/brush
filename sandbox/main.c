@@ -328,19 +328,16 @@ static void SandboxFixedUpdate(void *user, float dt) {
     if (TextIsEqual(autoMove, "walk")) inY = 0.45f;
   }
 
-  // --- Mantle in progress: the capsule is scripted, not simulated. Rise
-  // finishes by 60% of the ride, then slide onto the ledge — the capsule
-  // never pushes through the face. IK stays off (the clip owns the feet).
+  // --- Mantle in progress: the capsule is scripted, not simulated. The
+  // path is a straight LERP because that is what the clip was authored
+  // against: ClimbUp_1m's root-motion variant bakes a linear root ramp
+  // (measured in Blender: 1.68 m forward, 1.0 m up, constant rate) — any
+  // shaped path desyncs the body from the reaching hands/stepping feet.
+  // IK stays off (the clip owns the feet).
   if (s->mantleTimer > 0.0f) {
     s->mantleTimer -= dt;
     float t = 1.0f - fmaxf(s->mantleTimer, 0.0f) / s->mantleDur;
-    Vector3 p;
-    p.y = s->mantleFrom.y +
-          (s->mantleTo.y - s->mantleFrom.y) * fminf(t / 0.6f, 1.0f);
-    float f = fmaxf((t - 0.45f) / 0.55f, 0.0f);
-    f = f * f * (3.0f - 2.0f * f); // smoothstep the forward slide
-    p.x = s->mantleFrom.x + (s->mantleTo.x - s->mantleFrom.x) * f;
-    p.z = s->mantleFrom.z + (s->mantleTo.z - s->mantleFrom.z) * f;
+    Vector3 p = Vector3Lerp(s->mantleFrom, s->mantleTo, t);
     BrushPhysicsStep(&s->phys, dt);
     BrushCharacterWarp(&s->body, p);
     s->pos = p;
@@ -390,10 +387,14 @@ static void SandboxFixedUpdate(void *user, float dt) {
   if (s->jumpQueued && s->grounded) {
     Vector3 fwd = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
     Vector3 chest = Vector3Add(s->pos, (Vector3){0.0f, 0.7f, 0.0f});
-    Vector3 wallHit;
-    if (BrushPhysicsRaycast(&s->phys, chest, fwd, 0.9f, &wallHit, NULL)) {
-      Vector3 over = {wallHit.x + fwd.x * 0.35f, s->pos.y + 1.5f,
-                      wallHit.z + fwd.z * 0.35f};
+    Vector3 wallHit, wallN;
+    if (BrushPhysicsRaycast(&s->phys, chest, fwd, 0.9f, &wallHit, &wallN)) {
+      // Into-the-wall direction from the face normal (not the approach
+      // heading): the clip climbs square-on, so an oblique jump must snap
+      // the yaw to the face or the hands miss sideways.
+      Vector3 into = Vector3Normalize((Vector3){-wallN.x, 0.0f, -wallN.z});
+      Vector3 over = {wallHit.x + into.x * 0.35f, s->pos.y + 1.5f,
+                      wallHit.z + into.z * 0.35f};
       Vector3 topHit;
       if (BrushPhysicsRaycast(&s->phys, over, (Vector3){0, -1, 0}, 1.5f,
                               &topHit, NULL)) {
@@ -405,7 +406,11 @@ static void SandboxFixedUpdate(void *user, float dt) {
             s->mantleDur = clipDur * 0.92f; // ride matches the played span
             s->mantleTimer = s->mantleDur;
             s->mantleFrom = s->pos;
-            s->mantleTo = topHit;
+            // Land a fixed 0.4 m past the face (capsule radius + margin);
+            // height from the top probe.
+            s->mantleTo = (Vector3){wallHit.x + into.x * 0.4f, topHit.y,
+                                    wallHit.z + into.z * 0.4f};
+            s->yaw = atan2f(into.x, into.z);
             s->jumpQueued = false;
           }
         }
