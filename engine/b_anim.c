@@ -190,6 +190,8 @@ bool BrushAnimatorInit(BrushAnimator *a, Model *model, const char *animFile,
   a->boneThighR = FindBone(model, "thigh_r");
   a->boneCalfR = FindBone(model, "calf_r");
   a->boneFootR = FindBone(model, "foot_r");
+  a->boneBallL = FindBone(model, "ball_l");
+  a->boneBallR = FindBone(model, "ball_r");
   if (a->boneThighL < 0 || a->boneCalfL < 0 || a->boneFootL < 0 ||
       a->boneThighR < 0 || a->boneCalfR < 0 || a->boneFootR < 0)
     TraceLog(LOG_WARNING,
@@ -485,23 +487,36 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     float cy = cosf(in.yawRad), sy = sinf(in.yawRad);
     for (int side = 0; side < 2; side++) {
       int footBone = side == 0 ? a->boneFootL : a->boneFootR;
-      Vector3 ankle = a->blendPose[footBone].translation;
-      // Model space -> world (yaw about Y, then translate).
-      Vector3 probe = {
-          in.worldPos.x + ankle.x * cy + ankle.z * sy,
-          in.worldPos.y + ankle.y,
-          in.worldPos.z - ankle.x * sy + ankle.z * cy,
-      };
-      float hitY;
-      Vector3 n = {0, 1, 0};
+      int ballBone = side == 0 ? a->boneBallL : a->boneBallR;
       float d = 0.0f;
-      if (in.groundFn(in.groundUser, probe, &hitY, &n)) {
-        d = hitY - baseY;
+      Vector3 n = {0, 1, 0};
+      // Probe under the ankle AND under the toes (ball joint): facing uphill
+      // the ground rises along the foot, and an ankle-only probe leaves the
+      // toe tip buried. The higher of the two drives the ankle target.
+      for (int p = 0; p < 2; p++) {
+        int bone = (p == 0) ? footBone : ballBone;
+        if (bone < 0) continue;
+        Vector3 joint = a->blendPose[bone].translation;
+        // Model space -> world (yaw about Y, then translate).
+        Vector3 probe = {
+            in.worldPos.x + joint.x * cy + joint.z * sy,
+            in.worldPos.y + joint.y,
+            in.worldPos.z - joint.x * sy + joint.z * cy,
+        };
+        float hitY;
+        Vector3 pn = {0, 1, 0};
+        if (!in.groundFn(in.groundUser, probe, &hitY, &pn)) continue;
+        float pd = hitY - baseY;
         // Ledge rejection: ground far below the foot (overhanging an edge)
         // is unreachable — chasing it drags the pelvis down and buries the
         // planted foot. Ignore it instead of clamping toward it.
-        if (d < -0.45f) d = 0.0f;
-        d = Clamp(d, -0.45f, 0.5f) * w;
+        if (pd < -0.45f) pd = 0.0f;
+        pd = Clamp(pd, -0.45f, 0.5f) * w;
+        if (p == 0 || pd > d) {
+          if (p == 0) n = pn; // the foot aims to the ANKLE contact's normal
+          d = fmaxf(d, pd);
+        }
+        if (p == 0) d = pd;
       }
       if (side == 0) { targetDL = d; normL = n; }
       else { targetDR = d; normR = n; }
