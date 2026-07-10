@@ -54,11 +54,17 @@ typedef struct Sandbox {
 
   BrushWorld *world; // chunk-streamed terrain (flat by default)
   Texture2D groundTex;
-  Model crate;
+
+  // Blockout gym (UE third-person-template style): unit cube scaled per
+  // block, one shared model; every block registers a matching box collider.
+  Model unitCube;
+  struct {
+    Vector3 pos, size;
+    Color color;
+  } blocks[48];
+  int blockCount;
   Model ramp;
   Matrix rampXform;
-  Vector3 crateA, crateB, crateB2, crateC; // seated on the terrain
-  Vector3 rampPos;
 
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
@@ -135,6 +141,16 @@ static bool CameraObstructed(Vector3 from, Vector3 to, Vector3 *hitPoint,
                              hitPoint, NULL);
 }
 
+// Add a gym block: visual (drawn from the shared unit cube) + box collider.
+static void AddBlock(Sandbox *s, Vector3 pos, Vector3 size, Color color) {
+  if (s->blockCount >= (int)(sizeof(s->blocks) / sizeof(s->blocks[0]))) return;
+  s->blocks[s->blockCount].pos = pos;
+  s->blocks[s->blockCount].size = size;
+  s->blocks[s->blockCount].color = color;
+  s->blockCount++;
+  BrushPhysicsAddStaticBox(&s->phys, pos, size, 0, "block");
+}
+
 // ------------------------------------------------------------------
 // Init: build every asset procedurally
 // ------------------------------------------------------------------
@@ -197,31 +213,51 @@ static void SandboxInit(void *user) {
   s->pos = s->prevPos = s->renderPos = (Vector3){spx, groundY + 0.2f, spz};
   s->grounded = true;
 
-  // Obstacle course, each piece seated on the terrain surface.
-  s->crate = LoadModelFromMesh(GenMeshCube(1.5f, 1.5f, 1.5f));
-  s->crate.materials[0].shader = BrushGetLitShader();
-  float ga = BrushWorldGroundHeight(s->world, 3.0f, -6.0f);
-  float gb = BrushWorldGroundHeight(s->world, -2.5f, -9.0f);
-  float gc = BrushWorldGroundHeight(s->world, 0.0f, -10.0f);
-  s->crateA = (Vector3){3.0f, ga + 0.75f, -6.0f};
-  s->crateB = (Vector3){-2.5f, gb + 0.75f, -9.0f};
-  s->crateB2 = (Vector3){-2.5f, gb + 2.25f, -9.0f};
-  s->crateC = (Vector3){0.0f, gc + 0.75f, -10.0f};
-  BrushPhysicsAddStaticBox(&s->phys, s->crateA, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate A");
-  BrushPhysicsAddStaticBox(&s->phys, s->crateB, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B");
-  BrushPhysicsAddStaticBox(&s->phys, s->crateB2, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B top");
-  BrushPhysicsAddStaticBox(&s->phys, s->crateC, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate C");
+  // --- Blockout gym (UE third-person-template style): a walled arena with
+  // platforms at two heights, a ramp chain, a staircase, and stacked crates.
+  // Every piece exercises a character system: stairs -> Jolt stair-step,
+  // ramp -> slope IK, platforms -> jumps and ledge handling. Flat terrain by
+  // default puts everything at ground level; with BRUSH_HILLS the ground
+  // height query seats the gym on the terrain.
+  s->unitCube = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
+  s->unitCube.materials[0].shader = BrushGetLitShader();
+  float gy = BrushWorldGroundHeight(s->world, 0.0f, -14.0f);
 
-  // Ramp (rotated slab -> triangle-MESH collider path). Visual + collision
-  // share the transform.
-  s->ramp = LoadModelFromMesh(GenMeshCube(6.0f, 0.4f, 10.0f));
+  Color wallCol = (Color){168, 172, 180, 255};
+  Color platCol = (Color){140, 146, 158, 255};
+  Color stepCol = (Color){110, 130, 168, 255};
+  Color crateCol = (Color){170, 120, 70, 255};
+
+  // Arena walls (x in [-14,14], z in [-26,-2]), opening on the south side.
+  AddBlock(s, (Vector3){0, gy + 1.5f, -26}, (Vector3){28.6f, 3, 0.6f}, wallCol);
+  AddBlock(s, (Vector3){-9.25f, gy + 1.5f, -2}, (Vector3){10.1f, 3, 0.6f}, wallCol);
+  AddBlock(s, (Vector3){9.25f, gy + 1.5f, -2}, (Vector3){10.1f, 3, 0.6f}, wallCol);
+  AddBlock(s, (Vector3){-14, gy + 1.5f, -14}, (Vector3){0.6f, 3, 24.6f}, wallCol);
+  AddBlock(s, (Vector3){14, gy + 1.5f, -14}, (Vector3){0.6f, 3, 24.6f}, wallCol);
+
+  // High platform (top at 2 m) + low platform (top at 1 m) beside it.
+  AddBlock(s, (Vector3){9, gy + 1.0f, -21}, (Vector3){8, 2, 7}, platCol);
+  AddBlock(s, (Vector3){2.5f, gy + 0.5f, -21}, (Vector3){5, 1, 5}, platCol);
+
+  // Staircase onto the low platform (0.33 m risers — Jolt stair-step range).
+  AddBlock(s, (Vector3){2.5f, gy + 0.165f, -17.2f}, (Vector3){3, 0.33f, 0.9f}, stepCol);
+  AddBlock(s, (Vector3){2.5f, gy + 0.33f, -18.0f}, (Vector3){3, 0.66f, 0.9f}, stepCol);
+
+  // Stacked crates for jump tests + a lone one inside the arena.
+  AddBlock(s, (Vector3){-4, gy + 0.75f, -5}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+  AddBlock(s, (Vector3){-4, gy + 2.25f, -5}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+  AddBlock(s, (Vector3){-9, gy + 0.75f, -20}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+
+  // Ramp chain up to the high platform: a rotated slab (triangle-MESH
+  // collider path) rising 2 m over ~6.3 m (18 deg), meeting the platform lip.
+  s->ramp = LoadModelFromMesh(GenMeshCube(3.0f, 0.3f, 6.6f));
   s->ramp.materials[0].shader = BrushGetLitShader();
-  float gr = BrushWorldGroundHeight(s->world, 8.0f, -12.0f);
-  s->rampPos = (Vector3){8.0f, gr + 1.55f, -12.0f};
+  float rampAng = atan2f(2.0f, 6.3f);
   s->rampXform = MatrixMultiply(
-      MatrixRotateX(-20.0f * DEG2RAD),
-      MatrixTranslate(s->rampPos.x, s->rampPos.y, s->rampPos.z));
-  BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0, "ramp");
+      MatrixRotateX(rampAng),
+      MatrixTranslate(9.0f, gy + 1.14f, -14.35f));
+  BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
+                            "ramp");
 
   // Kinematic capsule: radius/height match the mannequin (1.83 m tall).
   BrushCharacterInit(&s->body, &s->phys, s->pos, 0.30f, 1.80f);
@@ -430,19 +466,15 @@ static void SandboxDraw(void *user) {
   // Streamed terrain (frustum-culled chunks -> opaque + shadow layers).
   BrushWorldSubmit(s->world, s->camera.cam);
 
-  Color crateCol = (Color){170, 120, 70, 255};
-  Matrix mA = MatrixTranslate(s->crateA.x, s->crateA.y, s->crateA.z);
-  Matrix mB = MatrixTranslate(s->crateB.x, s->crateB.y, s->crateB.z);
-  Matrix mB2 = MatrixTranslate(s->crateB2.x, s->crateB2.y, s->crateB2.z);
-  Matrix mC = MatrixTranslate(s->crateC.x, s->crateC.y, s->crateC.z);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mC, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mC, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mA, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mA, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mB, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mB, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mB2, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mB2, crateCol);
+  for (int i = 0; i < s->blockCount; i++) {
+    Matrix xf = MatrixMultiply(
+        MatrixScale(s->blocks[i].size.x, s->blocks[i].size.y,
+                    s->blocks[i].size.z),
+        MatrixTranslate(s->blocks[i].pos.x, s->blocks[i].pos.y,
+                        s->blocks[i].pos.z));
+    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, s->blocks[i].color);
+    BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, s->blocks[i].color);
+  }
   Color rampCol = (Color){120, 130, 150, 255};
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->ramp, s->rampXform, rampCol);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
@@ -514,7 +546,7 @@ static void SandboxShutdown(void *user) {
   BrushCharacterCleanup(&s->body, &s->phys);
   BrushPhysicsCleanup(&s->phys);
   BrushAnimatorUnload(&s->animator);
-  UnloadModel(s->crate);
+  UnloadModel(s->unitCube);
   UnloadModel(s->ramp);
   UnloadModel(s->mannequin);
 }

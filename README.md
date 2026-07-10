@@ -91,6 +91,7 @@ engine/     the brush library — never includes game code
   b_console   F1 log console
   shaders/    GLSL (330)
 sandbox/    the starter game — the template you copy to begin a new game
+            (blockout gym: walls, platforms, ramp chain, stairs, crates)
 external/   vendored dependencies (joltc -> Jolt Physics)
 assets/     CC0 content only (Quaternius mannequin + animations)
 docs/       roadmap and design notes
