@@ -265,10 +265,6 @@ void main()
         sky = mix(sky, cloudCol, density);
     }
 
-    // brush v0 has no HDR post pass yet, so tone-map + gamma here so the sky
-    // reads correctly on the LDR backbuffer. When the HDR pipeline is ported,
-    // this returns to linear output (sky * uExposure) and post takes over.
-    vec3 mapped = vec3(1.0) - exp(-sky * uExposure * 1.6);
-    mapped = pow(mapped, vec3(1.0 / 2.2));
-    finalColor = vec4(mapped, 1.0);
+    // Linear HDR out — tone mapping happens ONCE, in the post composite.
+    finalColor = vec4(sky * uExposure, 1.0);
 }

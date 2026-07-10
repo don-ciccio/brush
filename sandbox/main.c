@@ -259,6 +259,9 @@ static void SandboxDrawUI(void *user) {
   DrawText(TextFormat("Press [F2] to cycle layer view: %s",
                       BrushRenderLayerViewName()),
            16, 92, 20, DARKGRAY);
+  DrawText(TextFormat("Press [F3] to toggle HDR post: %s",
+                      BrushRenderIsPostEnabled() ? "on" : "off"),
+           16, 118, 20, DARKGRAY);
   DrawText(TextFormat("%d FPS", GetFPS()), GetScreenWidth() - 110, 14, 24,
            (Color){90, 120, 200, 255});
 

@@ -31,10 +31,13 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
   InitWindow(cfg.width, cfg.height, cfg.title);
   SetTargetFPS(perfMode ? 0 : cfg.targetFPS);
 
+  const char *scaleEnv = getenv("BRUSH_RENDER_SCALE");
+  if (scaleEnv != NULL) cfg.renderScale = (float)atof(scaleEnv);
+
   // ESC belongs to game menus, not the window-close binding.
   SetExitKey(KEY_NULL);
 
-  BrushRenderInit();
+  BrushRenderInit(cfg.width, cfg.height, cfg.renderScale);
 
   if (cb.init) cb.init(cb.user);
 
@@ -48,6 +51,7 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
     // Debug hotkeys owned by the engine.
     if (IsKeyPressed(KEY_F1)) BrushConsoleToggle();
     if (IsKeyPressed(KEY_F2)) BrushRenderCycleLayerView();
+    if (IsKeyPressed(KEY_F3)) BrushRenderTogglePost();
 
     // Fixed-timestep simulation with a substep cap: movement feel is
     // identical at any render rate, and a long hitch can't spiral.

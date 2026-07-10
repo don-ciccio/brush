@@ -14,6 +14,10 @@
  *     TRANSPARENT  alpha-blended, sorted back-to-front, depth-write off
  *     VOLUME       volumetrics (fog, god rays) — reserved, executes empty
  *
+ *   With the HDR post pipeline enabled (default), the whole stack renders
+ *   into a linear RGBA16F target and b_post does bloom -> ACES tone map ->
+ *   grade -> CAS-sharpened upscale to the backbuffer (see b_post.h).
+ *
  *   F2 (BrushRenderCycleLayerView) isolates the lighting terms of the opaque
  *   pass on screen: final / albedo / diffuse / specular / normals. The same
  *   decomposition later becomes real intermediate targets when the HDR
@@ -47,8 +51,20 @@ typedef enum {
   BRUSH_VIEW_COUNT
 } BrushLayerView;
 
-void BrushRenderInit(void);     // loads the lit shader + sky (called by BrushRun)
+// Called by BrushRun. `width/height` is the logical resolution; `renderScale`
+// (0.25..1, 0 -> 1.0) sizes the internal HDR scene target (see b_post.h).
+void BrushRenderInit(int width, int height, float renderScale);
 void BrushRenderShutdown(void);
+
+// HDR post pipeline toggle (F3; starts enabled unless BRUSH_NO_POST is set).
+// While a debug layer view is active the post pass is bypassed automatically
+// so the isolated lighting terms stay readable (no tone map / grade on them).
+void BrushRenderTogglePost(void);
+bool BrushRenderIsPostEnabled(void);
+
+// Access the post pipeline's tunables (bloom threshold/intensity, exposure,
+// sharpen). Returns NULL if the HDR target could not be created.
+struct BrushPost *BrushRenderGetPost(void);
 
 // The engine's forward lit shader. Assign it to your models' materials:
 //   model.materials[i].shader = BrushGetLitShader();

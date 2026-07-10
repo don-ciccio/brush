@@ -20,7 +20,12 @@ uniform vec3 uSunColor;
 uniform float uAmbient;
 uniform vec3 viewPos;
 uniform float uSpecStrength;
-uniform int uLayerView;      // 0 final, 1 albedo, 2 diffuse, 3 specular, 4 normals
+uniform int uLayerView;
+// 1 when the HDR post path is active: albedo inputs (textures/colors) are
+// authored in sRGB, so decode them to linear here — the post composite
+// gamma-encodes ONCE at the end. 0 on the direct LDR path (no post), where
+// output stays in the authored space.
+uniform float uLinearize;      // 0 final, 1 albedo, 2 diffuse, 3 specular, 4 normals
 
 out vec4 finalColor;
 
@@ -28,6 +33,7 @@ void main()
 {
     vec4 tex = texture(texture0, fragTexCoord);
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb;
+    if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 
     vec3 N = normalize(fragNormal);
     vec3 L = normalize(uSunDir);

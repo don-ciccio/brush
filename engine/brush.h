@@ -21,6 +21,7 @@
 #include "b_camera.h"
 #include "b_console.h"
 #include "b_input.h"
+#include "b_post.h"
 #include "b_render.h"
 #include "b_sky.h"
 

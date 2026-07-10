@@ -37,13 +37,19 @@ landing absorption, 2-D strafe blends.
 
 ## v0.x — pipeline depth (ports from the donor)
 
-1. **HDR post pipeline**: scene renders to a float target; bloom (multi-scale),
-   tone map, color grade, CAS sharpen, SSAO, SMAA. The F2 debug views become
-   real intermediate targets; sky returns to linear output.
+1. **HDR post pipeline — core DONE** (b_post): linear RGBA16F scene target at
+   an internal render scale, hue-preserving bright pass, 3-mip multi-scale
+   bloom, ACES tone map + CDL grade + vibrance + vignette + film grain +
+   Display P3 gamut map, CAS sharpen fused into the final upscale. Sky is back
+   to linear HDR output; the lit shader linearizes sRGB albedo on the HDR path
+   so tone mapping happens exactly once. F3 toggles; debug layer views bypass
+   post. Still to port from the donor: **SSAO**, **SMAA**, DOF, god rays,
+   volumetric fog (the scene target already keeps a sampleable depth texture
+   for them).
 2. **Shadow mapping**: sun depth pass executes the `BRUSH_LAYER_SHADOW`
    submissions (API already accepts them).
-3. **Render scale**: internal resolution decoupled from window/HUD resolution
-   (the retina thermal lever).
+3. ~~Render scale~~ — DONE, part of b_post (`BrushConfig.renderScale`,
+   `BRUSH_RENDER_SCALE`). The HUD stays at native res.
 4. **Time of day**: animated sun + moon driving sky, shadows, exposure.
 
 ## v1 — the open-world core

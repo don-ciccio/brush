@@ -13,9 +13,9 @@
  *                    BrushRenderExecute()
  *     drawUI       - 2D overlay (HUD, menus), drawn after the 3D frame
  *
- *   The app layer also owns the debug hotkeys (F1 console, F2 layer view) and
- *   the BRUSH_AUTO_SCREENSHOT harness (screenshot at frame 180, then exit)
- *   used for automated visual verification.
+ *   The app layer also owns the debug hotkeys (F1 console, F2 layer view,
+ *   F3 post pipeline) and the BRUSH_AUTO_SCREENSHOT harness (screenshot at
+ *   frame 180, then exit) used for automated visual verification.
  *
  *   LICENSE: zlib/libpng
  ********************************************************************************************/
@@ -35,6 +35,8 @@ typedef struct BrushConfig {
   const char *title;
   int targetFPS;    // 0 -> 60
   bool noVsync;     // set for uncapped profiling runs
+  float renderScale; // internal HDR scene scale, 0.25..1 (0 -> 1.0). The main
+                     // GPU-cost lever: heavy passes run at scale^2 pixels.
 } BrushConfig;
 
 typedef struct BrushCallbacks {
