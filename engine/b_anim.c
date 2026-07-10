@@ -104,12 +104,16 @@ static const ModelAnimation *Clip(const BrushAnimator *a, BrushClip id) {
 
 // Global-pose blending lerps bone POSITIONS, and between very different
 // poses (airborne tuck vs land crouch) the linear chord SHORTENS limb
-// segments mid-blend — visibly thinner/shorter legs. Restore every segment
-// to its bind length, walking parents-first (raylib sorts parents before
-// children).
+// segments mid-blend — visibly thinner/shorter legs. Restore RIGID limb
+// segments to their bind length, walking parents-first (raylib sorts parents
+// before children). ONLY rotation-driven joints qualify: segments that
+// legitimately animate their translation (root->pelvis carries crouches and
+// landing dips!) must never be rescaled — forcing them to bind length erases
+// the authored pelvis motion and contorts the pose.
 static void FixBoneLengths(BrushAnimator *a) {
   for (int i = 0; i < a->boneCount; i++) {
     int p = a->model->bones[i].parent;
+    if (!a->fixLenMask[i]) continue;
     if (p < 0 || a->bindLen[i] <= 0.0001f) continue;
     Vector3 d = Vector3Subtract(a->blendPose[i].translation,
                                 a->blendPose[p].translation);
@@ -221,12 +225,26 @@ bool BrushAnimatorInit(BrushAnimator *a, Model *model, const char *animFile,
 
   int bc = a->boneCount;
   a->bindLen = (float *)MemAlloc(sizeof(float) * (size_t)bc);
+  a->fixLenMask = (bool *)MemAlloc(sizeof(bool) * (size_t)bc);
+  static const char *const RIGID_SEGMENTS[] = {
+      "thigh_l",    "calf_l",     "foot_l", "ball_l",
+      "thigh_r",    "calf_r",     "foot_r", "ball_r",
+      "upperarm_l", "lowerarm_l", "hand_l",
+      "upperarm_r", "lowerarm_r", "hand_r",
+  };
   for (int i = 0; i < bc; i++) {
     int p = model->bones[i].parent;
     a->bindLen[i] =
         (p >= 0) ? Vector3Distance(model->bindPose[i].translation,
                                    model->bindPose[p].translation)
                  : 0.0f;
+    a->fixLenMask[i] = false;
+    for (size_t r = 0; r < sizeof(RIGID_SEGMENTS) / sizeof(*RIGID_SEGMENTS);
+         r++)
+      if (TextIsEqual(model->bones[i].name, RIGID_SEGMENTS[r])) {
+        a->fixLenMask[i] = true;
+        break;
+      }
   }
   a->blendPose = (Transform *)MemAlloc(sizeof(Transform) * (size_t)bc);
   a->poseA = (Transform *)MemAlloc(sizeof(Transform) * (size_t)bc);
@@ -663,6 +681,7 @@ void BrushAnimatorUnload(BrushAnimator *a) {
   if (a == NULL) return;
   if (a->anims != NULL) UnloadModelAnimations(a->anims, a->animCount);
   if (a->bindLen) MemFree(a->bindLen);
+  if (a->fixLenMask) MemFree(a->fixLenMask);
   if (a->blendPose) MemFree(a->blendPose);
   if (a->poseA) MemFree(a->poseA);
   if (a->poseB) MemFree(a->poseB);
