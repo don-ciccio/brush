@@ -45,15 +45,23 @@ the UAL packs ship no strafe clips — donor used procedural lean for lateral).
 
 ## v0.x — pipeline depth (ports from the donor)
 
-1. **HDR post pipeline — core DONE** (b_post): linear RGBA16F scene target at
-   an internal render scale, hue-preserving bright pass, 3-mip multi-scale
+1. **HDR post pipeline — DONE** (b_post): linear RGBA16F scene target at an
+   internal render scale, hue-preserving bright pass, 3-mip multi-scale
    bloom, ACES tone map + CDL grade + vibrance + vignette + film grain +
-   Display P3 gamut map, CAS sharpen fused into the final upscale. Sky is back
-   to linear HDR output; the lit shader linearizes sRGB albedo on the HDR path
-   so tone mapping happens exactly once. F3 toggles; debug layer views bypass
-   post. Still to port from the donor: **SSAO**, **SMAA**, DOF, god rays,
-   volumetric fog (the scene target already keeps a sampleable depth texture
-   for them).
+   Display P3 gamut map, CAS sharpen fused into the final upscale. F3
+   toggles; debug layer views bypass post.
+   **SSAO — DONE**: half-render-res, depth-reconstructed view positions +
+   derivative normals, 24-sample rotated hemisphere kernel, 4x4 box blur,
+   multiplied into the scene (not bloom) in the composite. Camera matrices
+   captured inside BeginMode3D so reconstruction matches rasterization.
+   F5 toggles; BRUSH_NO_SSAO / BRUSH_SSAO_RADIUS / _BIAS / _STRENGTH.
+   **SMAA 1x — DONE**: 3 passes (edges -> blend weights -> neighborhood
+   blend) on the LDR present image before the CAS upscale — the FBO path has
+   no MSAA, so this is the engine's AA. Lookup textures ship in assets/smaa
+   (SMAA reference implementation, MIT — see LICENSE.txt there). F6 toggles;
+   BRUSH_NO_SMAA / BRUSH_SMAA_THRESH.
+   Still to port from the donor: DOF, god rays, volumetric fog (the scene
+   depth texture is already sampleable for them).
 2. ~~Shadow mapping~~ — DONE (b_shadow): depth-only ortho pass over the
    `BRUSH_LAYER_SHADOW` submissions, PCSS soft shadows in the lit shader
    (blocker search -> penumbra-widening PCF), light box follows the view

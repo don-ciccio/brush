@@ -6,8 +6,11 @@
 
 #include "b_post.h"
 
+#include <raymath.h>
 #include <rlgl.h>
 #include <stdlib.h>
+
+static float Frand(void) { return (float)rand() / (float)RAND_MAX; }
 
 // Env override for fast look tuning without a rebuild.
 static float EnvF(const char *name, float fallback) {
@@ -86,6 +89,14 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->exposure = EnvF("BRUSH_EXPOSURE", 1.0f);
   pp->sharpenEnabled = (getenv("BRUSH_NO_SHARPEN") == NULL);
   pp->sharpenAmount = EnvF("BRUSH_SHARPEN", 0.10f);
+  pp->ssaoEnabled = (getenv("BRUSH_NO_SSAO") == NULL);
+  pp->ssaoRadius = EnvF("BRUSH_SSAO_RADIUS", 0.5f);
+  pp->ssaoBias = EnvF("BRUSH_SSAO_BIAS", 0.025f);
+  pp->ssaoStrength = EnvF("BRUSH_SSAO_STRENGTH", 0.9f);
+  pp->smaaEnabled = (getenv("BRUSH_NO_SMAA") == NULL);
+  pp->smaaThreshold = EnvF("BRUSH_SMAA_THRESH", 0.08f);
+  pp->projectionMatrix = MatrixIdentity();
+  pp->viewMatrix = MatrixIdentity();
 #if defined(__APPLE__)
   pp->displayP3 = (getenv("BRUSH_NO_P3") == NULL) ? 1.0f : 0.0f;
 #else
@@ -106,6 +117,23 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   SetTextureFilter(pp->present.texture, TEXTURE_FILTER_BILINEAR);
   SetTextureWrap(pp->present.texture, TEXTURE_WRAP_CLAMP);
 
+  // SSAO at half render-res (8-bit is plenty for an occlusion factor).
+  pp->aoRaw = LoadRenderTexture(pp->renderW / 2, pp->renderH / 2);
+  pp->aoBlur = LoadRenderTexture(pp->renderW / 2, pp->renderH / 2);
+  SetTextureFilter(pp->aoBlur.texture, TEXTURE_FILTER_BILINEAR);
+  SetTextureWrap(pp->aoBlur.texture, TEXTURE_WRAP_CLAMP);
+
+  // SMAA pass targets at logical res (it runs on the LDR present image).
+  pp->smaaEdgesTex = LoadRenderTexture(pp->outW, pp->outH);
+  pp->smaaBlendTex = LoadRenderTexture(pp->outW, pp->outH);
+  pp->presentAA = LoadRenderTexture(pp->outW, pp->outH);
+  SetTextureFilter(pp->smaaEdgesTex.texture, TEXTURE_FILTER_BILINEAR);
+  SetTextureFilter(pp->smaaBlendTex.texture, TEXTURE_FILTER_BILINEAR);
+  SetTextureFilter(pp->presentAA.texture, TEXTURE_FILTER_BILINEAR);
+  SetTextureWrap(pp->smaaEdgesTex.texture, TEXTURE_WRAP_CLAMP);
+  SetTextureWrap(pp->smaaBlendTex.texture, TEXTURE_WRAP_CLAMP);
+  SetTextureWrap(pp->presentAA.texture, TEXTURE_WRAP_CLAMP);
+
   pp->bright = LoadShader(NULL, "engine/shaders/bloom_bright.fs");
   pp->blur = LoadShader(NULL, "engine/shaders/blur.fs");
   pp->composite = LoadShader(NULL, "engine/shaders/composite.fs");
@@ -124,6 +152,82 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locSharpTexel = GetShaderLocation(pp->sharpen, "uTexel");
   pp->locSharpAmount = GetShaderLocation(pp->sharpen, "uSharpen");
 
+  // --- SSAO ---
+  pp->ssao = LoadShader(NULL, "engine/shaders/ssao.fs");
+  pp->ssaoBlur = LoadShader(NULL, "engine/shaders/ssao_blur.fs");
+  pp->locSsaoDepth = GetShaderLocation(pp->ssao, "uDepth");
+  pp->locSsaoNoise = GetShaderLocation(pp->ssao, "uNoise");
+  pp->locSsaoKernel = GetShaderLocation(pp->ssao, "uSamples");
+  pp->locSsaoProj = GetShaderLocation(pp->ssao, "uProjection");
+  pp->locSsaoInvProj = GetShaderLocation(pp->ssao, "uInvProjection");
+  pp->locSsaoNoiseScale = GetShaderLocation(pp->ssao, "uNoiseScale");
+  pp->locSsaoRadius = GetShaderLocation(pp->ssao, "uRadius");
+  pp->locSsaoBias = GetShaderLocation(pp->ssao, "uBias");
+  pp->locSsaoStrength = GetShaderLocation(pp->ssao, "uStrength");
+  pp->locSsaoBlurTexel = GetShaderLocation(pp->ssaoBlur, "uTexel");
+  pp->locAOTex = GetShaderLocation(pp->composite, "uAO");
+  pp->locAOEnabled = GetShaderLocation(pp->composite, "uAOEnabled");
+
+  // Hemisphere kernel: cosine-ish samples packed toward the origin so
+  // near-surface occlusion dominates (LearnOpenGL-style).
+  for (int i = 0; i < BRUSH_SSAO_KERNEL; i++) {
+    float x = Frand() * 2.0f - 1.0f;
+    float y = Frand() * 2.0f - 1.0f;
+    float z = Frand(); // hemisphere: z in [0,1]
+    float len = sqrtf(x * x + y * y + z * z);
+    if (len < 1e-5f) len = 1.0f;
+    float t = (float)i / (float)BRUSH_SSAO_KERNEL;
+    float scale = 0.1f + 0.9f * t * t;
+    float sc = Frand() * scale / len;
+    pp->ssaoKernel[i * 3 + 0] = x * sc;
+    pp->ssaoKernel[i * 3 + 1] = y * sc;
+    pp->ssaoKernel[i * 3 + 2] = z * sc;
+  }
+  SetShaderValueV(pp->ssao, pp->locSsaoKernel, pp->ssaoKernel,
+                  SHADER_UNIFORM_VEC3, BRUSH_SSAO_KERNEL);
+
+  // 4x4 noise of random rotation vectors, tiled per pixel.
+  Color noisePix[16];
+  for (int i = 0; i < 16; i++) {
+    float nx = Frand() * 2.0f - 1.0f;
+    float ny = Frand() * 2.0f - 1.0f;
+    noisePix[i] = (Color){(unsigned char)((nx * 0.5f + 0.5f) * 255.0f),
+                          (unsigned char)((ny * 0.5f + 0.5f) * 255.0f), 128,
+                          255};
+  }
+  Image noiseImg = {.data = noisePix,
+                    .width = 4,
+                    .height = 4,
+                    .mipmaps = 1,
+                    .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+  pp->noise = LoadTextureFromImage(noiseImg);
+  SetTextureFilter(pp->noise, TEXTURE_FILTER_POINT);
+  SetTextureWrap(pp->noise, TEXTURE_WRAP_REPEAT);
+
+  // --- SMAA 1x ---
+  pp->smaaEdges = LoadShader(NULL, "engine/shaders/smaa_edges.fs");
+  pp->smaaWeights = LoadShader(NULL, "engine/shaders/smaa_weights.fs");
+  pp->smaaBlend = LoadShader(NULL, "engine/shaders/smaa_blend.fs");
+  pp->smaaArea = LoadTexture("assets/smaa/AreaTex.png");
+  pp->smaaSearch = LoadTexture("assets/smaa/SearchTex.png");
+  SetTextureFilter(pp->smaaArea, TEXTURE_FILTER_BILINEAR);
+  SetTextureFilter(pp->smaaSearch, TEXTURE_FILTER_POINT);
+  SetTextureWrap(pp->smaaArea, TEXTURE_WRAP_CLAMP);
+  SetTextureWrap(pp->smaaSearch, TEXTURE_WRAP_CLAMP);
+  if (pp->smaaArea.id == 0 || pp->smaaSearch.id == 0) {
+    TraceLog(LOG_WARNING,
+             "BRUSH post: SMAA lookup textures missing (assets/smaa) — SMAA "
+             "disabled");
+    pp->smaaEnabled = false;
+  }
+  pp->locEdgesMetrics = GetShaderLocation(pp->smaaEdges, "uMetrics");
+  pp->locEdgesThreshold = GetShaderLocation(pp->smaaEdges, "uThreshold");
+  pp->locWeightsMetrics = GetShaderLocation(pp->smaaWeights, "uMetrics");
+  pp->locWeightsArea = GetShaderLocation(pp->smaaWeights, "uArea");
+  pp->locWeightsSearch = GetShaderLocation(pp->smaaWeights, "uSearch");
+  pp->locBlendMetrics = GetShaderLocation(pp->smaaBlend, "uMetrics");
+  pp->locBlendWeights = GetShaderLocation(pp->smaaBlend, "uBlend");
+
   pp->ready = (pp->scene.id != 0 && pp->bloomA.id != 0);
   TraceLog(LOG_INFO,
            "BRUSH post: HDR pipeline %s (scene %dx%d, out %dx%d, scale %.2f)",
@@ -140,10 +244,23 @@ void BrushPostUnload(BrushPost *pp) {
   UnloadHDRTarget(&pp->bloomE);
   UnloadHDRTarget(&pp->bloomF);
   UnloadRenderTexture(pp->present);
+  UnloadRenderTexture(pp->aoRaw);
+  UnloadRenderTexture(pp->aoBlur);
+  UnloadRenderTexture(pp->smaaEdgesTex);
+  UnloadRenderTexture(pp->smaaBlendTex);
+  UnloadRenderTexture(pp->presentAA);
+  UnloadTexture(pp->noise);
+  UnloadTexture(pp->smaaArea);
+  UnloadTexture(pp->smaaSearch);
   UnloadShader(pp->bright);
   UnloadShader(pp->blur);
   UnloadShader(pp->composite);
   UnloadShader(pp->sharpen);
+  UnloadShader(pp->ssao);
+  UnloadShader(pp->ssaoBlur);
+  UnloadShader(pp->smaaEdges);
+  UnloadShader(pp->smaaWeights);
+  UnloadShader(pp->smaaBlend);
   *pp = (BrushPost){0};
 }
 
@@ -208,6 +325,43 @@ void BrushPostRun(BrushPost *pp, float time) {
   int qw = pp->renderW / 4, qh = pp->renderH / 4;
   int ew = pp->renderW / 8, eh = pp->renderH / 8;
 
+  // 0. SSAO: reconstruct view-space positions from scene depth, sample the
+  //    rotated hemisphere kernel into aoRaw (half-res), then 4x4 box-blur to
+  //    aoBlur (kills the rotation dither). Consumed by the composite.
+  if (pp->ssaoEnabled) {
+    Matrix proj = pp->projectionMatrix;
+    Matrix invProj = MatrixInvert(proj);
+
+    BeginTextureMode(pp->aoRaw);
+    ClearBackground(WHITE);
+    BeginShaderMode(pp->ssao);
+    SetShaderValueTexture(pp->ssao, pp->locSsaoDepth, pp->scene.depth);
+    SetShaderValueTexture(pp->ssao, pp->locSsaoNoise, pp->noise);
+    SetShaderValueMatrix(pp->ssao, pp->locSsaoProj, proj);
+    SetShaderValueMatrix(pp->ssao, pp->locSsaoInvProj, invProj);
+    float noiseScale[2] = {(float)hw / 4.0f, (float)hh / 4.0f};
+    SetShaderValue(pp->ssao, pp->locSsaoNoiseScale, noiseScale,
+                   SHADER_UNIFORM_VEC2);
+    SetShaderValue(pp->ssao, pp->locSsaoRadius, &pp->ssaoRadius,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->ssao, pp->locSsaoBias, &pp->ssaoBias,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->ssao, pp->locSsaoStrength, &pp->ssaoStrength,
+                   SHADER_UNIFORM_FLOAT);
+    BlitTexture(pp->scene.texture, pp->renderW, pp->renderH, hw, hh);
+    EndShaderMode();
+    EndTextureMode();
+
+    BeginTextureMode(pp->aoBlur);
+    BeginShaderMode(pp->ssaoBlur);
+    float aoTexel[2] = {1.0f / (float)hw, 1.0f / (float)hh};
+    SetShaderValue(pp->ssaoBlur, pp->locSsaoBlurTexel, aoTexel,
+                   SHADER_UNIFORM_VEC2);
+    BlitTexture(pp->aoRaw.texture, hw, hh, hw, hh);
+    EndShaderMode();
+    EndTextureMode();
+  }
+
   // 1. Bright-pass: scene (full) -> bloomA (half).
   BeginTextureMode(pp->bloomA);
   ClearBackground(BLACK);
@@ -256,14 +410,62 @@ void BrushPostRun(BrushPost *pp, float time) {
   SetShaderValue(pp->composite, pp->locP3Strength, &pp->p3Strength,
                  SHADER_UNIFORM_FLOAT);
 
+  float aoOn = pp->ssaoEnabled ? 1.0f : 0.0f;
+  SetShaderValue(pp->composite, pp->locAOEnabled, &aoOn, SHADER_UNIFORM_FLOAT);
+
   BeginTextureMode(pp->present);
   BeginShaderMode(pp->composite);
   SetShaderValueTexture(pp->composite, pp->locBloomTex, pp->bloomA.texture);
+  SetShaderValueTexture(pp->composite, pp->locAOTex, pp->aoBlur.texture);
   BlitTexture(pp->scene.texture, pp->renderW, pp->renderH, pp->outW, pp->outH);
   EndShaderMode();
   EndTextureMode();
 
-  // 4. Upscale to the backbuffer with CAS fused into the blit. Only worth it
+  // 4. SMAA 1x on the LDR present image: edges -> blend weights ->
+  //    neighborhood blend. The FBO path has no MSAA, so this is the engine's
+  //    edge anti-aliasing. Result feeds the sharpen/upscale.
+  RenderTexture2D *finalSrc = &pp->present;
+  if (pp->smaaEnabled) {
+    float metrics[4] = {1.0f / (float)pp->outW, 1.0f / (float)pp->outH,
+                        (float)pp->outW, (float)pp->outH};
+    BeginTextureMode(pp->smaaEdgesTex);
+    ClearBackground(BLANK);
+    BeginShaderMode(pp->smaaEdges);
+    SetShaderValue(pp->smaaEdges, pp->locEdgesMetrics, metrics,
+                   SHADER_UNIFORM_VEC4);
+    SetShaderValue(pp->smaaEdges, pp->locEdgesThreshold, &pp->smaaThreshold,
+                   SHADER_UNIFORM_FLOAT);
+    BlitTexture(pp->present.texture, pp->outW, pp->outH, pp->outW, pp->outH);
+    EndShaderMode();
+    EndTextureMode();
+
+    BeginTextureMode(pp->smaaBlendTex);
+    ClearBackground(BLANK);
+    BeginShaderMode(pp->smaaWeights);
+    SetShaderValue(pp->smaaWeights, pp->locWeightsMetrics, metrics,
+                   SHADER_UNIFORM_VEC4);
+    SetShaderValueTexture(pp->smaaWeights, pp->locWeightsArea, pp->smaaArea);
+    SetShaderValueTexture(pp->smaaWeights, pp->locWeightsSearch,
+                          pp->smaaSearch);
+    BlitTexture(pp->smaaEdgesTex.texture, pp->outW, pp->outH, pp->outW,
+                pp->outH);
+    EndShaderMode();
+    EndTextureMode();
+
+    BeginTextureMode(pp->presentAA);
+    ClearBackground(BLANK);
+    BeginShaderMode(pp->smaaBlend);
+    SetShaderValue(pp->smaaBlend, pp->locBlendMetrics, metrics,
+                   SHADER_UNIFORM_VEC4);
+    SetShaderValueTexture(pp->smaaBlend, pp->locBlendWeights,
+                          pp->smaaBlendTex.texture);
+    BlitTexture(pp->present.texture, pp->outW, pp->outH, pp->outW, pp->outH);
+    EndShaderMode();
+    EndTextureMode();
+    finalSrc = &pp->presentAA;
+  }
+
+  // 5. Upscale to the backbuffer with CAS fused into the blit. Only worth it
   //    when the blit actually upscales (render scale < 1 and/or retina 2x).
   bool useSharpen = pp->sharpenEnabled && pp->sharpenAmount > 0.001f &&
                     pp->outW < GetRenderWidth();
@@ -275,7 +477,7 @@ void BrushPostRun(BrushPost *pp, float time) {
     BeginShaderMode(pp->sharpen);
   }
   DrawTexturePro(
-      pp->present.texture,
+      finalSrc->texture,
       (Rectangle){0, 0, (float)pp->outW, -(float)pp->outH},
       (Rectangle){0, 0, (float)GetScreenWidth(), (float)GetScreenHeight()},
       (Vector2){0, 0}, 0.0f, WHITE);

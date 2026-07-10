@@ -6,6 +6,7 @@
 
 #include "b_app.h"
 #include "b_console.h"
+#include "b_post.h"
 #include "b_render.h"
 
 #include <stdlib.h>
@@ -53,6 +54,20 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
     if (IsKeyPressed(KEY_F2)) BrushRenderCycleLayerView();
     if (IsKeyPressed(KEY_F3)) BrushRenderTogglePost();
     if (IsKeyPressed(KEY_F4)) BrushRenderToggleShadows();
+    if (IsKeyPressed(KEY_F5)) {
+      struct BrushPost *post = BrushRenderGetPost();
+      if (post) {
+        post->ssaoEnabled = !post->ssaoEnabled;
+        TraceLog(LOG_INFO, "BRUSH: SSAO %s", post->ssaoEnabled ? "ON" : "OFF");
+      }
+    }
+    if (IsKeyPressed(KEY_F6)) {
+      struct BrushPost *post = BrushRenderGetPost();
+      if (post) {
+        post->smaaEnabled = !post->smaaEnabled;
+        TraceLog(LOG_INFO, "BRUSH: SMAA %s", post->smaaEnabled ? "ON" : "OFF");
+      }
+    }
 
     // Fixed-timestep simulation with a substep cap: movement feel is
     // identical at any render rate, and a long hitch can't spiral.

@@ -13,6 +13,8 @@ out vec4 finalColor;
 
 uniform sampler2D texture0; // HDR scene (linear, un-tonemapped)
 uniform sampler2D uBloom;   // half-res multi-scale bloom
+uniform sampler2D uAO;      // blurred SSAO (R: 1 = open, 0 = occluded)
+uniform float uAOEnabled;
 uniform float uBloomIntensity;
 uniform float uExposure;   // pre-tonemap multiplier
 uniform vec2 uResolution;  // output resolution (vignette aspect + grain)
@@ -44,8 +46,10 @@ vec3 AdjustVibrance(vec3 color, float amount) {
 void main() {
     vec2 uv = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
 
-    // 1. Bloom add (linear HDR) + exposure.
+    // 1. Ambient occlusion on the scene (not on bloom — bloom is light
+    //    bleed), then bloom add (linear HDR) + exposure.
     vec3 hdr = texture(texture0, uv).rgb;
+    hdr *= mix(1.0, texture(uAO, uv).r, uAOEnabled);
     hdr += texture(uBloom, uv).rgb * uBloomIntensity;
     hdr *= uExposure;
 

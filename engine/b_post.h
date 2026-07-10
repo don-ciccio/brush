@@ -29,6 +29,8 @@
 #include <raylib.h>
 #include <stdbool.h>
 
+#define BRUSH_SSAO_KERNEL 24
+
 typedef struct BrushPost {
   int outW, outH;       // logical output resolution (composite/present res)
   int renderW, renderH; // internal HDR scene resolution (outW * renderScale)
@@ -41,17 +43,31 @@ typedef struct BrushPost {
   RenderTexture2D bloomE; // 1/8-res HDR (mip 2, widest)
   RenderTexture2D bloomF;
   RenderTexture2D present; // LDR composite at logical res, upscaled at the end
+  RenderTexture2D aoRaw;   // half-render-res SSAO (R), 8-bit
+  RenderTexture2D aoBlur;  // 4x4 box-blurred SSAO
+  RenderTexture2D smaaEdgesTex, smaaBlendTex, presentAA; // SMAA pass targets
 
   Shader bright;
   Shader blur;
   Shader composite;
   Shader sharpen;
+  Shader ssao, ssaoBlur;
+  Shader smaaEdges, smaaWeights, smaaBlend;
+  Texture2D noise;               // 4x4 SSAO rotation vectors
+  Texture2D smaaArea, smaaSearch; // SMAA precomputed lookups (assets/smaa)
 
   int locBrightThreshold;
   int locBlurDir, locBlurTexel;
   int locBloomTex, locBloomIntensity, locExposure, locResolution, locTime;
   int locDisplayP3, locP3Strength;
   int locSharpTexel, locSharpAmount;
+  int locAOTex, locAOEnabled;
+  int locSsaoDepth, locSsaoNoise, locSsaoKernel, locSsaoProj, locSsaoInvProj;
+  int locSsaoNoiseScale, locSsaoRadius, locSsaoBias, locSsaoStrength;
+  int locSsaoBlurTexel;
+  int locEdgesMetrics, locEdgesThreshold;
+  int locWeightsMetrics, locWeightsArea, locWeightsSearch;
+  int locBlendMetrics, locBlendWeights;
 
   // tunables (env-overridable, see b_post.c)
   float bloomThreshold; // luminance above which pixels bloom
@@ -62,6 +78,21 @@ typedef struct BrushPost {
   float sharpenAmount; // 0..1 CAS strength
   float displayP3;     // 1 = apply the sRGB->P3 gamut map (Apple wide-gamut)
   float p3Strength;    // 1 = accurate map, lower = punchier
+
+  // SSAO (depth-based, half render-res): grounds objects with contact
+  // shading. Needs the scene camera matrices, captured by the renderer
+  // inside BeginMode3D each frame.
+  bool ssaoEnabled;
+  float ssaoRadius;   // world-space sampling radius
+  float ssaoBias;     // self-occlusion bias
+  float ssaoStrength; // how strongly AO darkens
+  float ssaoKernel[BRUSH_SSAO_KERNEL * 3];
+  Matrix projectionMatrix, viewMatrix;
+
+  // SMAA 1x (3 passes on the LDR present image) — the FBO path has no MSAA,
+  // so this is the engine's edge anti-aliasing.
+  bool smaaEnabled;
+  float smaaThreshold; // edge threshold (0.05..0.1)
 
   bool ready; // false if the HDR framebuffer failed (post silently disabled)
 } BrushPost;

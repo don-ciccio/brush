@@ -1,0 +1,5 @@
+SMAA lookup textures (AreaTex, SearchTex)
+From the SMAA reference implementation:
+Copyright (c) 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia,
+Fernando Navarro, Diego Gutierrez. MIT-style license — see
+https://github.com/iryoku/smaa (redistribution permitted with this notice).

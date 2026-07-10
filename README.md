@@ -64,6 +64,8 @@ Run from the repo root (shaders load from `engine/shaders/`).
 | **F2** | Cycle render layer view |
 | **F3** | Toggle HDR post pipeline |
 | **F4** | Toggle sun shadows |
+| **F5** | Toggle SSAO |
+| **F6** | Toggle SMAA |
 | **[** / **]** | Scrub the time of day |
 
 ## Layout
@@ -73,7 +75,8 @@ engine/     the brush library — never includes game code
   brush.h     public umbrella header
   b_app       window + fixed-timestep loop (sim at 1/60 s, interpolated render)
   b_render    the layer stack + lit shader
-  b_post      HDR pipeline: bloom, ACES + grade composite, CAS upscale
+  b_post      HDR pipeline: SSAO, bloom, ACES + grade composite, SMAA,
+              CAS upscale
   b_shadow    sun shadow map: ortho depth pass, texel-snapped follow, PCSS
   b_tod       day/night clock: solar geometry + swappable look palette
   b_world     chunk-streamed terrain: worker thread, game heightFn, colliders
@@ -100,7 +103,8 @@ Environment toggles: `BRUSH_PERF=1` (uncapped fps + frame-time logs),
 `BRUSH_BLOOM_THRESH`, `BRUSH_BLOOM_INT`, `BRUSH_SHARPEN`, `BRUSH_NO_SHARPEN`,
 `BRUSH_NO_P3` / `BRUSH_DISPLAY_P3`, `BRUSH_P3_STRENGTH`, `BRUSH_NO_SHADOW`,
 `BRUSH_SHADOW_RES=2048`, `BRUSH_SHADOW_SOFT=4`, `BRUSH_TIME=<0..24h>`,
-`BRUSH_DAY_LENGTH=<seconds>`.
+`BRUSH_DAY_LENGTH=<seconds>`, `BRUSH_NO_SSAO`, `BRUSH_SSAO_RADIUS/BIAS/STRENGTH`,
+`BRUSH_NO_SMAA`, `BRUSH_SMAA_THRESH`, `BRUSH_HILLS`.
 
 ## License
 

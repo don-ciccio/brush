@@ -246,6 +246,13 @@ void BrushRenderExecute(Camera3D camera) {
 
   BeginMode3D(camera);
 
+  // Capture the exact matrices raylib set for this scene so depth-based
+  // passes (SSAO) reconstruct positions that match the rasterization.
+  if (usePost) {
+    g_r.post.projectionMatrix = rlGetMatrixProjection();
+    g_r.post.viewMatrix = rlGetMatrixModelview();
+  }
+
   // OPAQUE — the color pass (albedo * (ambient + diffuse) + specular).
   for (int i = 0; i < g_r.cmdCount[BRUSH_LAYER_OPAQUE]; i++)
     DrawCmd(&g_r.cmds[BRUSH_LAYER_OPAQUE][i]);
