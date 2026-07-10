@@ -97,48 +97,30 @@ static void EnterState(BrushAnimator *a, BrushAnimState s, float fadeDur) {
   a->fadeDur = fadeDur;
 }
 
-// Accumulated model-space rotation of a bone (root -> bone product of the
-// current blendPose local rotations).
-static Quaternion BoneModelQuat(const BrushAnimator *a, int bone) {
-  int chain[32];
-  int n = 0;
-  for (int b = bone; b >= 0 && n < 32; b = a->model->bones[b].parent)
-    chain[n++] = b;
-  Quaternion q = QuaternionIdentity();
-  for (int i = n - 1; i >= 0; i--)
-    q = QuaternionMultiply(q, a->blendPose[chain[i]].rotation);
-  return q;
+// raylib stores animation poses in MODEL space (the glTF loader converts
+// parent-relative joint transforms to global via BuildPoseFromParentJoints),
+// so blendPose translations ARE model-space joint positions, and rotating a
+// bone requires rotating its whole SUBTREE about a pivot — children's global
+// transforms don't follow automatically.
+
+static bool BoneInSubtree(const Model *m, int bone, int root) {
+  for (int b = bone; b >= 0; b = m->bones[b].parent)
+    if (b == root) return true;
+  return false;
 }
 
-// Model-space position of a bone: FK down the parent chain (uniform scale 1).
-static Vector3 BoneModelPos(const BrushAnimator *a, int bone) {
-  int chain[32];
-  int n = 0;
-  for (int b = bone; b >= 0 && n < 32; b = a->model->bones[b].parent)
-    chain[n++] = b;
-  Vector3 pos = {0, 0, 0};
-  Quaternion rot = QuaternionIdentity();
-  for (int i = n - 1; i >= 0; i--) {
-    pos = Vector3Add(
-        pos, Vector3RotateByQuaternion(a->blendPose[chain[i]].translation,
-                                       rot));
-    rot = QuaternionMultiply(rot, a->blendPose[chain[i]].rotation);
+// Rotate `root` and every descendant about `pivot` by `dq` (model space).
+static void RotateSubtree(BrushAnimator *a, int root, Vector3 pivot,
+                          Quaternion dq) {
+  for (int i = 0; i < a->boneCount; i++) {
+    if (!BoneInSubtree(a->model, i, root)) continue;
+    Transform *t = &a->blendPose[i];
+    t->translation = Vector3Add(
+        pivot,
+        Vector3RotateByQuaternion(Vector3Subtract(t->translation, pivot),
+                                  dq));
+    t->rotation = QuaternionMultiply(dq, t->rotation);
   }
-  return pos;
-}
-
-// Post-rotate a bone by `dq` expressed in MODEL space:
-// world' = dq * parent * local  =>  local' = parent^-1 * dq * parent * local.
-static void ApplyModelSpaceRotation(BrushAnimator *a, int bone,
-                                    Quaternion dq) {
-  if (bone < 0 || bone >= a->boneCount) return;
-  int parent = a->model->bones[bone].parent;
-  Quaternion pq =
-      (parent >= 0) ? BoneModelQuat(a, parent) : QuaternionIdentity();
-  Quaternion adj = QuaternionMultiply(
-      QuaternionMultiply(QuaternionInvert(pq), dq), pq);
-  a->blendPose[bone].rotation =
-      QuaternionMultiply(adj, a->blendPose[bone].rotation);
 }
 
 static int FindBone(const Model *m, const char *name) {
@@ -412,9 +394,8 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   // --- foot IK: the standard pipeline -------------------------------------
   // Rays under the ANIMATED feet -> pelvis lowers to the lowest reachable
   // foot -> analytic two-bone IK drives each ankle to its exact target ->
-  // ankles aim to the ground normal. (Rays from fixed offsets beside the
-  // capsule, or additive knee-angle gains, both fall apart while walking —
-  // the feet are never where those approximations assume.)
+  // ankles aim to the ground normal. All math in model space on the GLOBAL
+  // bone poses raylib stores (see RotateSubtree).
   float w = Clamp(in.ikWeight, 0.0f, 1.0f);
   bool haveLegs = a->boneThighL >= 0 && a->boneCalfL >= 0 &&
                   a->boneFootL >= 0 && a->boneThighR >= 0 &&
@@ -430,7 +411,7 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     float cy = cosf(in.yawRad), sy = sinf(in.yawRad);
     for (int side = 0; side < 2; side++) {
       int footBone = side == 0 ? a->boneFootL : a->boneFootR;
-      Vector3 ankle = BoneModelPos(a, footBone);
+      Vector3 ankle = a->blendPose[footBone].translation;
       // Model space -> world (yaw about Y, then translate).
       Vector3 probe = {
           in.worldPos.x + ankle.x * cy + ankle.z * sy,
@@ -440,8 +421,14 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       float hitY;
       Vector3 n = {0, 1, 0};
       float d = 0.0f;
-      if (in.groundFn(in.groundUser, probe, &hitY, &n))
-        d = Clamp(hitY - baseY, -0.5f, 0.5f) * w;
+      if (in.groundFn(in.groundUser, probe, &hitY, &n)) {
+        d = hitY - baseY;
+        // Ledge rejection: ground far below the foot (overhanging an edge)
+        // is unreachable — chasing it drags the pelvis down and buries the
+        // planted foot. Ignore it instead of clamping toward it.
+        if (d < -0.45f) d = 0.0f;
+        d = Clamp(d, -0.45f, 0.5f) * w;
+      }
       if (side == 0) { targetDL = d; normL = n; }
       else { targetDR = d; normR = n; }
     }
@@ -466,9 +453,9 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       float delta = side == 0 ? a->footDeltaL : a->footDeltaR;
       Vector3 groundN = side == 0 ? normL : normR;
 
-      Vector3 H = BoneModelPos(a, thighB);
-      Vector3 K = BoneModelPos(a, calfB);
-      Vector3 A = BoneModelPos(a, footB);
+      Vector3 H = a->blendPose[thighB].translation; // hip joint
+      Vector3 K = a->blendPose[calfB].translation;  // knee joint
+      Vector3 A = a->blendPose[footB].translation;  // ankle joint
       float L1 = Vector3Distance(H, K);
       float L2 = Vector3Distance(K, A);
       if (L1 < 0.01f || L2 < 0.01f) continue;
@@ -478,65 +465,61 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       Vector3 T = {A.x, A.y + delta - a->pelvisOffset, A.z};
       float reach = Clamp(Vector3Distance(H, T), fabsf(L1 - L2) + 0.01f,
                           L1 + L2 - 0.01f);
+      if (Vector3Distance(A, T) < 0.002f) continue; // nothing to solve
 
-      // 1. Knee angle from the law of cosines, rotating the calf about the
-      //    knee-plane normal (preserves the animation's knee direction).
+      // 1. Knee angle from the law of cosines, rotating the calf subtree
+      //    about the knee-plane normal (preserves the knee direction).
       Vector3 u = Vector3Subtract(H, K);
       Vector3 v = Vector3Subtract(A, K);
       Vector3 kneeAxis = Vector3CrossProduct(v, u);
-      if (Vector3Length(kneeAxis) < 1e-5f)
-        kneeAxis = (Vector3){1.0f, 0.0f, 0.0f};
+      if (Vector3Length(kneeAxis) < 1e-5f) kneeAxis = (Vector3){1, 0, 0};
       kneeAxis = Vector3Normalize(kneeAxis);
-      float curKnee =
-          acosf(Clamp(Vector3DotProduct(Vector3Normalize(u),
-                                        Vector3Normalize(v)),
-                      -1.0f, 1.0f));
+      float curKnee = acosf(
+          Clamp(Vector3DotProduct(Vector3Normalize(u), Vector3Normalize(v)),
+                -1.0f, 1.0f));
       float wantKnee = acosf(
           Clamp((L1 * L1 + L2 * L2 - reach * reach) / (2.0f * L1 * L2),
                 -1.0f, 1.0f));
       Quaternion qKnee =
           QuaternionFromAxisAngle(kneeAxis, wantKnee - curKnee);
-      ApplyModelSpaceRotation(a, calfB, qKnee);
-      // Verify the bend direction; if the interior angle moved the wrong
-      // way, apply the inverse twice (robust against axis handedness).
-      Vector3 A1 = BoneModelPos(a, footB);
+      RotateSubtree(a, calfB, K, qKnee);
+      // Verify the bend direction (handedness-robust): if the interior
+      // angle moved the wrong way, apply the inverse twice.
+      Vector3 A1 = a->blendPose[footB].translation;
       float gotKnee = acosf(Clamp(
           Vector3DotProduct(
-              Vector3Normalize(Vector3Subtract(H, BoneModelPos(a, calfB))),
-              Vector3Normalize(Vector3Subtract(A1, BoneModelPos(a, calfB)))),
+              Vector3Normalize(Vector3Subtract(H, K)),
+              Vector3Normalize(Vector3Subtract(A1, K))),
           -1.0f, 1.0f));
-      if (fabsf(gotKnee - wantKnee) > fabsf(curKnee - wantKnee)) {
-        ApplyModelSpaceRotation(
-            a, calfB,
-            QuaternionFromAxisAngle(kneeAxis, 2.0f * (curKnee - wantKnee)));
-        A1 = BoneModelPos(a, footB);
+      if (fabsf(gotKnee - wantKnee) > 0.01f + fabsf(curKnee - wantKnee)) {
+        RotateSubtree(a, calfB, K,
+                      QuaternionFromAxisAngle(kneeAxis,
+                                              2.0f * (curKnee - wantKnee)));
+        A1 = a->blendPose[footB].translation;
       }
 
       // 2. Swing the whole leg at the hip so the ankle lands on the target.
       Vector3 fromDir = Vector3Normalize(Vector3Subtract(A1, H));
       Vector3 toDir = Vector3Normalize(Vector3Subtract(T, H));
       Quaternion qHip = QuaternionFromVector3ToVector3(fromDir, toDir);
-      ApplyModelSpaceRotation(a, thighB, qHip);
+      RotateSubtree(a, thighB, H, qHip);
+      Vector3 A2 = a->blendPose[footB].translation;
 
-      // 3. Counter-rotate the ankle so the foot keeps its authored world
-      //    orientation, then aim it to the ground normal (capped).
-      Quaternion qFix = QuaternionInvert(QuaternionMultiply(qHip, qKnee));
-      ApplyModelSpaceRotation(a, footB, qFix);
+      // 3. Counter-rotate the ankle subtree so the foot keeps its authored
+      //    orientation, then aim it to the ground normal (capped+weighted).
+      Quaternion qNet = QuaternionMultiply(qHip, qKnee);
+      RotateSubtree(a, footB, A2, QuaternionInvert(qNet));
       if (w > 0.001f) {
-        // Ground normal into model space (undo the yaw).
         float cy2 = cosf(in.yawRad), sy2 = sinf(in.yawRad);
         Vector3 nM = {groundN.x * cy2 - groundN.z * sy2, groundN.y,
                       groundN.x * sy2 + groundN.z * cy2};
         Quaternion qAim =
             QuaternionFromVector3ToVector3((Vector3){0, 1, 0}, nM);
-        // Cap + weight the aim so noisy normals can't twist the foot.
         float ang = 2.0f * acosf(Clamp(fabsf(qAim.w), -1.0f, 1.0f));
-        if (ang > 0.45f) {
-          float k = 0.45f / ang;
-          qAim = QuaternionSlerp(QuaternionIdentity(), qAim, k);
-        }
+        if (ang > 0.45f)
+          qAim = QuaternionSlerp(QuaternionIdentity(), qAim, 0.45f / ang);
         qAim = QuaternionSlerp(QuaternionIdentity(), qAim, w);
-        ApplyModelSpaceRotation(a, footB, qAim);
+        RotateSubtree(a, footB, A2, qAim);
       }
     }
   }
