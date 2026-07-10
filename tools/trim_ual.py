@@ -15,6 +15,9 @@ KEEP = {
     "Jump_Start",
     "Jump_Loop",
     "Jump_Land",
+    "Crouch_Idle_Loop",
+    "Crouch_Fwd_Loop",
+    "Roll",
 }
 
 # Fresh scene

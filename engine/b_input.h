@@ -8,6 +8,7 @@
  *     move        WASD / arrows / gamepad left stick
  *     look        RMB-drag mouse / Q,E / gamepad right stick
  *     jump        Space / pad A          sprint  Shift / pad X
+ *     crouch      LCtrl / pad R3 (hold)  roll    R / pad B
  *     menu        Tab / pad Start        accept  Enter / pad A
  *
  *   LICENSE: zlib/libpng
@@ -29,6 +30,8 @@ typedef enum {
 typedef enum {
   BRUSH_BTN_JUMP = 0,
   BRUSH_BTN_SPRINT,
+  BRUSH_BTN_CROUCH, // hold: Left Ctrl / pad right-stick click
+  BRUSH_BTN_ROLL,   // tap: R / pad B
   BRUSH_BTN_MENU,
   BRUSH_BTN_ACCEPT,
   BRUSH_BTN_UP,   // menu navigation

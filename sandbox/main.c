@@ -48,7 +48,10 @@ typedef struct Sandbox {
   BrushCharacter body; // Jolt kinematic capsule (walls, steps, slopes)
   float velY;          // vertical velocity (gravity + jumps)
   float airTime;       // continuous seconds off the ground (debounced flag)
-  Vector3 groundN;     // smoothed ground normal (terrain lean)
+  float pelvisDrop;    // smoothed drop to the lowest foot contact (<= 0)
+  float footDeltaL, footDeltaR; // per-foot IK inputs (>= 0)
+  bool crouched;
+  float rollTimer;     // seconds of roll movement burst remaining
 
   Model crate;
   Model ramp;
@@ -155,8 +158,6 @@ static void SandboxInit(void *user) {
 
   s->velY = 0.0f;
 
-  s->groundN = (Vector3){0.0f, 1.0f, 0.0f};
-
   BrushTodInit(&s->tod);
 
   BrushOrbitCamInit(&s->camera, s->pos);
@@ -201,10 +202,20 @@ static void SandboxFixedUpdate(void *user, float dt) {
   float wishLen = Vector3Length(wishDir);
   if (wishLen > 1.0f) wishDir = Vector3Scale(wishDir, 1.0f / wishLen);
 
+  s->crouched = BrushInputDown(BRUSH_BTN_CROUCH);
+  if (autoMove != NULL && TextIsEqual(autoMove, "crouch")) s->crouched = true;
   float maxSpeed = (BrushInputDown(BRUSH_BTN_SPRINT) || autoSprint)
                        ? RUN_SPEED
                        : WALK_SPEED;
+  if (s->crouched) maxSpeed = 1.6f; // crouch-walk pace
   Vector3 wishVel = Vector3Scale(wishDir, maxSpeed * fminf(wishLen, 1.0f));
+
+  // Roll burst: while the roll plays, drive forward along the facing.
+  if (s->rollTimer > 0.0f) {
+    s->rollTimer -= dt;
+    Vector3 fwd = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
+    wishVel = Vector3Scale(fwd, 4.2f);
+  }
 
   // Horizontal acceleration toward the wish velocity.
   float blend = fminf(ACCEL * dt, 1.0f);
@@ -234,10 +245,29 @@ static void SandboxFixedUpdate(void *user, float dt) {
   // a landing resolves; raw flag -> animator re-triggers jump each flicker.
   s->airTime = s->grounded ? 0.0f : s->airTime + dt;
 
-  // Smoothed ground normal for terrain lean (slopes read grounded feet).
-  Vector3 wantN = s->grounded ? s->body.groundNormal : (Vector3){0, 1, 0};
-  float nBlend = 1.0f - expf(-10.0f * dt);
-  s->groundN = Vector3Normalize(Vector3Lerp(s->groundN, wantN, nBlend));
+  // --- Foot IK inputs (donor pattern): raycast under each foot; the pelvis
+  // drops to the LOWEST contact (applied on the model transform, so the body
+  // stays upright) and the other leg bends via knee IK to stay planted.
+  float leftDelta = 0.0f, rightDelta = 0.0f, targetDrop = 0.0f;
+  if (s->grounded) {
+    Vector3 rightDir = {cosf(s->yaw), 0.0f, -sinf(s->yaw)};
+    Vector3 down = {0.0f, -1.0f, 0.0f};
+    Vector3 footL = Vector3Add(s->pos, Vector3Scale(rightDir, -0.20f));
+    Vector3 footR = Vector3Add(s->pos, Vector3Scale(rightDir, 0.20f));
+    Vector3 hit;
+    footL.y += 1.0f;
+    if (BrushPhysicsRaycast(&s->phys, footL, down, 2.0f, &hit, NULL))
+      leftDelta = hit.y - s->pos.y;
+    footR.y += 1.0f;
+    if (BrushPhysicsRaycast(&s->phys, footR, down, 2.0f, &hit, NULL))
+      rightDelta = hit.y - s->pos.y;
+    if (leftDelta < 0.0f || rightDelta < 0.0f)
+      targetDrop = fmaxf(fminf(leftDelta, rightDelta), -0.4f);
+  }
+  s->pelvisDrop += (targetDrop - s->pelvisDrop) * (1.0f - expf(-15.0f * dt));
+  // Deltas relative to the lowered pelvis, clamped so legs only bend up.
+  s->footDeltaL = fminf(fmaxf(leftDelta - s->pelvisDrop, 0.0f), 0.5f);
+  s->footDeltaR = fminf(fmaxf(rightDelta - s->pelvisDrop, 0.0f), 0.5f);
 
   // Face the movement direction (shortest arc, smoothed).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
@@ -275,6 +305,13 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   // Latch jump between fixed steps so a tap on a fast frame isn't lost.
   if (BrushInputPressed(BRUSH_BTN_JUMP)) s->jumpQueued = true;
 
+  // Roll: one-shot anim + a short forward movement burst.
+  if (BrushInputPressed(BRUSH_BTN_ROLL) && s->grounded &&
+      BrushAnimatorState(&s->animator) != BRUSH_ANIM_ROLL) {
+    BrushAnimatorTriggerRoll(&s->animator);
+    s->rollTimer = 0.55f;
+  }
+
   // Interpolate sim state for rendering (fixed-step stutter stays invisible).
   s->renderPos = Vector3Lerp(s->prevPos, s->pos, alpha);
   float yawDiff = s->yaw - s->prevYaw;
@@ -296,7 +333,10 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
   BrushAnimatorUpdate(&s->animator,
                       (BrushAnimInput){.speed = horizSpeed,
-                                       .airborne = s->airTime > 0.06f},
+                                       .airborne = s->airTime > 0.06f,
+                                       .crouched = s->crouched,
+                                       .leftFootDelta = s->footDeltaL,
+                                       .rightFootDelta = s->footDeltaR},
                       dt);
 }
 
@@ -329,22 +369,11 @@ static void SandboxDraw(void *user) {
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
 
   // Skinned mannequin, feet at p (the animator already posed the meshes).
-  // Terrain lean: tilt the model toward the smoothed ground normal so feet
-  // sit on slopes instead of sinking into the uphill side (interim until the
-  // foot-IK port; capped so steep ramps don't topple the pose).
-  Matrix tilt = MatrixIdentity();
-  if (s->groundN.y < 0.9999f) {
-    Vector3 axis = Vector3CrossProduct((Vector3){0, 1, 0}, s->groundN);
-    float axisLen = Vector3Length(axis);
-    if (axisLen > 0.0001f) {
-      float ang = asinf(fminf(axisLen, 1.0f));
-      if (ang > 0.45f) ang = 0.45f; // cap ~26 deg
-      tilt = MatrixRotate(Vector3Scale(axis, 1.0f / axisLen), ang);
-    }
-  }
+  // The body stays UPRIGHT on slopes: the root lowers by pelvisDrop to the
+  // downhill foot and the foot IK bends the uphill leg (see fixedUpdate).
   // Submitted twice: once as scene geometry, once as a sun-shadow caster.
-  Matrix xform = MatrixMultiply(MatrixMultiply(rot, tilt),
-                                MatrixTranslate(p.x, p.y, p.z));
+  Matrix xform = MatrixMultiply(
+      rot, MatrixTranslate(p.x, p.y + s->pelvisDrop, p.z));
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->mannequin, xform, WHITE);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->mannequin, xform, WHITE);
 
@@ -371,6 +400,8 @@ static void SandboxDrawUI(void *user) {
   DrawText(TextFormat("Press [F4] to toggle sun shadows: %s",
                       BrushRenderShadowsEnabled() ? "on" : "off"),
            16, 144, 20, DARKGRAY);
+  DrawText("Hold [LCtrl] to crouch, press [R] to roll", 16, 196, 20,
+           DARKGRAY);
   DrawText(TextFormat("Hold [ or ] to scrub time: %02d:%02d",
                       (int)s->tod.timeHours,
                       (int)(fmodf(s->tod.timeHours, 1.0f) * 60.0f)),

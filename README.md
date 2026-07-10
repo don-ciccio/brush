@@ -55,6 +55,8 @@ Run from the repo root (shaders load from `engine/shaders/`).
 | **W A S D** / arrows / left stick | Move |
 | **Shift** / pad X | Sprint |
 | **Space** / pad A | Jump |
+| **LCtrl** / pad R3 (hold) | Crouch |
+| **R** / pad B | Roll |
 | **RMB-drag** / **Q E** / right stick | Orbit camera |
 | **Wheel** | Zoom |
 | **Tab** / Start | Menu |
@@ -76,7 +78,8 @@ engine/     the brush library — never includes game code
   b_tod       day/night clock: solar geometry + swappable look palette
   b_physics   Jolt physics world: static box/mesh colliders, triggers, raycasts
   b_character kinematic capsule controller: wall slide, slopes, stair steps
-  b_anim      skeletal animator: named clips, 1-D gait blend, jump phases
+  b_anim      skeletal animator: gait/crouch blends, jump phases, roll,
+              foot IK + pelvis drop, landing absorption (bones by name)
   b_sky       procedural atmospheric-scattering sky + FBM clouds
   b_camera    third-person orbit camera with hybrid auto-follow
   b_input     action-based input (keyboard + gamepad)

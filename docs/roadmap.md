@@ -32,8 +32,12 @@ the donor animator's sampling/blending (frame-interpolated clip sampling,
 per-bone lerp/slerp blending, phase-synced 1-D gait blend idle→walk→jog→sprint,
 three-phase jump, snapshot cross-fades), driving the CC0 Quaternius mannequin
 (assets/character/mannequin.glb, trimmed from UAL1 via headless Blender —
-tools/trim_ual.py). Still to port later: look-at/foot IK, procedural leans,
-landing absorption, 2-D strafe blends.
+tools/trim_ual.py). Since extended with the motion-starter set: crouch
+idle/walk state, roll one-shot, procedural FOOT IK + pelvis drop (body stays
+upright on slopes; legs resolve by bone name, UE-style rig), and landing
+absorption (squat-and-recover on touchdown, BRUSH_ANIM_LAND pins it).
+Still to port later: look-at IK, procedural leans, 2-D strafe blends (note:
+the UAL packs ship no strafe clips — donor used procedural lean for lateral).
 
 ## v0.x — pipeline depth (ports from the donor)
 
@@ -83,9 +87,9 @@ landing absorption, 2-D strafe blends.
    chokepoint), hysteresis load/unload.
 7. **Instanced foliage**: per-layer scatter tables, unified cross-chunk
    instance batches, LOD decimation, trail interaction, horizon culling.
-8. **Skeletal animation, advanced layer** (core landed in v0 — see above):
-   look-at/foot IK, procedural leans + landing absorption, 2-D strafe blends,
-   transition-condition tables.
+8. **Skeletal animation, advanced layer** (core + foot IK + landing
+   absorption + crouch/roll landed — see above): look-at IK, procedural
+   leans, 2-D strafe blends, transition-condition tables.
 
 ## v1.x — foundation systems (new builds, not ports)
 

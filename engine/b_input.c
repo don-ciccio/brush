@@ -68,6 +68,12 @@ bool BrushInputDown(BrushButton btn) {
   case BRUSH_BTN_SPRINT:
     return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ||
            (pad && IsGamepadButtonDown(PAD, GAMEPAD_BUTTON_RIGHT_FACE_LEFT));
+  case BRUSH_BTN_CROUCH:
+    return IsKeyDown(KEY_LEFT_CONTROL) ||
+           (pad && IsGamepadButtonDown(PAD, GAMEPAD_BUTTON_RIGHT_THUMB));
+  case BRUSH_BTN_ROLL:
+    return IsKeyDown(KEY_R) ||
+           (pad && IsGamepadButtonDown(PAD, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
   case BRUSH_BTN_MENU:
     return IsKeyDown(KEY_TAB) ||
            (pad && IsGamepadButtonDown(PAD, GAMEPAD_BUTTON_MIDDLE_RIGHT));
@@ -94,6 +100,12 @@ bool BrushInputPressed(BrushButton btn) {
   case BRUSH_BTN_SPRINT:
     return IsKeyPressed(KEY_LEFT_SHIFT) ||
            (pad && IsGamepadButtonPressed(PAD, GAMEPAD_BUTTON_RIGHT_FACE_LEFT));
+  case BRUSH_BTN_CROUCH:
+    return IsKeyPressed(KEY_LEFT_CONTROL) ||
+           (pad && IsGamepadButtonPressed(PAD, GAMEPAD_BUTTON_RIGHT_THUMB));
+  case BRUSH_BTN_ROLL:
+    return IsKeyPressed(KEY_R) ||
+           (pad && IsGamepadButtonPressed(PAD, GAMEPAD_BUTTON_RIGHT_FACE_RIGHT));
   case BRUSH_BTN_MENU:
     return IsKeyPressed(KEY_TAB) ||
            (pad && IsGamepadButtonPressed(PAD, GAMEPAD_BUTTON_MIDDLE_RIGHT));
