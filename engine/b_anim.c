@@ -32,8 +32,7 @@
 
 // Landing absorption (procedural squat-and-recover on touchdown).
 #define LAND_DURATION 0.40f  // seconds from impact to recovered
-#define LAND_MAX_DIP 0.075f  // peak pelvis drop (metres) at full strength
-#define LAND_KNEE_RATIO 2.2f // foot-IK delta per metre of dip (feet planted)
+#define LAND_MAX_DIP 0.075f // peak pelvis drop (metres) at full strength
 
 static const char *const UAL_CLIP_NAMES[BRUSH_CLIP_COUNT] = {
     "Idle_Loop",        "Walk_Loop",       "Jog_Fwd_Loop", "Sprint_Loop",
@@ -109,6 +108,23 @@ static Quaternion BoneModelQuat(const BrushAnimator *a, int bone) {
   for (int i = n - 1; i >= 0; i--)
     q = QuaternionMultiply(q, a->blendPose[chain[i]].rotation);
   return q;
+}
+
+// Model-space position of a bone: FK down the parent chain (uniform scale 1).
+static Vector3 BoneModelPos(const BrushAnimator *a, int bone) {
+  int chain[32];
+  int n = 0;
+  for (int b = bone; b >= 0 && n < 32; b = a->model->bones[b].parent)
+    chain[n++] = b;
+  Vector3 pos = {0, 0, 0};
+  Quaternion rot = QuaternionIdentity();
+  for (int i = n - 1; i >= 0; i--) {
+    pos = Vector3Add(
+        pos, Vector3RotateByQuaternion(a->blendPose[chain[i]].translation,
+                                       rot));
+    rot = QuaternionMultiply(rot, a->blendPose[chain[i]].rotation);
+  }
+  return pos;
 }
 
 // Post-rotate a bone by `dq` expressed in MODEL space:
@@ -390,55 +406,138 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     if (a->landTimer < 0.0f) a->landTimer = 0.0f;
   }
   if (a->landDebugPin) landDip = LAND_MAX_DIP; // hold for a screenshot
-  if (landDip > 0.0001f && a->bonePelvis >= 0 &&
-      a->bonePelvis < a->boneCount)
-    a->blendPose[a->bonePelvis].translation.y -= landDip;
+  // landDip feeds pelvisOffset below; the foot IK keeps the feet planted,
+  // which is what bends the knees during the dip.
 
-  // --- procedural foot IK (leg bending/extension on slopes and steps) ------
-  if (a->boneThighL >= 0 && a->boneCalfL >= 0 && a->boneFootL >= 0 &&
-      a->boneThighR >= 0 && a->boneCalfR >= 0 && a->boneFootR >= 0) {
-    const float thighGain = 1.5f;
-    const float calfGain = 3.0f;
-    const float footGain = 1.5f;
+  // --- foot IK: the standard pipeline -------------------------------------
+  // Rays under the ANIMATED feet -> pelvis lowers to the lowest reachable
+  // foot -> analytic two-bone IK drives each ankle to its exact target ->
+  // ankles aim to the ground normal. (Rays from fixed offsets beside the
+  // capsule, or additive knee-angle gains, both fall apart while walking —
+  // the feet are never where those approximations assume.)
+  float w = Clamp(in.ikWeight, 0.0f, 1.0f);
+  bool haveLegs = a->boneThighL >= 0 && a->boneCalfL >= 0 &&
+                  a->boneFootL >= 0 && a->boneThighR >= 0 &&
+                  a->boneCalfR >= 0 && a->boneFootR >= 0;
+  float targetDL = 0.0f, targetDR = 0.0f;
+  Vector3 normL = {0, 1, 0}, normR = {0, 1, 0};
+  if (haveLegs && in.groundFn != NULL && w > 0.001f) {
+    // Ground plane under the character (the model origin's ground).
+    float baseY = in.worldPos.y;
+    float gy;
+    if (in.groundFn(in.groundUser, in.worldPos, &gy, NULL)) baseY = gy;
 
-    // Fold the landing knee-bend into both feet so the planted feet track
-    // the dropping pelvis. (Slope inputs arrive pre-ramped by the game —
-    // see BrushAnimInput.)
-    float landBend = landDip * LAND_KNEE_RATIO;
-    float dl = in.leftFootDelta + landBend;
-    float dr = in.rightFootDelta + landBend;
-
-    if (fabsf(dl) > 0.005f) {
-      Quaternion qThigh = QuaternionFromEuler(-dl * thighGain, 0.0f, 0.0f);
-      a->blendPose[a->boneThighL].rotation =
-          QuaternionMultiply(a->blendPose[a->boneThighL].rotation, qThigh);
-      Quaternion qCalf = QuaternionFromEuler(dl * calfGain, 0.0f, 0.0f);
-      a->blendPose[a->boneCalfL].rotation =
-          QuaternionMultiply(a->blendPose[a->boneCalfL].rotation, qCalf);
-      Quaternion qFoot = QuaternionFromEuler(-dl * footGain, 0.0f, 0.0f);
-      a->blendPose[a->boneFootL].rotation =
-          QuaternionMultiply(a->blendPose[a->boneFootL].rotation, qFoot);
+    float cy = cosf(in.yawRad), sy = sinf(in.yawRad);
+    for (int side = 0; side < 2; side++) {
+      int footBone = side == 0 ? a->boneFootL : a->boneFootR;
+      Vector3 ankle = BoneModelPos(a, footBone);
+      // Model space -> world (yaw about Y, then translate).
+      Vector3 probe = {
+          in.worldPos.x + ankle.x * cy + ankle.z * sy,
+          in.worldPos.y + ankle.y,
+          in.worldPos.z - ankle.x * sy + ankle.z * cy,
+      };
+      float hitY;
+      Vector3 n = {0, 1, 0};
+      float d = 0.0f;
+      if (in.groundFn(in.groundUser, probe, &hitY, &n))
+        d = Clamp(hitY - baseY, -0.5f, 0.5f) * w;
+      if (side == 0) { targetDL = d; normL = n; }
+      else { targetDR = d; normR = n; }
     }
-    if (fabsf(in.groundPitch) > 0.01f) {
-      // Lay both feet onto the slope: a MODEL-SPACE rotation about the
-      // lateral (X) axis, converted to each foot's local frame through its
-      // parent chain — immune to bone-local axis conventions (a local-axis
-      // euler twists differently depending on the leg's current swing).
-      Quaternion dq = QuaternionFromAxisAngle((Vector3){1.0f, 0.0f, 0.0f},
-                                              -in.groundPitch);
-      ApplyModelSpaceRotation(a, a->boneFootL, dq);
-      ApplyModelSpaceRotation(a, a->boneFootR, dq);
-    }
-    if (fabsf(dr) > 0.005f) {
-      Quaternion qThigh = QuaternionFromEuler(-dr * thighGain, 0.0f, 0.0f);
-      a->blendPose[a->boneThighR].rotation =
-          QuaternionMultiply(a->blendPose[a->boneThighR].rotation, qThigh);
-      Quaternion qCalf = QuaternionFromEuler(dr * calfGain, 0.0f, 0.0f);
-      a->blendPose[a->boneCalfR].rotation =
-          QuaternionMultiply(a->blendPose[a->boneCalfR].rotation, qCalf);
-      Quaternion qFoot = QuaternionFromEuler(-dr * footGain, 0.0f, 0.0f);
-      a->blendPose[a->boneFootR].rotation =
-          QuaternionMultiply(a->blendPose[a->boneFootR].rotation, qFoot);
+  }
+  // Smooth the terrain deltas so steps/edges ease instead of popping.
+  float ikBlend = 1.0f - expf(-15.0f * dt);
+  a->footDeltaL += (targetDL - a->footDeltaL) * ikBlend;
+  a->footDeltaR += (targetDR - a->footDeltaR) * ikBlend;
+
+  // Pelvis follows the LOWEST foot (never rises above the animation), and
+  // the landing dip rides on top; the IK below keeps the feet planted, so
+  // the dip is what bends the knees.
+  float pelvis = fminf(0.0f, fminf(a->footDeltaL, a->footDeltaR));
+  pelvis = fmaxf(pelvis, -0.30f);
+  a->pelvisOffset = pelvis - landDip;
+
+  if (haveLegs && (in.groundFn != NULL || landDip > 0.0001f)) {
+    for (int side = 0; side < 2; side++) {
+      int thighB = side == 0 ? a->boneThighL : a->boneThighR;
+      int calfB = side == 0 ? a->boneCalfL : a->boneCalfR;
+      int footB = side == 0 ? a->boneFootL : a->boneFootR;
+      float delta = side == 0 ? a->footDeltaL : a->footDeltaR;
+      Vector3 groundN = side == 0 ? normL : normR;
+
+      Vector3 H = BoneModelPos(a, thighB);
+      Vector3 K = BoneModelPos(a, calfB);
+      Vector3 A = BoneModelPos(a, footB);
+      float L1 = Vector3Distance(H, K);
+      float L2 = Vector3Distance(K, A);
+      if (L1 < 0.01f || L2 < 0.01f) continue;
+
+      // Ankle target: the animated ankle raised/lowered by the terrain
+      // delta, compensated for the root shift the game will apply.
+      Vector3 T = {A.x, A.y + delta - a->pelvisOffset, A.z};
+      float reach = Clamp(Vector3Distance(H, T), fabsf(L1 - L2) + 0.01f,
+                          L1 + L2 - 0.01f);
+
+      // 1. Knee angle from the law of cosines, rotating the calf about the
+      //    knee-plane normal (preserves the animation's knee direction).
+      Vector3 u = Vector3Subtract(H, K);
+      Vector3 v = Vector3Subtract(A, K);
+      Vector3 kneeAxis = Vector3CrossProduct(v, u);
+      if (Vector3Length(kneeAxis) < 1e-5f)
+        kneeAxis = (Vector3){1.0f, 0.0f, 0.0f};
+      kneeAxis = Vector3Normalize(kneeAxis);
+      float curKnee =
+          acosf(Clamp(Vector3DotProduct(Vector3Normalize(u),
+                                        Vector3Normalize(v)),
+                      -1.0f, 1.0f));
+      float wantKnee = acosf(
+          Clamp((L1 * L1 + L2 * L2 - reach * reach) / (2.0f * L1 * L2),
+                -1.0f, 1.0f));
+      Quaternion qKnee =
+          QuaternionFromAxisAngle(kneeAxis, wantKnee - curKnee);
+      ApplyModelSpaceRotation(a, calfB, qKnee);
+      // Verify the bend direction; if the interior angle moved the wrong
+      // way, apply the inverse twice (robust against axis handedness).
+      Vector3 A1 = BoneModelPos(a, footB);
+      float gotKnee = acosf(Clamp(
+          Vector3DotProduct(
+              Vector3Normalize(Vector3Subtract(H, BoneModelPos(a, calfB))),
+              Vector3Normalize(Vector3Subtract(A1, BoneModelPos(a, calfB)))),
+          -1.0f, 1.0f));
+      if (fabsf(gotKnee - wantKnee) > fabsf(curKnee - wantKnee)) {
+        ApplyModelSpaceRotation(
+            a, calfB,
+            QuaternionFromAxisAngle(kneeAxis, 2.0f * (curKnee - wantKnee)));
+        A1 = BoneModelPos(a, footB);
+      }
+
+      // 2. Swing the whole leg at the hip so the ankle lands on the target.
+      Vector3 fromDir = Vector3Normalize(Vector3Subtract(A1, H));
+      Vector3 toDir = Vector3Normalize(Vector3Subtract(T, H));
+      Quaternion qHip = QuaternionFromVector3ToVector3(fromDir, toDir);
+      ApplyModelSpaceRotation(a, thighB, qHip);
+
+      // 3. Counter-rotate the ankle so the foot keeps its authored world
+      //    orientation, then aim it to the ground normal (capped).
+      Quaternion qFix = QuaternionInvert(QuaternionMultiply(qHip, qKnee));
+      ApplyModelSpaceRotation(a, footB, qFix);
+      if (w > 0.001f) {
+        // Ground normal into model space (undo the yaw).
+        float cy2 = cosf(in.yawRad), sy2 = sinf(in.yawRad);
+        Vector3 nM = {groundN.x * cy2 - groundN.z * sy2, groundN.y,
+                      groundN.x * sy2 + groundN.z * cy2};
+        Quaternion qAim =
+            QuaternionFromVector3ToVector3((Vector3){0, 1, 0}, nM);
+        // Cap + weight the aim so noisy normals can't twist the foot.
+        float ang = 2.0f * acosf(Clamp(fabsf(qAim.w), -1.0f, 1.0f));
+        if (ang > 0.45f) {
+          float k = 0.45f / ang;
+          qAim = QuaternionSlerp(QuaternionIdentity(), qAim, k);
+        }
+        qAim = QuaternionSlerp(QuaternionIdentity(), qAim, w);
+        ApplyModelSpaceRotation(a, footB, qAim);
+      }
     }
   }
 

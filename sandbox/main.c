@@ -48,9 +48,6 @@ typedef struct Sandbox {
   BrushCharacter body; // Jolt kinematic capsule (walls, steps, slopes)
   float velY;          // vertical velocity (gravity + jumps)
   float airTime;       // continuous seconds off the ground (debounced flag)
-  float pelvisDrop;    // smoothed drop to the lowest foot contact (<= 0)
-  float footDeltaL, footDeltaR; // per-foot IK inputs (>= 0)
-  float groundPitch;   // smoothed slope along facing (rad, uphill positive)
   float ikWeight;      // shared slope-IK ramp: 0 airborne -> 1 grounded
   bool crouched;
   float rollTimer;     // seconds of roll movement burst remaining
@@ -68,6 +65,20 @@ typedef struct Sandbox {
   bool menuOpen;
   int menuSel;
 } Sandbox;
+
+// Foot-IK ground query: height (and normal) under a world position.
+static bool GroundUnder(void *user, Vector3 probe, float *outHeight,
+                        Vector3 *outNormal) {
+  Sandbox *s = user;
+  Vector3 start = {probe.x, probe.y + 1.0f, probe.z};
+  Vector3 hit, n;
+  if (!BrushPhysicsRaycast(&s->phys, start, (Vector3){0, -1, 0}, 3.0f, &hit,
+                           &n))
+    return false;
+  *outHeight = hit.y;
+  if (outNormal != NULL) *outNormal = n;
+  return true;
+}
 
 // Camera anti-clip: raycast through the physics world so crates/ramps never
 // cut between the camera and the character.
@@ -247,63 +258,10 @@ static void SandboxFixedUpdate(void *user, float dt) {
   // a landing resolves; raw flag -> animator re-triggers jump each flicker.
   s->airTime = s->grounded ? 0.0f : s->airTime + dt;
 
-  // --- Foot IK inputs (donor pattern): raycast under each foot; the pelvis
-  // drops to the LOWEST contact (applied on the model transform, so the body
-  // stays upright) and the other leg bends via knee IK to stay planted.
-  float leftDelta = 0.0f, rightDelta = 0.0f, targetDrop = 0.0f;
-  float targetPitch = 0.0f;
-  if (s->grounded) {
-    Vector3 rightDir = {cosf(s->yaw), 0.0f, -sinf(s->yaw)};
-    Vector3 fwdDir = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
-    Vector3 down = {0.0f, -1.0f, 0.0f};
-    Vector3 hit;
-
-    // Across-slope stance: probe under each foot (0.20 m lateral).
-    Vector3 footL = Vector3Add(s->pos, Vector3Scale(rightDir, -0.20f));
-    Vector3 footR = Vector3Add(s->pos, Vector3Scale(rightDir, 0.20f));
-    footL.y += 1.0f;
-    if (BrushPhysicsRaycast(&s->phys, footL, down, 2.0f, &hit, NULL))
-      leftDelta = hit.y - s->pos.y;
-    footR.y += 1.0f;
-    if (BrushPhysicsRaycast(&s->phys, footR, down, 2.0f, &hit, NULL))
-      rightDelta = hit.y - s->pos.y;
-    // Ledge guard: a probe shooting past an edge reads metres of drop and
-    // dislocates the pose — cap everything at leg-believable ranges.
-    leftDelta = fmaxf(leftDelta, -0.45f);
-    rightDelta = fmaxf(rightDelta, -0.45f);
-    if (leftDelta < 0.0f || rightDelta < 0.0f)
-      targetDrop = fmaxf(fminf(leftDelta, rightDelta), -0.28f);
-
-    // Along-facing slope pitch: fore/aft probes rotate the feet onto the
-    // incline (the lateral probes read zero when facing straight up a ramp).
-    float hFore = 0.0f, hBack = 0.0f;
-    Vector3 pFore = Vector3Add(s->pos, Vector3Scale(fwdDir, 0.25f));
-    Vector3 pBack = Vector3Add(s->pos, Vector3Scale(fwdDir, -0.25f));
-    pFore.y += 1.0f;
-    pBack.y += 1.0f;
-    bool okF = BrushPhysicsRaycast(&s->phys, pFore, down, 2.0f, &hit, NULL);
-    if (okF) hFore = hit.y - s->pos.y;
-    bool okB = BrushPhysicsRaycast(&s->phys, pBack, down, 2.0f, &hit, NULL);
-    if (okB) hBack = hit.y - s->pos.y;
-    if (okF && okB && fabsf(hFore) < 0.6f && fabsf(hBack) < 0.6f)
-      targetPitch = atan2f(hFore - hBack, 0.5f);
-  }
-
-  // One shared IK weight scales EVERYTHING (pelvis drop, knee deltas, foot
-  // pitch): landing raycasts are noisy, and ramping only part of the system
-  // desynchronizes the body drop from the leg compensation.
+  // Shared IK weight: 0 while airborne, eases back in after touchdown
+  // (landing raycasts are noisy while the capsule settles). The animator
+  // does the actual foot IK via the GroundUnder callback.
   s->ikWeight = s->grounded ? fminf(s->ikWeight + dt / 0.25f, 1.0f) : 0.0f;
-  targetDrop *= s->ikWeight;
-  targetPitch *= s->ikWeight;
-  leftDelta *= s->ikWeight;
-  rightDelta *= s->ikWeight;
-
-  s->pelvisDrop += (targetDrop - s->pelvisDrop) * (1.0f - expf(-15.0f * dt));
-  s->groundPitch +=
-      (targetPitch - s->groundPitch) * (1.0f - expf(-12.0f * dt));
-  // Deltas relative to the lowered pelvis, clamped so legs only bend up.
-  s->footDeltaL = fminf(fmaxf(leftDelta - s->pelvisDrop, 0.0f), 0.35f);
-  s->footDeltaR = fminf(fmaxf(rightDelta - s->pelvisDrop, 0.0f), 0.35f);
 
   // Face the movement direction (shortest arc, smoothed).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
@@ -371,9 +329,11 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
                       (BrushAnimInput){.speed = horizSpeed,
                                        .airborne = s->airTime > 0.06f,
                                        .crouched = s->crouched,
-                                       .leftFootDelta = s->footDeltaL,
-                                       .rightFootDelta = s->footDeltaR,
-                                       .groundPitch = s->groundPitch},
+                                       .groundFn = GroundUnder,
+                                       .groundUser = s,
+                                       .worldPos = s->renderPos,
+                                       .yawRad = s->renderYaw,
+                                       .ikWeight = s->ikWeight},
                       dt);
 }
 
@@ -406,11 +366,11 @@ static void SandboxDraw(void *user) {
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
 
   // Skinned mannequin, feet at p (the animator already posed the meshes).
-  // The body stays UPRIGHT on slopes: the root lowers by pelvisDrop to the
-  // downhill foot and the foot IK bends the uphill leg (see fixedUpdate).
+  // The body stays UPRIGHT on slopes: the animator lowered the hips to the
+  // lowest foot (and the landing dip) and outputs that as pelvisOffset.
   // Submitted twice: once as scene geometry, once as a sun-shadow caster.
   Matrix xform = MatrixMultiply(
-      rot, MatrixTranslate(p.x, p.y + s->pelvisDrop, p.z));
+      rot, MatrixTranslate(p.x, p.y + s->animator.pelvisOffset, p.z));
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->mannequin, xform, WHITE);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->mannequin, xform, WHITE);
 

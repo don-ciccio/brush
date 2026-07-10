@@ -77,22 +77,21 @@ typedef struct BrushAnimInput {
                  // jump state every flicker (visible landing stutter).
   bool crouched; // hold-to-crouch gameplay state
 
-  // Foot IK: ground height under each foot MINUS ground height under the
-  // character, with the game's pelvis drop already folded in and clamped to
-  // >= 0 (legs bend up, never backward). 0 disables. See the donor pattern:
-  // raycast under each foot, pelvisDrop = min(deltas) smoothed, deltas -=
-  // pelvisDrop, then lower the MODEL by pelvisDrop and pass deltas here.
-  float leftFootDelta;
-  float rightFootDelta;
-  // Ground pitch along the facing direction (radians, uphill-ahead positive):
-  // the feet rotate in MODEL space to lie on the slope. 0 on flat ground.
+  // --- Foot IK (standard pipeline: rays from the ANIMATED feet, pelvis
+  // lowers to the lowest foot, analytic two-bone IK per leg, ankle aimed to
+  // the ground normal). Set groundFn to enable; the animator computes the
+  // animated foot world positions itself from worldPos/yawRad.
   //
-  // IMPORTANT: scale ALL slope-IK inputs — these deltas, the pitch, AND the
-  // pelvis drop you apply to the model transform — by one shared weight that
-  // eases 0->1 over ~0.25s after touchdown. Raycasts at landing are noisy,
-  // and ramping only part of the system desynchronizes body drop from leg
-  // compensation (legs read as displaced).
-  float groundPitch;
+  // groundFn: return true and fill *outHeight (world Y) — and *outNormal if
+  // non-NULL — for the ground under `probe` (a world position; query
+  // downward from ~1m above it). NULL disables foot IK.
+  bool (*groundFn)(void *user, Vector3 probe, float *outHeight,
+                   Vector3 *outNormal);
+  void *groundUser;
+  Vector3 worldPos; // character feet world position (the model origin)
+  float yawRad;     // model yaw applied at draw time
+  float ikWeight;   // shared IK weight: ramp 0->1 over ~0.25s after
+                    // touchdown, 0 while airborne (landing rays are noisy)
 } BrushAnimInput;
 
 typedef struct BrushAnimator {
@@ -119,6 +118,11 @@ typedef struct BrushAnimator {
   float landTimer;    // seconds remaining in the current dip (0 = idle)
   float landStrength; // 0..1 magnitude captured at impact
   bool landDebugPin;  // BRUSH_ANIM_LAND: hold the dip for screenshots
+
+  // Foot IK state (smoothed per-foot terrain deltas) + output.
+  float footDeltaL, footDeltaR;
+  float pelvisOffset; // OUTPUT: add to the model's draw Y (<= 0). Includes
+                      // the terrain pelvis drop and the landing dip.
 
   // Leg bones resolved by name at init (-1 = not found, IK skipped).
   int bonePelvis;

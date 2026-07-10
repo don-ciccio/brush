@@ -32,10 +32,14 @@ the donor animator's sampling/blending (frame-interpolated clip sampling,
 per-bone lerp/slerp blending, phase-synced 1-D gait blend idle→walk→jog→sprint,
 three-phase jump, snapshot cross-fades), driving the CC0 Quaternius mannequin
 (assets/character/mannequin.glb, trimmed from UAL1 via headless Blender —
-tools/trim_ual.py). Since extended with the motion-starter set: crouch
-idle/walk state, roll one-shot, procedural FOOT IK + pelvis drop (body stays
-upright on slopes; legs resolve by bone name, UE-style rig), and landing
-absorption (squat-and-recover on touchdown, BRUSH_ANIM_LAND pins it).
+tools/trim_ual.py). Since extended with the motion-starter set (crouch idle/walk state, roll
+one-shot) and REAL foot IK — the standard pipeline (cf. ozz-animation's
+foot_ik sample): ground queried under the ANIMATED feet via a game callback,
+pelvis lowers to the lowest reachable foot (pelvisOffset output), analytic
+two-bone leg IK (law of cosines, knee plane preserved, model-space rotations
+through the parent chain), ankles aimed to the ground normal. Landing
+absorption rides on the same IK (pelvis dips, feet stay planted).
+BRUSH_ANIM_LAND pins the dip.
 Still to port later: look-at IK, procedural leans, 2-D strafe blends (note:
 the UAL packs ship no strafe clips — donor used procedural lean for lateral).
 
