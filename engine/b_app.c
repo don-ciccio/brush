@@ -97,8 +97,15 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
     }
 
     // Auto-screenshot harness for automated visual verification.
+    // BRUSH_AUTO_FRAMES overrides when the capture fires (default 3 s).
+    static int shotFrame = 0;
+    if (shotFrame == 0) {
+      const char *sf = getenv("BRUSH_AUTO_FRAMES");
+      shotFrame = (sf != NULL) ? atoi(sf) : 180;
+      if (shotFrame <= 0) shotFrame = 180;
+    }
     frameCount++;
-    if (getenv("BRUSH_AUTO_SCREENSHOT") != NULL && frameCount == 180) {
+    if (getenv("BRUSH_AUTO_SCREENSHOT") != NULL && frameCount == shotFrame) {
       TakeScreenshot("screenshot.png");
       TraceLog(LOG_INFO, "Auto-screenshot saved to screenshot.png");
       g_running = false;

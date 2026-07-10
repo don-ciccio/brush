@@ -252,10 +252,13 @@ static void SandboxInit(void *user) {
   // collider path) rising 2 m over ~6.3 m (18 deg), meeting the platform lip.
   s->ramp = LoadModelFromMesh(GenMeshCube(3.0f, 0.3f, 6.6f));
   s->ramp.materials[0].shader = BrushGetLitShader();
-  float rampAng = atan2f(2.0f, 6.3f);
+  // Placed so the TOP surface (not the slab centre) runs flush: ground level
+  // at the approach, exactly 2.0 m at the platform face (z=-17.5). The slab's
+  // lower half buries into ground/platform — no lip at either end.
+  float rampAng = asinf(2.0f / 6.6f); // surface rises 2 m over its 6.6 m span
   s->rampXform = MatrixMultiply(
       MatrixRotateX(rampAng),
-      MatrixTranslate(9.0f, gy + 1.14f, -14.35f));
+      MatrixTranslate(9.0f, gy + 0.857f, -14.40f));
   BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
                             "ramp");
 
@@ -298,6 +301,16 @@ static void SandboxFixedUpdate(void *user, float dt) {
     TraceLog(LOG_INFO, "LANDDBG t=%d y=%+.4f velY=%+.3f grounded=%d state=%d",
              jf, s->pos.y, s->velY, s->grounded,
              (int)BrushAnimatorState(&s->animator));
+  }
+
+  // Traversal harness: BRUSH_POS_DBG logs the capsule position twice a
+  // second — pair with BRUSH_SPAWN + BRUSH_AUTO_MOVE to verify stairs,
+  // ramps, and ledges without eyeballing screenshots.
+  if (getenv("BRUSH_POS_DBG") != NULL) {
+    static int pf = 0;
+    if (++pf % 30 == 0)
+      TraceLog(LOG_INFO, "POSDBG t=%.1f pos=(%+.2f %+.2f %+.2f) grounded=%d",
+               pf / 60.0f, s->pos.x, s->pos.y, s->pos.z, s->grounded);
   }
 
   // Screenshot harness: BRUSH_AUTO_MOVE=walk|jog|sprint holds forward input
