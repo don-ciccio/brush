@@ -1,0 +1,6 @@
+build/
+screenshot.png
+.DS_Store
+*.o
+*.d
+compile_commands.json

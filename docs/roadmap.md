@@ -1,0 +1,68 @@
+# brush roadmap
+
+brush is extracted from a working open-world game (private repo: "racer" /
+Crop Circles, ~14K LOC), not written from scratch. Each system below already
+exists and runs there; the work is decoupling it from that game's god struct
+and content, then landing it here behind the layer/config APIs. Order follows
+dependency, not glamour. The donor game keeps every system honest: nothing is
+ported speculatively.
+
+## Ground rules (learned the hard way in the donor codebase)
+
+- **The worker thread never touches GL.** Streamed systems split CPU-build
+  (background) from GPU-finalize (main thread) with an atomic handoff.
+- **Determinism**: procedural functions are seeded world-space evaluations;
+  neighbouring chunks must agree at shared edges.
+- **Instanced draw-call count is the metric**: batch instances across chunks,
+  never per-chunk.
+- **Single sun authority**: day/night animates the one directional light.
+- **raylib glTF loads prepend a default material at index 0** — always assign
+  through `meshMaterial[]`.
+- Engine never includes game code; every port keeps `make verify` green.
+
+## v0 — done
+
+Layered render pipeline (submit/execute, F2 term isolation), procedural sky
+(Rayleigh/Mie + volumetric FBM clouds + stars), fixed-timestep loop with
+render interpolation, orbit camera with auto-follow, action-based input
+(keyboard+gamepad), F1 log console, zero-asset sandbox, screenshot harness.
+
+## v0.x — pipeline depth (ports from the donor)
+
+1. **HDR post pipeline**: scene renders to a float target; bloom (multi-scale),
+   tone map, color grade, CAS sharpen, SSAO, SMAA. The F2 debug views become
+   real intermediate targets; sky returns to linear output.
+2. **Shadow mapping**: sun depth pass executes the `BRUSH_LAYER_SHADOW`
+   submissions (API already accepts them).
+3. **Render scale**: internal resolution decoupled from window/HUD resolution
+   (the retina thermal lever).
+4. **Time of day**: animated sun + moon driving sky, shadows, exposure.
+
+## v1 — the open-world core
+
+5. **Jolt physics** (vendored joltc): static/mesh/trigger bodies, raycasts,
+   kinematic character controller; camera anti-clip raycast hook.
+6. **Chunk-streamed world**: 64 m chunks, background generation worker,
+   seeded heightmap terrain + collision, rebase seam (`WorldToRender`
+   chokepoint), hysteresis load/unload.
+7. **Instanced foliage**: per-layer scatter tables, unified cross-chunk
+   instance batches, LOD decimation, trail interaction, horizon culling.
+8. **Skeletal animation**: clip registry + state machine (1D/2D blends),
+   look-at/foot IK, procedural leans + landing absorption. Needs a CC0 rigged
+   character (Quaternius/Kenney) — donor-game assets are license-bound.
+
+## v1.x — foundation systems (new builds, not ports)
+
+9. **Asset manager**: logical names -> paths via manifest, graceful fallbacks.
+10. **Config**: settings file replacing env-var sprawl; data-driven bindings.
+11. **World definition files**: seed, foliage tables, authored placements —
+    a new game becomes data, not code.
+12. **Audio**: bus mixer, 3D positional playback, ambient beds.
+13. **Save/load**: versioned, section-registered.
+14. **UI toolkit**: immediate-mode widgets grown out of the sandbox menu.
+
+## v2 — RPG toolkit
+
+Entity pool (chunk-resident spawn/despawn), interaction volumes ("press E"),
+NPC behavior states + waypoint navigation, data-driven dialogue, quest flags,
+inventory/stats.
