@@ -45,10 +45,8 @@ typedef struct Sandbox {
   Model floor;
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
-  Model shadowBlob;
 
   Texture2D checkerTex;
-  Texture2D blobTex;
 
   bool menuOpen;
   int menuSel;
@@ -80,14 +78,6 @@ static void SandboxInit(void *user) {
   BoundingBox bb = GetModelBoundingBox(s->mannequin);
   TraceLog(LOG_INFO, "SANDBOX: mannequin bounds y [%.2f .. %.2f], %d bones",
            bb.min.y, bb.max.y, s->mannequin.boneCount);
-
-  // Soft radial blob shadow (transparent layer content).
-  Image blob = GenImageGradientRadial(256, 256, 0.0f, (Color){0, 0, 0, 150},
-                                      (Color){0, 0, 0, 0});
-  s->blobTex = LoadTextureFromImage(blob);
-  UnloadImage(blob);
-  s->shadowBlob = LoadModelFromMesh(GenMeshPlane(1.0f, 1.0f, 1, 1));
-  s->shadowBlob.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = s->blobTex;
 
   // Everything lit by the engine's layered forward shader.
   Shader lit = BrushGetLitShader();
@@ -230,17 +220,10 @@ static void SandboxDraw(void *user) {
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->floor, MatrixIdentity(), WHITE);
 
   // Skinned mannequin, feet at p (the animator already posed the meshes).
+  // Submitted twice: once as scene geometry, once as a sun-shadow caster.
   Matrix xform = MatrixMultiply(rot, MatrixTranslate(p.x, p.y, p.z));
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->mannequin, xform, WHITE);
-
-  // Blob shadow: shrinks and fades with jump height (transparent layer).
-  float h = fminf(p.y / 3.0f, 1.0f);
-  float shScale = 0.9f * (1.0f - 0.4f * h);
-  unsigned char shAlpha = (unsigned char)(255.0f * (1.0f - 0.6f * h));
-  Matrix shadow = MatrixMultiply(MatrixScale(shScale, 1.0f, shScale),
-                                 MatrixTranslate(p.x, 0.02f, p.z));
-  BrushRenderSubmit(BRUSH_LAYER_TRANSPARENT, &s->shadowBlob, shadow,
-                    (Color){255, 255, 255, shAlpha});
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->mannequin, xform, WHITE);
 
   BrushRenderExecute(s->camera.cam);
 }
@@ -262,6 +245,9 @@ static void SandboxDrawUI(void *user) {
   DrawText(TextFormat("Press [F3] to toggle HDR post: %s",
                       BrushRenderIsPostEnabled() ? "on" : "off"),
            16, 118, 20, DARKGRAY);
+  DrawText(TextFormat("Press [F4] to toggle sun shadows: %s",
+                      BrushRenderShadowsEnabled() ? "on" : "off"),
+           16, 144, 20, DARKGRAY);
   DrawText(TextFormat("%d FPS", GetFPS()), GetScreenWidth() - 110, 14, 24,
            (Color){90, 120, 200, 255});
 
@@ -287,9 +273,7 @@ static void SandboxShutdown(void *user) {
   BrushAnimatorUnload(&s->animator);
   UnloadModel(s->floor);
   UnloadModel(s->mannequin);
-  UnloadModel(s->shadowBlob);
   UnloadTexture(s->checkerTex);
-  UnloadTexture(s->blobTex);
 }
 
 int main(void) {

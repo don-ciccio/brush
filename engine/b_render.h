@@ -4,8 +4,9 @@
  *   The frame is built as an ordered stack of layers; a game submits draws
  *   into a layer and the engine executes the stack:
  *
- *     SHADOW       sun depth pass (v0: accepted but not executed yet — the
- *                  shadow-map port slots in here without API changes)
+ *     SHADOW       sun depth pass: casters submitted here render into the
+ *                  shadow map (b_shadow.h); the lit shader tests receivers
+ *                  against it with PCSS soft shadows
  *     OPAQUE       base color + direct lighting (the "color pass": albedo,
  *                  diffuse sunlight, specular highlights in one forward
  *                  shader for now — see uLayerView for the decomposition)
@@ -48,6 +49,7 @@ typedef enum {
   BRUSH_VIEW_DIFFUSE,
   BRUSH_VIEW_SPECULAR,
   BRUSH_VIEW_NORMALS,
+  BRUSH_VIEW_SHADOW, // sun visibility term (white = lit, black = shadowed)
   BRUSH_VIEW_COUNT
 } BrushLayerView;
 
@@ -61,6 +63,10 @@ void BrushRenderShutdown(void);
 // so the isolated lighting terms stay readable (no tone map / grade on them).
 void BrushRenderTogglePost(void);
 bool BrushRenderIsPostEnabled(void);
+
+// Sun shadow toggle (F4; starts enabled unless BRUSH_NO_SHADOW is set).
+void BrushRenderToggleShadows(void);
+bool BrushRenderShadowsEnabled(void);
 
 // Access the post pipeline's tunables (bloom threshold/intensity, exposure,
 // sharpen). Returns NULL if the HDR target could not be created.

@@ -25,7 +25,53 @@ uniform int uLayerView;
 // authored in sRGB, so decode them to linear here — the post composite
 // gamma-encodes ONCE at the end. 0 on the direct LDR path (no post), where
 // output stays in the authored space.
-uniform float uLinearize;      // 0 final, 1 albedo, 2 diffuse, 3 specular, 4 normals
+uniform float uLinearize;
+
+// --- Sun shadow mapping (PCSS: blocker search -> penumbra-widening PCF) ---
+uniform mat4 lightVP;        // sun light view-projection
+uniform sampler2D shadowMap; // sun depth map (depth-only FBO)
+uniform float uShadowEnabled;
+uniform float uShadowSoftness; // light size in shadow texels
+uniform float uShadowTexel;    // 1.0 / shadow map resolution
+
+// Returns 0 = fully lit, 1 = fully shadowed.
+float ShadowFactor(vec3 fragPos, float ndotl) {
+    if (uShadowEnabled < 0.5) return 0.0;
+    vec4 p = lightVP * vec4(fragPos, 1.0);
+    vec3 proj = p.xyz / p.w;
+    proj = proj * 0.5 + 0.5;
+    if (proj.z > 1.0) return 0.0;
+    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0)
+        return 0.0;
+
+    float bias = max(0.0015 * (1.0 - ndotl), 0.00015);
+    float receiver = proj.z - bias;
+    float lightSize = max(uShadowSoftness, 0.001);
+
+    // Blocker search: average depth of occluders near this fragment.
+    float searchStep = lightSize * uShadowTexel * 0.5;
+    float blockerSum = 0.0, blockerCount = 0.0;
+    for (int x = 0; x < 4; x++)
+      for (int y = 0; y < 4; y++) {
+        float d = texture(shadowMap,
+                          proj.xy + (vec2(x, y) - 1.5) * searchStep).r;
+        if (d < receiver) { blockerSum += d; blockerCount += 1.0; }
+      }
+    if (blockerCount < 0.5) return 0.0;
+
+    // Penumbra widens with receiver-blocker distance (soft far, sharp near).
+    float avgBlocker = blockerSum / blockerCount;
+    float penumbra = (receiver - avgBlocker) / max(avgBlocker, 1e-4);
+    float radius = clamp(penumbra * lightSize, 1.0, lightSize) * uShadowTexel;
+
+    float sh = 0.0;
+    for (int x = 0; x < 4; x++)
+      for (int y = 0; y < 4; y++)
+        if (receiver >
+            texture(shadowMap, proj.xy + (vec2(x, y) - 1.5) * radius).r)
+            sh += 1.0;
+    return sh / 16.0;
+}
 
 out vec4 finalColor;
 
@@ -39,10 +85,14 @@ void main()
     vec3 L = normalize(uSunDir);
     float diff = max(dot(N, L), 0.0);
 
+    // Sun visibility from the shadow map scales both direct terms.
+    float sunVis = 1.0 - ShadowFactor(fragPosition, diff);
+    diff *= sunVis;
+
     vec3 V = normalize(viewPos - fragPosition);
     vec3 H = normalize(L + V);
     float spec = (diff > 0.0)
-        ? pow(max(dot(N, H), 0.0), 48.0) * uSpecStrength
+        ? pow(max(dot(N, H), 0.0), 48.0) * uSpecStrength * sunVis
         : 0.0;
 
     vec3 color = albedo * (uAmbient + uSunColor * diff) + uSunColor * spec;
@@ -51,6 +101,7 @@ void main()
     else if (uLayerView == 2) color = vec3(diff);
     else if (uLayerView == 3) color = vec3(spec);
     else if (uLayerView == 4) color = N * 0.5 + 0.5;
+    else if (uLayerView == 5) color = vec3(sunVis);
 
     finalColor = vec4(color, tex.a * colDiffuse.a * fragColor.a);
 }

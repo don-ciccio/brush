@@ -16,7 +16,7 @@ brush renders a frame as an explicit ordered stack of layers, like paint:
 
 | Layer | Contents |
 |---|---|
-| `SHADOW` | sun depth pass (reserved — shadow mapping port) |
+| `SHADOW` | sun depth pass — casters render into the shadow map; receivers get PCSS soft shadows |
 | `OPAQUE` | the color pass: albedo × (ambient + diffuse sunlight) + specular |
 | `SKY` | procedural atmosphere, drawn after opaque so early-Z rejects covered pixels |
 | `TRANSPARENT` | alpha-blended, sorted back-to-front, depth-write off |
@@ -31,8 +31,8 @@ happens exactly once, so HDR highlights (the sun, bright sky) have real
 headroom to bloom.
 
 Press **F2** in the sandbox to isolate the lighting terms of the opaque pass —
-final / albedo / diffuse / specular / normals — and **F3** to toggle the HDR
-post pipeline.
+final / albedo / diffuse / specular / normals / sun shadow — **F3** toggles
+the HDR post pipeline and **F4** the sun shadows.
 
 ## Build & run
 
@@ -59,6 +59,7 @@ Run from the repo root (shaders load from `engine/shaders/`).
 | **F1** | Debug console (captures all logs) |
 | **F2** | Cycle render layer view |
 | **F3** | Toggle HDR post pipeline |
+| **F4** | Toggle sun shadows |
 
 ## Layout
 
@@ -68,6 +69,7 @@ engine/     the brush library — never includes game code
   b_app       window + fixed-timestep loop (sim at 1/60 s, interpolated render)
   b_render    the layer stack + lit shader
   b_post      HDR pipeline: bloom, ACES + grade composite, CAS upscale
+  b_shadow    sun shadow map: ortho depth pass, texel-snapped follow, PCSS
   b_anim      skeletal animator: named clips, 1-D gait blend, jump phases
   b_sky       procedural atmospheric-scattering sky + FBM clouds
   b_camera    third-person orbit camera with hybrid auto-follow
@@ -84,7 +86,8 @@ Environment toggles: `BRUSH_PERF=1` (uncapped fps + frame-time logs),
 `BRUSH_AUTO_MOVE=walk|jog|sprint` (hold forward input for captures),
 `BRUSH_NO_POST`, `BRUSH_RENDER_SCALE=0.75`, `BRUSH_EXPOSURE`,
 `BRUSH_BLOOM_THRESH`, `BRUSH_BLOOM_INT`, `BRUSH_SHARPEN`, `BRUSH_NO_SHARPEN`,
-`BRUSH_NO_P3` / `BRUSH_DISPLAY_P3`, `BRUSH_P3_STRENGTH`.
+`BRUSH_NO_P3` / `BRUSH_DISPLAY_P3`, `BRUSH_P3_STRENGTH`, `BRUSH_NO_SHADOW`,
+`BRUSH_SHADOW_RES=2048`, `BRUSH_SHADOW_SOFT=4`.
 
 ## License
 

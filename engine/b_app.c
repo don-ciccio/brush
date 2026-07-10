@@ -52,6 +52,7 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
     if (IsKeyPressed(KEY_F1)) BrushConsoleToggle();
     if (IsKeyPressed(KEY_F2)) BrushRenderCycleLayerView();
     if (IsKeyPressed(KEY_F3)) BrushRenderTogglePost();
+    if (IsKeyPressed(KEY_F4)) BrushRenderToggleShadows();
 
     // Fixed-timestep simulation with a substep cap: movement feel is
     // identical at any render rate, and a long hitch can't spiral.

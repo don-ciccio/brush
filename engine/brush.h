@@ -23,6 +23,7 @@
 #include "b_input.h"
 #include "b_post.h"
 #include "b_render.h"
+#include "b_shadow.h"
 #include "b_sky.h"
 
 #endif // BRUSH_H

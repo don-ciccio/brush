@@ -46,8 +46,11 @@ landing absorption, 2-D strafe blends.
    post. Still to port from the donor: **SSAO**, **SMAA**, DOF, god rays,
    volumetric fog (the scene target already keeps a sampleable depth texture
    for them).
-2. **Shadow mapping**: sun depth pass executes the `BRUSH_LAYER_SHADOW`
-   submissions (API already accepts them).
+2. ~~Shadow mapping~~ — DONE (b_shadow): depth-only ortho pass over the
+   `BRUSH_LAYER_SHADOW` submissions, PCSS soft shadows in the lit shader
+   (blocker search -> penumbra-widening PCF), light box follows the view
+   target with texel snapping so edges don't crawl. F4 toggles; "sun shadow"
+   joined the F2 layer views. Future work when the world grows: cascades.
 3. ~~Render scale~~ — DONE, part of b_post (`BrushConfig.renderScale`,
    `BRUSH_RENDER_SCALE`). The HUD stays at native res.
 4. **Time of day**: animated sun + moon driving sky, shadows, exposure.

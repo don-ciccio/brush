@@ -6,6 +6,7 @@
 
 #include "b_render.h"
 #include "b_post.h"
+#include "b_shadow.h"
 #include "b_sky.h"
 
 #include <raymath.h>
@@ -29,6 +30,8 @@ typedef struct BrushRenderState {
   int locLayerView;
   int locSpecStrength;
   int locLinearize;
+  int locLightVP, locShadowMap, locShadowEnabled;
+  int locShadowSoftness, locShadowTexel;
 
   Vector3 sunDir;
   Vector3 sunColor;
@@ -39,6 +42,9 @@ typedef struct BrushRenderState {
 
   BrushPost post;
   bool postEnabled;
+
+  BrushShadow shadow;
+  bool shadowsEnabled;
 
   BrushDrawCmd cmds[BRUSH_LAYER_COUNT][BRUSH_MAX_DRAWS_PER_LAYER];
   int cmdCount[BRUSH_LAYER_COUNT];
@@ -56,6 +62,11 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerView = GetShaderLocation(g_r.lit, "uLayerView");
   g_r.locSpecStrength = GetShaderLocation(g_r.lit, "uSpecStrength");
   g_r.locLinearize = GetShaderLocation(g_r.lit, "uLinearize");
+  g_r.locLightVP = GetShaderLocation(g_r.lit, "lightVP");
+  g_r.locShadowMap = GetShaderLocation(g_r.lit, "shadowMap");
+  g_r.locShadowEnabled = GetShaderLocation(g_r.lit, "uShadowEnabled");
+  g_r.locShadowSoftness = GetShaderLocation(g_r.lit, "uShadowSoftness");
+  g_r.locShadowTexel = GetShaderLocation(g_r.lit, "uShadowTexel");
 
   // Pleasant default morning sun; games override via BrushSetSun.
   BrushSetSun((Vector3){0.45f, 0.55f, 0.35f},
@@ -71,11 +82,15 @@ void BrushRenderInit(int width, int height, float renderScale) {
   BrushPostInit(&g_r.post, width, height, renderScale);
   g_r.postEnabled = (getenv("BRUSH_NO_POST") == NULL);
 
+  BrushShadowInit(&g_r.shadow, 2048);
+  g_r.shadowsEnabled = (getenv("BRUSH_NO_SHADOW") == NULL);
+
   TraceLog(LOG_INFO, "BRUSH: render pipeline ready (%d layers)",
            BRUSH_LAYER_COUNT);
 }
 
 void BrushRenderShutdown(void) {
+  BrushShadowUnload(&g_r.shadow);
   BrushPostUnload(&g_r.post);
   BrushSkyShutdown();
   UnloadShader(g_r.lit);
@@ -130,8 +145,34 @@ void BrushRenderExecute(Camera3D camera) {
   int view = (int)g_r.layerView;
   SetShaderValue(g_r.lit, g_r.locLayerView, &view, SHADER_UNIFORM_INT);
 
-  // SHADOW: reserved. Submissions are accepted so games can already tag
-  // casters; the sun depth pass executes here once shadow mapping is ported.
+  // SHADOW — depth-only pass from the sun over this frame's casters. Runs
+  // before the scene target opens; receivers then sample the map via PCSS.
+  int shadowCount = g_r.cmdCount[BRUSH_LAYER_SHADOW];
+  bool shadowsOn =
+      g_r.shadowsEnabled && g_r.shadow.ready && shadowCount > 0;
+  float shOff = 0.0f;
+  SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOff, SHADER_UNIFORM_FLOAT);
+  if (shadowsOn) {
+    // uShadowEnabled stays 0 during the depth pass (casters draw with the lit
+    // shader; only depth is kept, so skip the PCSS cost while rendering it).
+    BrushShadowBegin(&g_r.shadow, g_r.sunDir, camera.target);
+    for (int i = 0; i < shadowCount; i++)
+      DrawCmd(&g_r.cmds[BRUSH_LAYER_SHADOW][i]);
+    BrushShadowEnd(&g_r.shadow);
+
+    float shOn = 1.0f;
+    SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOn,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValueMatrix(g_r.lit, g_r.locLightVP, g_r.shadow.lightVP);
+    SetShaderValue(g_r.lit, g_r.locShadowSoftness, &g_r.shadow.softness,
+                   SHADER_UNIFORM_FLOAT);
+    float shadowTexel = 1.0f / (float)g_r.shadow.resolution;
+    SetShaderValue(g_r.lit, g_r.locShadowTexel, &shadowTexel,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(g_r.lit, g_r.locShadowMap, &g_r.shadow.slot,
+                   SHADER_UNIFORM_INT);
+    BrushShadowBindMap(&g_r.shadow);
+  }
 
   // With post on, the layer stack renders into the linear HDR target and
   // b_post composites to the backbuffer. Debug layer views bypass post so the
@@ -191,6 +232,16 @@ void BrushRenderTogglePost(void) {
 
 bool BrushRenderIsPostEnabled(void) { return g_r.postEnabled && g_r.post.ready; }
 
+void BrushRenderToggleShadows(void) {
+  g_r.shadowsEnabled = !g_r.shadowsEnabled;
+  TraceLog(LOG_INFO, "BRUSH: sun shadows %s",
+           g_r.shadowsEnabled ? "ON" : "OFF");
+}
+
+bool BrushRenderShadowsEnabled(void) {
+  return g_r.shadowsEnabled && g_r.shadow.ready;
+}
+
 struct BrushPost *BrushRenderGetPost(void) {
   return g_r.post.ready ? &g_r.post : NULL;
 }
@@ -209,6 +260,7 @@ const char *BrushRenderLayerViewName(void) {
   case BRUSH_VIEW_DIFFUSE: return "diffuse light";
   case BRUSH_VIEW_SPECULAR: return "specular";
   case BRUSH_VIEW_NORMALS: return "normals";
+  case BRUSH_VIEW_SHADOW: return "sun shadow";
   default: return "?";
   }
 }
