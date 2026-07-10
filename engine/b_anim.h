@@ -130,6 +130,7 @@ typedef struct BrushAnimator {
   float leanFwd, leanSide;
 
   // Leg bones resolved by name at init (-1 = not found, IK skipped).
+  int boneRoot;
   int boneSpine1, boneSpine2;
   int bonePelvis;
   int boneThighL, boneCalfL, boneFootL;

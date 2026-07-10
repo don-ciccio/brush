@@ -210,6 +210,8 @@ bool BrushAnimatorInit(BrushAnimator *a, Model *model, const char *animFile,
   if (a->clipIndex[BRUSH_CLIP_IDLE] < 0) return false;
 
   // Resolve the procedural-layer bones by name (UE-style rig names).
+  a->boneRoot = FindBone(model, "root");
+  if (a->boneRoot < 0) a->boneRoot = 0; // rigs without a named root
   a->boneSpine1 = FindBone(model, "spine_01");
   a->boneSpine2 = FindBone(model, "spine_02");
   a->bonePelvis = FindBone(model, "pelvis");
@@ -476,13 +478,21 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
         in.airborne ? 0.0f : Clamp(accel * 0.022f, -0.10f, 0.14f);
     float leanTargetS =
         in.airborne ? 0.0f
-                    : Clamp(turnRate * 0.05f *
+                    : Clamp(turnRate * 0.055f *
                                 fminf(a->speedSmooth / 6.0f, 1.0f),
-                            -0.12f, 0.12f);
+                            -0.16f, 0.16f);
     float leanBlend = 1.0f - expf(-8.0f * dt);
     a->leanFwd += (leanTargetF - a->leanFwd) * leanBlend;
     a->leanSide += (leanTargetS - a->leanSide) * leanBlend;
 
+    // Whole-body bank into the turn, pivoting at the ground contact (the
+    // model origin): the banked-cornering look. The foot IK below then
+    // re-plants the feet, so the legs adjust while the body carves.
+    if (fabsf(a->leanSide) > 0.004f) {
+      Quaternion qBank = QuaternionFromAxisAngle(
+          (Vector3){0, 0, 1}, -a->leanSide * 1.3f);
+      RotateSubtree(a, a->boneRoot, (Vector3){0, 0, 0}, qBank);
+    }
     if (a->boneSpine1 >= 0 &&
         (fabsf(a->leanFwd) > 0.004f || fabsf(a->leanSide) > 0.004f)) {
       // Distribute the bend over two spine joints for a curve, not a hinge.
