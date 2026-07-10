@@ -374,7 +374,11 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   // locomotion otherwise lacks. Heavier when landing at speed.
   bool landed = a->prevAirborne && !in.airborne;
   a->prevAirborne = in.airborne;
-  if (landed) {
+  // Only fire the procedural dip when the landing skipped the land CLIP
+  // (running landings roll straight into locomotion). The clip contains its
+  // own crouch-and-recover — stacking the dip on top reads as two landing
+  // animations playing at once.
+  if (landed && a->state != BRUSH_ANIM_JUMP_LAND) {
     a->landTimer = LAND_DURATION;
     a->landStrength = 0.6f + 0.4f * Clamp(in.speed / 6.0f, 0.0f, 1.0f);
   }
@@ -480,11 +484,15 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       float wantKnee = acosf(
           Clamp((L1 * L1 + L2 * L2 - reach * reach) / (2.0f * L1 * L2),
                 -1.0f, 1.0f));
+      // Rotating v=(A-K) about cross(v,u) by the angle between them brings v
+      // onto u, so (curKnee - wantKnee) moves the interior angle exactly to
+      // wantKnee.
       Quaternion qKnee =
-          QuaternionFromAxisAngle(kneeAxis, wantKnee - curKnee);
+          QuaternionFromAxisAngle(kneeAxis, curKnee - wantKnee);
       RotateSubtree(a, calfB, K, qKnee);
-      // Verify the bend direction (handedness-robust): if the interior
-      // angle moved the wrong way, apply the inverse twice.
+      // Safety net for degenerate axes: if the angle still moved the wrong
+      // way, reverse — and FOLD THE CORRECTION INTO qKnee so the ankle
+      // counter-rotation below stays exact.
       Vector3 A1 = a->blendPose[footB].translation;
       float gotKnee = acosf(Clamp(
           Vector3DotProduct(
@@ -492,9 +500,10 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
               Vector3Normalize(Vector3Subtract(A1, K))),
           -1.0f, 1.0f));
       if (fabsf(gotKnee - wantKnee) > 0.01f + fabsf(curKnee - wantKnee)) {
-        RotateSubtree(a, calfB, K,
-                      QuaternionFromAxisAngle(kneeAxis,
-                                              2.0f * (curKnee - wantKnee)));
+        Quaternion qFixup = QuaternionFromAxisAngle(
+            kneeAxis, 2.0f * (wantKnee - curKnee));
+        RotateSubtree(a, calfB, K, qFixup);
+        qKnee = QuaternionMultiply(qFixup, qKnee);
         A1 = a->blendPose[footB].translation;
       }
 

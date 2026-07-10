@@ -77,6 +77,12 @@ static bool GroundUnder(void *user, Vector3 probe, float *outHeight,
     return false;
   *outHeight = hit.y;
   if (outNormal != NULL) *outNormal = n;
+  if (getenv("BRUSH_IK_DBG")) {
+    static int dbg = 0;
+    if (++dbg % 60 == 0)
+      TraceLog(LOG_INFO, "IKDBG probe(%.2f,%.2f,%.2f) hitY=%.2f n=(%.2f,%.2f,%.2f)",
+               probe.x, probe.y, probe.z, hit.y, n.x, n.y, n.z);
+  }
   return true;
 }
 

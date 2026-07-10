@@ -10,6 +10,7 @@
 #include <math.h>
 #include <raymath.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 void BrushOrbitCamInit(BrushOrbitCam *c, Vector3 focus) {
   c->cam.position = Vector3Add(focus, (Vector3){0.0f, 3.0f, 6.0f});
@@ -21,6 +22,11 @@ void BrushOrbitCamInit(BrushOrbitCam *c, Vector3 focus) {
   c->angle = 0.0f;
   c->height = 2.5f;
   c->distance = 6.0f;
+  // Capture harness: fixed orbit angle (radians), boom length, and height.
+  const char *env;
+  if ((env = getenv("BRUSH_CAMANGLE")) != NULL) c->angle = (float)atof(env);
+  if ((env = getenv("BRUSH_ZOOM")) != NULL) c->distance = (float)atof(env);
+  if ((env = getenv("BRUSH_CAMHEIGHT")) != NULL) c->height = (float)atof(env);
   c->minDistance = 2.5f;
   c->maxDistance = 15.0f;
   c->minHeight = 1.0f;
