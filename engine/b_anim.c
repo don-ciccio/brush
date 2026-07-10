@@ -17,11 +17,13 @@
 // Cross-fade durations (seconds).
 #define FADE_TO_JUMP 0.08f
 #define FADE_TO_LAND 0.12f
-#define FADE_TO_LOCO 0.15f
+#define FADE_TO_LOCO 0.18f
 #define FADE_TO_CROUCH 0.18f
-// Leave the land state after this fraction of the land clip (its tail is a
-// slow settle that reads better blended into locomotion).
-#define LAND_EXIT_PHASE 0.55f
+// Leave the land state only after the clip's recovery has SETTLED (pelvis
+// static from ~0.63 on). Cross-fades blend from a frozen snapshot, so exiting
+// mid-motion kills the pose's velocity for an instant — a visible hitch.
+// Rule: cut on stillness, not mid-arc.
+#define LAND_EXIT_PHASE 0.70f
 // Above this speed (m/s) a landing skips the plant-the-feet land clip and
 // cross-fades straight into locomotion — otherwise the character moonwalks
 // while the clip holds its feet still.
