@@ -31,6 +31,10 @@
 // Leave the roll one-shot slightly before its end so the exit fade overlaps
 // the clip's own recovery.
 #define ROLL_EXIT_PHASE 0.92f
+// Movement may cancel the roll once the stand-up is nearly done (pelvis back
+// up from ~0.72 of the clip) — otherwise holding a direction slides the
+// character under the recovery tail (same moonwalk as the landing).
+#define ROLL_CANCEL_PHASE 0.72f
 
 // UAL's Jump_Start opens with a crouch ANTICIPATION that launches by ~7%%
 // of the clip; physics has already launched when the animator sees airborne,
@@ -389,7 +393,10 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       EnterState(a, ground, FADE_TO_LOCO);
     break;
   case BRUSH_ANIM_ROLL:
-    if (a->phase >= ROLL_EXIT_PHASE) EnterState(a, ground, FADE_TO_LOCO);
+    if (a->phase >= ROLL_CANCEL_PHASE && landToLoco)
+      EnterState(a, ground, 0.18f); // movement cancels the stand-up
+    else if (a->phase >= ROLL_EXIT_PHASE)
+      EnterState(a, ground, FADE_TO_LOCO);
     break;
   }
 
