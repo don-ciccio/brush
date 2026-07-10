@@ -18,6 +18,7 @@
 
 #include <math.h>
 #include <raymath.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 // --- Character tuning (units: metres, seconds) ---
@@ -46,6 +47,8 @@ typedef struct Sandbox {
   BrushPhysics phys;
   BrushCharacter body; // Jolt kinematic capsule (walls, steps, slopes)
   float velY;          // vertical velocity (gravity + jumps)
+  float airTime;       // continuous seconds off the ground (debounced flag)
+  Vector3 groundN;     // smoothed ground normal (terrain lean)
 
   Model crate;
   Model ramp;
@@ -109,6 +112,14 @@ static void SandboxInit(void *user) {
     s->mannequin.materials[i].shader = lit;
 
   s->pos = s->prevPos = s->renderPos = (Vector3){0.0f, 0.0f, 0.0f};
+  // Capture harness: BRUSH_SPAWN="x,y,z" drops the character elsewhere
+  // (e.g. on the ramp) for reproducible screenshots.
+  const char *spawn = getenv("BRUSH_SPAWN");
+  if (spawn != NULL) {
+    float sx, sy, sz;
+    if (sscanf(spawn, "%f,%f,%f", &sx, &sy, &sz) == 3)
+      s->pos = s->prevPos = s->renderPos = (Vector3){sx, sy, sz};
+  }
   s->grounded = true;
 
   // --- Physics: floor + a little obstacle course ---
@@ -141,7 +152,10 @@ static void SandboxInit(void *user) {
 
   // Kinematic capsule: radius/height match the mannequin (1.83 m tall).
   BrushCharacterInit(&s->body, &s->phys, s->pos, 0.30f, 1.80f);
+
   s->velY = 0.0f;
+
+  s->groundN = (Vector3){0.0f, 1.0f, 0.0f};
 
   BrushTodInit(&s->tod);
 
@@ -202,6 +216,7 @@ static void SandboxFixedUpdate(void *user, float dt) {
   if (s->jumpQueued && s->grounded) {
     s->velY = JUMP_VELOCITY;
     s->grounded = false;
+    s->airTime = 0.1f; // trip the debounced flag NOW so takeoff isn't delayed
   }
   s->jumpQueued = false;
   if (!s->grounded) s->velY -= GRAVITY * dt;
@@ -214,6 +229,15 @@ static void SandboxFixedUpdate(void *user, float dt) {
   s->grounded = s->body.isGrounded;
   if (s->grounded && s->velY < 0.0f) s->velY = 0.0f;
   s->vel.y = s->body.velocity.y;
+
+  // Debounced airborne: Jolt's ground state flickers for a few frames while
+  // a landing resolves; raw flag -> animator re-triggers jump each flicker.
+  s->airTime = s->grounded ? 0.0f : s->airTime + dt;
+
+  // Smoothed ground normal for terrain lean (slopes read grounded feet).
+  Vector3 wantN = s->grounded ? s->body.groundNormal : (Vector3){0, 1, 0};
+  float nBlend = 1.0f - expf(-10.0f * dt);
+  s->groundN = Vector3Normalize(Vector3Lerp(s->groundN, wantN, nBlend));
 
   // Face the movement direction (shortest arc, smoothed).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
@@ -267,11 +291,12 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
 
   BrushOrbitCamUpdate(&s->camera, s->renderPos, s->vel, dt);
 
-  // Drive the animator from gameplay state (per rendered frame).
+  // Drive the animator from gameplay state (per rendered frame). The
+  // airborne flag is debounced through airTime (see fixedUpdate).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
   BrushAnimatorUpdate(&s->animator,
                       (BrushAnimInput){.speed = horizSpeed,
-                                       .airborne = !s->grounded},
+                                       .airborne = s->airTime > 0.06f},
                       dt);
 }
 
@@ -304,8 +329,22 @@ static void SandboxDraw(void *user) {
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
 
   // Skinned mannequin, feet at p (the animator already posed the meshes).
+  // Terrain lean: tilt the model toward the smoothed ground normal so feet
+  // sit on slopes instead of sinking into the uphill side (interim until the
+  // foot-IK port; capped so steep ramps don't topple the pose).
+  Matrix tilt = MatrixIdentity();
+  if (s->groundN.y < 0.9999f) {
+    Vector3 axis = Vector3CrossProduct((Vector3){0, 1, 0}, s->groundN);
+    float axisLen = Vector3Length(axis);
+    if (axisLen > 0.0001f) {
+      float ang = asinf(fminf(axisLen, 1.0f));
+      if (ang > 0.45f) ang = 0.45f; // cap ~26 deg
+      tilt = MatrixRotate(Vector3Scale(axis, 1.0f / axisLen), ang);
+    }
+  }
   // Submitted twice: once as scene geometry, once as a sun-shadow caster.
-  Matrix xform = MatrixMultiply(rot, MatrixTranslate(p.x, p.y, p.z));
+  Matrix xform = MatrixMultiply(MatrixMultiply(rot, tilt),
+                                MatrixTranslate(p.x, p.y, p.z));
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->mannequin, xform, WHITE);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->mannequin, xform, WHITE);
 

@@ -19,6 +19,10 @@
 // Leave the land state after this fraction of the land clip (its tail is a
 // slow settle that reads better blended into locomotion).
 #define LAND_EXIT_PHASE 0.55f
+// Above this speed (m/s) a landing skips the plant-the-feet land clip and
+// cross-fades straight into locomotion — otherwise the character moonwalks
+// while the clip holds its feet still.
+#define LAND_RUN_THROUGH_SPEED 1.5f
 
 static const char *const UAL_CLIP_NAMES[BRUSH_CLIP_COUNT] = {
     "Idle_Loop",  "Walk_Loop",  "Jog_Fwd_Loop", "Sprint_Loop",
@@ -184,16 +188,23 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
                     fminf(LOCO_BLEND_RATE * dt, 1.0f);
 
   // --- transitions ---
+  // Landing at speed rolls straight back into the gait; the land clip is
+  // for (near-)stationary touchdowns only.
+  bool landToLoco = (in.speed > LAND_RUN_THROUGH_SPEED);
   switch (a->state) {
   case BRUSH_ANIM_LOCOMOTION:
     if (in.airborne) EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
     break;
   case BRUSH_ANIM_JUMP_START:
-    if (!in.airborne) EnterState(a, BRUSH_ANIM_JUMP_LAND, FADE_TO_LAND);
+    if (!in.airborne)
+      EnterState(a, landToLoco ? BRUSH_ANIM_LOCOMOTION : BRUSH_ANIM_JUMP_LAND,
+                 landToLoco ? 0.12f : FADE_TO_LAND);
     else if (a->phase >= 1.0f) EnterState(a, BRUSH_ANIM_JUMP_LOOP, 0.10f);
     break;
   case BRUSH_ANIM_JUMP_LOOP:
-    if (!in.airborne) EnterState(a, BRUSH_ANIM_JUMP_LAND, FADE_TO_LAND);
+    if (!in.airborne)
+      EnterState(a, landToLoco ? BRUSH_ANIM_LOCOMOTION : BRUSH_ANIM_JUMP_LAND,
+                 landToLoco ? 0.12f : FADE_TO_LAND);
     break;
   case BRUSH_ANIM_JUMP_LAND:
     if (in.airborne) EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);

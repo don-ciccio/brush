@@ -52,7 +52,10 @@ typedef enum {
 // what makes it reusable across characters.
 typedef struct BrushAnimInput {
   float speed;   // horizontal speed, m/s (drives the locomotion blend)
-  bool airborne; // true while off the ground
+  bool airborne; // true while off the ground. Debounce this (e.g. only after
+                 // ~60ms of continuous air time): physics ground states
+                 // flicker during touchdown, and a raw flag re-triggers the
+                 // jump state every flicker (visible landing stutter).
 } BrushAnimInput;
 
 typedef struct BrushAnimator {
