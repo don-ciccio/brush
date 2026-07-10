@@ -98,6 +98,33 @@ static void EnterState(BrushAnimator *a, BrushAnimState s, float fadeDur) {
   a->fadeDur = fadeDur;
 }
 
+// Accumulated model-space rotation of a bone (root -> bone product of the
+// current blendPose local rotations).
+static Quaternion BoneModelQuat(const BrushAnimator *a, int bone) {
+  int chain[32];
+  int n = 0;
+  for (int b = bone; b >= 0 && n < 32; b = a->model->bones[b].parent)
+    chain[n++] = b;
+  Quaternion q = QuaternionIdentity();
+  for (int i = n - 1; i >= 0; i--)
+    q = QuaternionMultiply(q, a->blendPose[chain[i]].rotation);
+  return q;
+}
+
+// Post-rotate a bone by `dq` expressed in MODEL space:
+// world' = dq * parent * local  =>  local' = parent^-1 * dq * parent * local.
+static void ApplyModelSpaceRotation(BrushAnimator *a, int bone,
+                                    Quaternion dq) {
+  if (bone < 0 || bone >= a->boneCount) return;
+  int parent = a->model->bones[bone].parent;
+  Quaternion pq =
+      (parent >= 0) ? BoneModelQuat(a, parent) : QuaternionIdentity();
+  Quaternion adj = QuaternionMultiply(
+      QuaternionMultiply(QuaternionInvert(pq), dq), pq);
+  a->blendPose[bone].rotation =
+      QuaternionMultiply(adj, a->blendPose[bone].rotation);
+}
+
 static int FindBone(const Model *m, const char *name) {
   for (int i = 0; i < m->boneCount; i++)
     if (TextIsEqual(m->bones[i].name, name)) return i;
@@ -352,10 +379,7 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   if (landed) {
     a->landTimer = LAND_DURATION;
     a->landStrength = 0.6f + 0.4f * Clamp(in.speed / 6.0f, 0.0f, 1.0f);
-    a->ikRamp = 0.0f; // ease the slope IK back in while the capsule settles
   }
-  if (in.airborne) a->ikRamp = 0.0f;
-  else a->ikRamp = fminf(a->ikRamp + dt / 0.25f, 1.0f);
   float landDip = 0.0f;
   if (a->landTimer > 0.0f) {
     float p = 1.0f - a->landTimer / LAND_DURATION; // 0 at contact -> 1 done
@@ -377,13 +401,12 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     const float calfGain = 3.0f;
     const float footGain = 1.5f;
 
-    // Slope IK is weighted by the post-touchdown ramp (raycasts right at
-    // landing are noisy: a probe off a ledge reads metres of drop and the
-    // legs snap). The landing knee-bend is NOT ramped — it IS the landing.
+    // Fold the landing knee-bend into both feet so the planted feet track
+    // the dropping pelvis. (Slope inputs arrive pre-ramped by the game —
+    // see BrushAnimInput.)
     float landBend = landDip * LAND_KNEE_RATIO;
-    float dl = in.leftFootDelta * a->ikRamp + landBend;
-    float dr = in.rightFootDelta * a->ikRamp + landBend;
-    float pitch = in.groundPitch * a->ikRamp;
+    float dl = in.leftFootDelta + landBend;
+    float dr = in.rightFootDelta + landBend;
 
     if (fabsf(dl) > 0.005f) {
       Quaternion qThigh = QuaternionFromEuler(-dl * thighGain, 0.0f, 0.0f);
@@ -396,13 +419,15 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       a->blendPose[a->boneFootL].rotation =
           QuaternionMultiply(a->blendPose[a->boneFootL].rotation, qFoot);
     }
-    if (fabsf(pitch) > 0.01f) {
-      // Lay both feet onto the slope along the facing direction.
-      Quaternion qSlope = QuaternionFromEuler(pitch, 0.0f, 0.0f);
-      a->blendPose[a->boneFootL].rotation =
-          QuaternionMultiply(a->blendPose[a->boneFootL].rotation, qSlope);
-      a->blendPose[a->boneFootR].rotation =
-          QuaternionMultiply(a->blendPose[a->boneFootR].rotation, qSlope);
+    if (fabsf(in.groundPitch) > 0.01f) {
+      // Lay both feet onto the slope: a MODEL-SPACE rotation about the
+      // lateral (X) axis, converted to each foot's local frame through its
+      // parent chain — immune to bone-local axis conventions (a local-axis
+      // euler twists differently depending on the leg's current swing).
+      Quaternion dq = QuaternionFromAxisAngle((Vector3){1.0f, 0.0f, 0.0f},
+                                              -in.groundPitch);
+      ApplyModelSpaceRotation(a, a->boneFootL, dq);
+      ApplyModelSpaceRotation(a, a->boneFootR, dq);
     }
     if (fabsf(dr) > 0.005f) {
       Quaternion qThigh = QuaternionFromEuler(-dr * thighGain, 0.0f, 0.0f);

@@ -51,6 +51,7 @@ typedef struct Sandbox {
   float pelvisDrop;    // smoothed drop to the lowest foot contact (<= 0)
   float footDeltaL, footDeltaR; // per-foot IK inputs (>= 0)
   float groundPitch;   // smoothed slope along facing (rad, uphill positive)
+  float ikWeight;      // shared slope-IK ramp: 0 airborne -> 1 grounded
   bool crouched;
   float rollTimer;     // seconds of roll movement burst remaining
 
@@ -284,13 +285,19 @@ static void SandboxFixedUpdate(void *user, float dt) {
     if (okF) hFore = hit.y - s->pos.y;
     bool okB = BrushPhysicsRaycast(&s->phys, pBack, down, 2.0f, &hit, NULL);
     if (okB) hBack = hit.y - s->pos.y;
-    if (okF && okB && fabsf(hFore) < 0.6f && fabsf(hBack) < 0.6f) {
+    if (okF && okB && fabsf(hFore) < 0.6f && fabsf(hBack) < 0.6f)
       targetPitch = atan2f(hFore - hBack, 0.5f);
-      // Split the heel/toe error: sink the pelvis slightly so pitched feet
-      // meet the surface instead of hovering at the capsule contact point.
-      targetDrop -= 0.06f * fabsf(sinf(targetPitch));
-    }
   }
+
+  // One shared IK weight scales EVERYTHING (pelvis drop, knee deltas, foot
+  // pitch): landing raycasts are noisy, and ramping only part of the system
+  // desynchronizes the body drop from the leg compensation.
+  s->ikWeight = s->grounded ? fminf(s->ikWeight + dt / 0.25f, 1.0f) : 0.0f;
+  targetDrop *= s->ikWeight;
+  targetPitch *= s->ikWeight;
+  leftDelta *= s->ikWeight;
+  rightDelta *= s->ikWeight;
+
   s->pelvisDrop += (targetDrop - s->pelvisDrop) * (1.0f - expf(-15.0f * dt));
   s->groundPitch +=
       (targetPitch - s->groundPitch) * (1.0f - expf(-12.0f * dt));

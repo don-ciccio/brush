@@ -85,7 +85,13 @@ typedef struct BrushAnimInput {
   float leftFootDelta;
   float rightFootDelta;
   // Ground pitch along the facing direction (radians, uphill-ahead positive):
-  // the foot bones rotate to lie on the slope. 0 on flat ground.
+  // the feet rotate in MODEL space to lie on the slope. 0 on flat ground.
+  //
+  // IMPORTANT: scale ALL slope-IK inputs — these deltas, the pitch, AND the
+  // pelvis drop you apply to the model transform — by one shared weight that
+  // eases 0->1 over ~0.25s after touchdown. Raycasts at landing are noisy,
+  // and ramping only part of the system desynchronizes body drop from leg
+  // compensation (legs read as displaced).
   float groundPitch;
 } BrushAnimInput;
 
@@ -113,7 +119,6 @@ typedef struct BrushAnimator {
   float landTimer;    // seconds remaining in the current dip (0 = idle)
   float landStrength; // 0..1 magnitude captured at impact
   bool landDebugPin;  // BRUSH_ANIM_LAND: hold the dip for screenshots
-  float ikRamp;       // slope-IK weight, eases 0->1 after touchdown
 
   // Leg bones resolved by name at init (-1 = not found, IK skipped).
   int bonePelvis;
