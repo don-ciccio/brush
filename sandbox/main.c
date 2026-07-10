@@ -201,6 +201,16 @@ static void SandboxFixedUpdate(void *user, float dt) {
   float inX = BrushInputAxis(BRUSH_AXIS_MOVE_X);
   float inY = BrushInputAxis(BRUSH_AXIS_MOVE_Y);
 
+  // Landing harness: BRUSH_AUTO_JUMP queues a jump every 1.5s and logs the
+  // capsule Y + ground state for each fixed step around the landing.
+  if (getenv("BRUSH_AUTO_JUMP") != NULL) {
+    static int jf = 0;
+    if (++jf % 90 == 0) s->jumpQueued = true;
+    TraceLog(LOG_INFO, "LANDDBG t=%d y=%+.4f velY=%+.3f grounded=%d state=%d",
+             jf, s->pos.y, s->velY, s->grounded,
+             (int)BrushAnimatorState(&s->animator));
+  }
+
   // Screenshot harness: BRUSH_AUTO_MOVE=walk|jog|sprint holds forward input
   // so automated captures show the character in motion.
   const char *autoMove = getenv("BRUSH_AUTO_MOVE");
@@ -286,6 +296,15 @@ static void SandboxFixedUpdate(void *user, float dt) {
 
 static void SandboxUpdate(void *user, float dt, float alpha) {
   Sandbox *s = user;
+
+  if (getenv("BRUSH_AUTO_JUMP") != NULL) {
+    static int rf = 0;
+    TraceLog(LOG_INFO,
+             "RENDDBG rf=%d a=%.2f ry=%+.4f pelvis=%+.4f state=%d fade=%.2f",
+             ++rf, alpha, s->renderPos.y, s->animator.pelvisOffset,
+             (int)BrushAnimatorState(&s->animator),
+             s->animator.fadeT);
+  }
 
   if (BrushInputPressed(BRUSH_BTN_MENU)) {
     s->menuOpen = !s->menuOpen;

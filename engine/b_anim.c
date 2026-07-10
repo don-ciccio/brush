@@ -35,6 +35,12 @@
 // so playing the windup mid-air reads as a second dip. Enter past it (games
 // trim anticipation for responsiveness).
 #define JUMP_START_SKIP_PHASE 0.10f
+// UAL's Jump_Land opens with the legs EXTENDED reaching for ground (pelvis
+// higher than standing) before the impact crouch — entering at phase 0 makes
+// the body pop UP at touchdown before plunging (reads as a bounce). Enter at
+// the impact bottom instead: the cross-fade from the airborne tuck becomes
+// the impact plunge, and the clip supplies the recovery.
+#define JUMP_LAND_ENTER_PHASE 0.13f
 
 // Landing absorption (procedural squat-and-recover on touchdown).
 #define LAND_DURATION 0.40f  // seconds from impact to recovered
@@ -305,15 +311,21 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       EnterState(a, BRUSH_ANIM_LOCOMOTION, FADE_TO_CROUCH);
     break;
   case BRUSH_ANIM_JUMP_START:
-    if (!in.airborne)
+    if (!in.airborne) {
       EnterState(a, landToLoco ? ground : BRUSH_ANIM_JUMP_LAND,
                  landToLoco ? 0.12f : FADE_TO_LAND);
-    else if (a->phase >= 1.0f) EnterState(a, BRUSH_ANIM_JUMP_LOOP, 0.10f);
+      if (a->state == BRUSH_ANIM_JUMP_LAND)
+        a->phase = JUMP_LAND_ENTER_PHASE;
+    } else if (a->phase >= 1.0f)
+      EnterState(a, BRUSH_ANIM_JUMP_LOOP, 0.10f);
     break;
   case BRUSH_ANIM_JUMP_LOOP:
-    if (!in.airborne)
+    if (!in.airborne) {
       EnterState(a, landToLoco ? ground : BRUSH_ANIM_JUMP_LAND,
                  landToLoco ? 0.12f : FADE_TO_LAND);
+      if (a->state == BRUSH_ANIM_JUMP_LAND)
+        a->phase = JUMP_LAND_ENTER_PHASE;
+    }
     break;
   case BRUSH_ANIM_JUMP_LAND:
     if (in.airborne) {
@@ -464,10 +476,11 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   float targetDL = 0.0f, targetDR = 0.0f;
   Vector3 normL = {0, 1, 0}, normR = {0, 1, 0};
   if (haveLegs && in.groundFn != NULL && w > 0.001f) {
-    // Ground plane under the character (the model origin's ground).
+    // Base plane = the character's own feet position (what the physics says
+    // it stands on). NOT a fresh raycast under the center: standing on an
+    // edge, that ray can hit the floor far below while a foot probe hits the
+    // ledge top — a huge false positive delta that hikes the leg up.
     float baseY = in.worldPos.y;
-    float gy;
-    if (in.groundFn(in.groundUser, in.worldPos, &gy, NULL)) baseY = gy;
 
     float cy = cosf(in.yawRad), sy = sinf(in.yawRad);
     for (int side = 0; side < 2; side++) {
