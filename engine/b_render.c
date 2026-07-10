@@ -17,7 +17,9 @@
 #define BRUSH_MAX_DRAWS_PER_LAYER 1024
 
 typedef struct BrushDrawCmd {
-  Model *model;
+  Model *model;        // NULL for a raw mesh command
+  Mesh mesh;           // used when model == NULL (streamed terrain, etc.)
+  Material *material;   // used when model == NULL
   Matrix transform;
   Color tint;
   float sortKey; // camera distance, used for transparent back-to-front
@@ -150,9 +152,27 @@ void BrushRenderSubmit(BrushLayer layer, Model *model, Matrix transform,
   (*count)++;
 }
 
+void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
+                           Matrix transform) {
+  if (layer < 0 || layer >= BRUSH_LAYER_COUNT) return;
+  int *count = &g_r.cmdCount[layer];
+  if (*count >= BRUSH_MAX_DRAWS_PER_LAYER) return;
+  g_r.cmds[layer][*count] = (BrushDrawCmd){.model = NULL,
+                                           .mesh = mesh,
+                                           .material = material,
+                                           .transform = transform,
+                                           .tint = WHITE};
+  (*count)++;
+}
+
 // Draw a submitted command: the submitted matrix becomes the model transform
-// for exactly this draw (the model's own transform is saved/restored).
+// for exactly this draw (the model's own transform is saved/restored). Mesh
+// commands (model == NULL) draw a raw mesh+material directly.
 static void DrawCmd(const BrushDrawCmd *cmd) {
+  if (cmd->model == NULL) {
+    DrawMesh(cmd->mesh, *cmd->material, cmd->transform);
+    return;
+  }
   Matrix saved = cmd->model->transform;
   cmd->model->transform = cmd->transform;
   DrawModel(*cmd->model, (Vector3){0, 0, 0}, 1.0f, cmd->tint);

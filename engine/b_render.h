@@ -97,6 +97,12 @@ void BrushSetSkyEnabled(bool enabled);
 void BrushRenderSubmit(BrushLayer layer, Model *model, Matrix transform,
                        Color tint);
 
+// Submit a raw mesh + material (e.g. streamed terrain chunks). The material's
+// shader should be BrushGetLitShader() to receive lighting/shadows. `material`
+// must outlive the frame (a pointer, not copied).
+void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
+                           Matrix transform);
+
 // Execute the layer stack for this frame (inside BeginDrawing). Clears all
 // submission lists afterwards.
 void BrushRenderExecute(Camera3D camera);

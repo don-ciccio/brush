@@ -28,5 +28,6 @@
 #include "b_shadow.h"
 #include "b_sky.h"
 #include "b_tod.h"
+#include "b_world.h"
 
 #endif // BRUSH_H

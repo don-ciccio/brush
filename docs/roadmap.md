@@ -76,7 +76,18 @@ the UAL packs ship no strafe clips — donor used procedural lean for lateral).
 
 ## v1 — the open-world core
 
-5. ~~Jolt physics~~ — DONE: joltc vendored (source-only, `make deps`
+6.5. ~~Chunk-streamed world~~ — DONE (b_world): 64 m chunks, pthread worker
+   (CPU build: heightmap + displaced terrain mesh; main-thread GPU upload +
+   per-chunk Jolt collider), lock-free atomic handoff (raylib #827 pattern),
+   load/unload rings with hysteresis, rebase-seam chokepoint (identity),
+   frustum cull, bilinear ground-height query. GENERALIZED: the terrain
+   surface is a game-supplied `heightFn(user, wx, wz)` (racer's ridge/road/
+   flatten logic is the game's business now); chunk size/radius/resolution
+   are config; terrain draws through the engine lit shader + shadow layers
+   via a new BrushRenderSubmitMesh. Zero-asset default: slope vertex-colour
+   shading (green lowland / grey rock). Sandbox streams rolling hills with
+   the character + camera on the ground query.  STILL TODO here: horizon
+   occlusion cull, LOD rings, and the foliage system (next). — DONE: joltc vendored (source-only, `make deps`
    CMake-builds it + fetches Jolt). b_physics ports the donor's facade
    (static box + exact triangle-mesh colliders, sensor volumes, raycasts,
    layer scheme); b_character ports the CharacterVirtual kinematic capsule

@@ -52,19 +52,55 @@ typedef struct Sandbox {
   bool crouched;
   float rollTimer;     // seconds of roll movement burst remaining
 
+  BrushWorld *world; // chunk-streamed rolling-hills terrain
   Model crate;
   Model ramp;
   Matrix rampXform;
+  Vector3 crateA, crateB, crateB2, crateC; // seated on the terrain
+  Vector3 rampPos;
 
-  Model floor;
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
-
-  Texture2D checkerTex;
 
   bool menuOpen;
   int menuSel;
 } Sandbox;
+
+// --- Terrain surface: seeded value-noise fbm, rolling hills. Deterministic
+// and world-continuous (neighbouring chunks agree at shared edges), reentrant
+// (runs on the world's worker thread). This is the ONE function a game writes
+// to shape its world; everything else streams from it.
+static float HillHash(int x, int z) {
+  unsigned int h = (unsigned int)x * 374761393u + (unsigned int)z * 668265263u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  h ^= h >> 16;
+  return (float)(h & 0xFFFFFF) / (float)0xFFFFFF; // [0,1]
+}
+static float HillNoise(float x, float z) {
+  int xi = (int)floorf(x), zi = (int)floorf(z);
+  float fx = x - (float)xi, fz = z - (float)zi;
+  float u = fx * fx * (3.0f - 2.0f * fx);
+  float v = fz * fz * (3.0f - 2.0f * fz);
+  float a = HillHash(xi, zi), b = HillHash(xi + 1, zi);
+  float c = HillHash(xi, zi + 1), d = HillHash(xi + 1, zi + 1);
+  return (a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v;
+}
+static float SandboxHeight(void *user, float wx, float wz) {
+  (void)user;
+  float freq = 1.0f / 55.0f, amp = 1.0f, sum = 0.0f, norm = 0.0f;
+  for (int o = 0; o < 4; o++) {
+    sum += (HillNoise(wx * freq, wz * freq) - 0.5f) * amp;
+    norm += amp;
+    freq *= 2.0f;
+    amp *= 0.5f;
+  }
+  return (sum / norm) * 9.0f; // ~+/- 4.5 m rolling hills
+}
+
+// Camera ground clamp: keep the boom above the streamed terrain.
+static float CamGround(float x, float z, void *user) {
+  return BrushWorldGroundHeight(((Sandbox *)user)->world, x, z);
+}
 
 // Foot-IK ground query: height (and normal) under a world position.
 static bool GroundUnder(void *user, Vector3 probe, float *outHeight,
@@ -105,17 +141,6 @@ static bool CameraObstructed(Vector3 from, Vector3 to, Vector3 *hitPoint,
 static void SandboxInit(void *user) {
   Sandbox *s = user;
 
-  // Checkerboard floor, ~1.9 m squares over a 120 m slab.
-  Image checker = GenImageChecked(1024, 1024, 16, 16, RAYWHITE,
-                                  (Color){196, 199, 206, 255});
-  s->checkerTex = LoadTextureFromImage(checker);
-  UnloadImage(checker);
-  GenTextureMipmaps(&s->checkerTex);
-  SetTextureFilter(s->checkerTex, TEXTURE_FILTER_TRILINEAR);
-
-  s->floor = LoadModelFromMesh(GenMeshPlane(120.0f, 120.0f, 1, 1));
-  s->floor.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = s->checkerTex;
-
   // Animated mannequin (CC0). Clips ride in the same GLB; the animator binds
   // them by name (UAL defaults).
   s->mannequin = LoadModel("assets/character/mannequin.glb");
@@ -127,50 +152,62 @@ static void SandboxInit(void *user) {
 
   // Everything lit by the engine's layered forward shader.
   Shader lit = BrushGetLitShader();
-  s->floor.materials[0].shader = lit;
   // glTF loads prepend raylib's default material at index 0 (real materials
   // shift to 1..N) — assign the shader to every material, never by index.
   for (int i = 0; i < s->mannequin.materialCount; i++)
     s->mannequin.materials[i].shader = lit;
 
-  s->pos = s->prevPos = s->renderPos = (Vector3){0.0f, 0.0f, 0.0f};
-  // Capture harness: BRUSH_SPAWN="x,y,z" drops the character elsewhere
-  // (e.g. on the ramp) for reproducible screenshots.
+  BrushPhysicsInit(&s->phys);
+
+  // Spawn location (BRUSH_SPAWN="x,y,z" overrides for captures).
+  float spx = 0.0f, spz = 0.0f;
   const char *spawn = getenv("BRUSH_SPAWN");
   if (spawn != NULL) {
-    float sx, sy, sz;
-    if (sscanf(spawn, "%f,%f,%f", &sx, &sy, &sz) == 3)
-      s->pos = s->prevPos = s->renderPos = (Vector3){sx, sy, sz};
+    float sy;
+    sscanf(spawn, "%f,%f,%f", &spx, &sy, &spz);
   }
+
+  // --- Chunk-streamed open world: rolling hills from SandboxHeight, with
+  // per-chunk Jolt terrain colliders. Created centered on the spawn; the
+  // initial ring blocks until resident, so ground height + collision are
+  // ready below. ---
+  s->world = BrushWorldCreate(
+      (BrushWorldConfig){.seed = 1337,
+                         .heightFn = SandboxHeight,
+                         .chunkSize = 64.0f,
+                         .loadRadius = 4,
+                         .physics = &s->phys},
+      (Vector3){spx, 0, spz});
+
+  float groundY = BrushWorldGroundHeight(s->world, spx, spz);
+  s->pos = s->prevPos = s->renderPos = (Vector3){spx, groundY + 0.2f, spz};
   s->grounded = true;
 
-  // --- Physics: floor + a little obstacle course ---
-  BrushPhysicsInit(&s->phys);
-  BrushPhysicsAddStaticBox(&s->phys, (Vector3){0, -0.5f, 0},
-                           (Vector3){120, 1, 120}, 0, "floor");
-
-  // Crates: axis-aligned box colliders matching the visual cubes.
+  // Obstacle course, each piece seated on the terrain surface.
   s->crate = LoadModelFromMesh(GenMeshCube(1.5f, 1.5f, 1.5f));
   s->crate.materials[0].shader = BrushGetLitShader();
-  BrushPhysicsAddStaticBox(&s->phys, (Vector3){3.0f, 0.75f, -6.0f},
-                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate A");
-  BrushPhysicsAddStaticBox(&s->phys, (Vector3){-2.5f, 0.75f, -9.0f},
-                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B");
-  BrushPhysicsAddStaticBox(&s->phys, (Vector3){-2.5f, 2.25f, -9.0f},
-                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B top");
-  BrushPhysicsAddStaticBox(&s->phys, (Vector3){0.0f, 0.75f, -10.0f},
-                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate C");
+  float ga = BrushWorldGroundHeight(s->world, 3.0f, -6.0f);
+  float gb = BrushWorldGroundHeight(s->world, -2.5f, -9.0f);
+  float gc = BrushWorldGroundHeight(s->world, 0.0f, -10.0f);
+  s->crateA = (Vector3){3.0f, ga + 0.75f, -6.0f};
+  s->crateB = (Vector3){-2.5f, gb + 0.75f, -9.0f};
+  s->crateB2 = (Vector3){-2.5f, gb + 2.25f, -9.0f};
+  s->crateC = (Vector3){0.0f, gc + 0.75f, -10.0f};
+  BrushPhysicsAddStaticBox(&s->phys, s->crateA, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate A");
+  BrushPhysicsAddStaticBox(&s->phys, s->crateB, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B");
+  BrushPhysicsAddStaticBox(&s->phys, s->crateB2, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B top");
+  BrushPhysicsAddStaticBox(&s->phys, s->crateC, (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate C");
 
-  // Ramp: a rotated slab, so it exercises the triangle-MESH collider path
-  // (the box path is axis-aligned only). Visual and collision share the
-  // same transform — collision exactly matches what you see.
-  Mesh rampMesh = GenMeshCube(6.0f, 0.4f, 10.0f);
-  s->ramp = LoadModelFromMesh(rampMesh);
+  // Ramp (rotated slab -> triangle-MESH collider path). Visual + collision
+  // share the transform.
+  s->ramp = LoadModelFromMesh(GenMeshCube(6.0f, 0.4f, 10.0f));
   s->ramp.materials[0].shader = BrushGetLitShader();
-  s->rampXform = MatrixMultiply(MatrixRotateX(-20.0f * DEG2RAD),
-                                MatrixTranslate(8.0f, 1.55f, -12.0f));
-  BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
-                            "ramp");
+  float gr = BrushWorldGroundHeight(s->world, 8.0f, -12.0f);
+  s->rampPos = (Vector3){8.0f, gr + 1.55f, -12.0f};
+  s->rampXform = MatrixMultiply(
+      MatrixRotateX(-20.0f * DEG2RAD),
+      MatrixTranslate(s->rampPos.x, s->rampPos.y, s->rampPos.z));
+  BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0, "ramp");
 
   // Kinematic capsule: radius/height match the mannequin (1.83 m tall).
   BrushCharacterInit(&s->body, &s->phys, s->pos, 0.30f, 1.80f);
@@ -182,6 +219,8 @@ static void SandboxInit(void *user) {
   BrushOrbitCamInit(&s->camera, s->pos);
   s->camera.obstructFn = CameraObstructed;
   s->camera.obstructUser = s;
+  s->camera.groundHeightFn = CamGround;
+  s->camera.groundHeightUser = s;
 
   TraceLog(LOG_INFO, "SANDBOX: ready — move with WASD, jump with Space");
 }
@@ -345,6 +384,9 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   BrushTodUpdate(&s->tod, dt);
   BrushRenderApplyTimeOfDay(&s->tod);
 
+  // Stream chunks around the player (main-thread GPU finalize happens here).
+  BrushWorldUpdate(s->world, s->renderPos);
+
   BrushOrbitCamUpdate(&s->camera, s->renderPos, s->vel, dt);
 
   // Drive the animator from gameplay state (per rendered frame). The
@@ -371,21 +413,22 @@ static void SandboxDraw(void *user) {
   Vector3 p = s->renderPos;
   Matrix rot = MatrixRotateY(s->renderYaw);
 
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->floor, MatrixIdentity(), WHITE);
+  // Streamed terrain (frustum-culled chunks -> opaque + shadow layers).
+  BrushWorldSubmit(s->world, s->camera.cam);
 
   Color crateCol = (Color){170, 120, 70, 255};
-  Matrix crateA = MatrixTranslate(3.0f, 0.75f, -6.0f);
-  Matrix crateB = MatrixTranslate(-2.5f, 0.75f, -9.0f);
-  Matrix crateB2 = MatrixTranslate(-2.5f, 2.25f, -9.0f);
-  Matrix crateC = MatrixTranslate(0.0f, 0.75f, -10.0f);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateC, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateC, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateA, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateA, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateB, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateB, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateB2, crateCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateB2, crateCol);
+  Matrix mA = MatrixTranslate(s->crateA.x, s->crateA.y, s->crateA.z);
+  Matrix mB = MatrixTranslate(s->crateB.x, s->crateB.y, s->crateB.z);
+  Matrix mB2 = MatrixTranslate(s->crateB2.x, s->crateB2.y, s->crateB2.z);
+  Matrix mC = MatrixTranslate(s->crateC.x, s->crateC.y, s->crateC.z);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mC, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mC, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mA, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mA, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mB, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mB, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, mB2, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, mB2, crateCol);
   Color rampCol = (Color){120, 130, 150, 255};
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->ramp, s->rampXform, rampCol);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
@@ -450,14 +493,15 @@ static void SandboxDrawUI(void *user) {
 
 static void SandboxShutdown(void *user) {
   Sandbox *s = user;
+  // World holds per-chunk terrain colliders in the physics world, so it must
+  // tear down (stop the worker, remove bodies) before the physics world does.
+  BrushWorldDestroy(s->world);
   BrushCharacterCleanup(&s->body, &s->phys);
   BrushPhysicsCleanup(&s->phys);
   BrushAnimatorUnload(&s->animator);
-  UnloadModel(s->floor);
   UnloadModel(s->crate);
   UnloadModel(s->ramp);
   UnloadModel(s->mannequin);
-  UnloadTexture(s->checkerTex);
 }
 
 int main(void) {
