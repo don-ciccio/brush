@@ -2,15 +2,16 @@ CC = gcc
 # -MMD -MP: per-object .d dependency files so header changes recompile every
 # source that includes them (stale objects with mismatched struct layouts
 # otherwise link together and corrupt memory at runtime).
-CFLAGS = -Wall -Wextra -std=c11 -O2 -MMD -MP -Iengine
+CFLAGS = -Wall -Wextra -std=c11 -O2 -MMD -MP -Iengine -Iexternal/joltc/include
 
 UNAME_S := $(shell uname -s)
+JOLT_LIBS = -Lexternal/joltc/build/lib -ljoltc -lJolt
 ifeq ($(UNAME_S),Linux)
-    LIBS = -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
+    LIBS = $(JOLT_LIBS) -lstdc++ -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
 endif
 ifeq ($(UNAME_S),Darwin)
     CFLAGS += -I/opt/homebrew/opt/raylib/include
-    LIBS = -L/opt/homebrew/opt/raylib/lib -lraylib -lm \
+    LIBS = -L/opt/homebrew/opt/raylib/lib $(JOLT_LIBS) -lc++ -lraylib -lm \
            -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo
 endif
 
@@ -40,6 +41,12 @@ $(SANDBOX): $(BUILD_DIR)/sandbox_main.o $(ENGINE_LIB)
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
+# One-time: build the vendored joltc (CMake fetches the Jolt sources).
+deps:
+	cmake -S external/joltc -B external/joltc/build -DCMAKE_BUILD_TYPE=Release \
+	      -DJPH_BUILD_SHARED=OFF -DJPH_SAMPLES=OFF -DJPH_TESTS=OFF
+	cmake --build external/joltc/build -j 8
+
 run: $(SANDBOX)
 	./$(SANDBOX)
 
@@ -52,6 +59,6 @@ clean:
 
 rebuild: clean all
 
-.PHONY: all run verify clean rebuild
+.PHONY: all deps run verify clean rebuild
 
 -include $(DEPS)

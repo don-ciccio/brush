@@ -34,6 +34,8 @@ void BrushOrbitCamInit(BrushOrbitCam *c, Vector3 focus) {
   c->groundHeightFn = NULL;
   c->groundHeightUser = NULL;
   c->groundClearance = 0.5f;
+  c->obstructFn = NULL;
+  c->obstructUser = NULL;
 }
 
 void BrushOrbitCamUpdate(BrushOrbitCam *c, Vector3 focus, Vector3 focusVel,
@@ -87,6 +89,23 @@ void BrushOrbitCamUpdate(BrushOrbitCam *c, Vector3 focus, Vector3 focusVel,
     wantPos.y = groundY + c->groundClearance;
 
   Vector3 wantTarget = {focus.x, focus.y + 1.0f, focus.z};
+
+  // Camera collision: cast from the focus (chest height) toward the wanted
+  // boom position; on a hit pull the camera just in front of the obstacle so
+  // walls never cut between camera and focus. Only ever shortens the boom.
+  if (c->obstructFn != NULL) {
+    Vector3 hit;
+    if (c->obstructFn(wantTarget, wantPos, &hit, c->obstructUser)) {
+      Vector3 toCam = Vector3Subtract(wantPos, wantTarget);
+      float wantDist = Vector3Length(toCam);
+      if (wantDist > 0.001f) {
+        Vector3 dir = Vector3Scale(toCam, 1.0f / wantDist);
+        float d = Vector3Length(Vector3Subtract(hit, wantTarget)) - 0.3f;
+        if (d < 0.5f) d = 0.5f; // never collapse fully onto the focus
+        wantPos = Vector3Add(wantTarget, Vector3Scale(dir, d));
+      }
+    }
+  }
 
   float s = Clamp(c->followSmooth * dt, 0.0f, 1.0f);
   c->cam.position = Vector3Lerp(c->cam.position, wantPos, s);

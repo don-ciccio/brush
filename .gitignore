@@ -4,3 +4,4 @@ screenshot.png
 *.o
 *.d
 compile_commands.json
+external/joltc/build/

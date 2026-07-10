@@ -68,8 +68,16 @@ landing absorption, 2-D strafe blends.
 
 ## v1 — the open-world core
 
-5. **Jolt physics** (vendored joltc): static/mesh/trigger bodies, raycasts,
-   kinematic character controller; camera anti-clip raycast hook.
+5. ~~Jolt physics~~ — DONE: joltc vendored (source-only, `make deps`
+   CMake-builds it + fetches Jolt). b_physics ports the donor's facade
+   (static box + exact triangle-mesh colliders, sensor volumes, raycasts,
+   layer scheme); b_character ports the CharacterVirtual kinematic capsule
+   (wall sliding, slope limits, stair climbing — step height now a tunable
+   instead of a donor-specific constant). Orbit camera gained an obstruction
+   hook (physics raycast keeps geometry from cutting between camera and
+   focus). Sandbox: obstacle course (crates + a rotated-mesh ramp) with the
+   character fully on the controller. Future: trigger-overlap callbacks,
+   dynamic bodies, Jolt debug draw.
 6. **Chunk-streamed world**: 64 m chunks, background generation worker,
    seeded heightmap terrain + collision, rebase seam (`WorldToRender`
    chokepoint), hysteresis load/unload.

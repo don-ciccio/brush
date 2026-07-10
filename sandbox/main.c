@@ -43,6 +43,14 @@ typedef struct Sandbox {
   BrushOrbitCam camera;
   BrushTimeOfDay tod;
 
+  BrushPhysics phys;
+  BrushCharacter body; // Jolt kinematic capsule (walls, steps, slopes)
+  float velY;          // vertical velocity (gravity + jumps)
+
+  Model crate;
+  Model ramp;
+  Matrix rampXform;
+
   Model floor;
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
@@ -52,6 +60,18 @@ typedef struct Sandbox {
   bool menuOpen;
   int menuSel;
 } Sandbox;
+
+// Camera anti-clip: raycast through the physics world so crates/ramps never
+// cut between the camera and the character.
+static bool CameraObstructed(Vector3 from, Vector3 to, Vector3 *hitPoint,
+                             void *user) {
+  Sandbox *s = user;
+  Vector3 d = Vector3Subtract(to, from);
+  float len = Vector3Length(d);
+  if (len < 0.001f) return false;
+  return BrushPhysicsRaycast(&s->phys, from, Vector3Scale(d, 1.0f / len), len,
+                             hitPoint, NULL);
+}
 
 // ------------------------------------------------------------------
 // Init: build every asset procedurally
@@ -91,9 +111,43 @@ static void SandboxInit(void *user) {
   s->pos = s->prevPos = s->renderPos = (Vector3){0.0f, 0.0f, 0.0f};
   s->grounded = true;
 
+  // --- Physics: floor + a little obstacle course ---
+  BrushPhysicsInit(&s->phys);
+  BrushPhysicsAddStaticBox(&s->phys, (Vector3){0, -0.5f, 0},
+                           (Vector3){120, 1, 120}, 0, "floor");
+
+  // Crates: axis-aligned box colliders matching the visual cubes.
+  s->crate = LoadModelFromMesh(GenMeshCube(1.5f, 1.5f, 1.5f));
+  s->crate.materials[0].shader = BrushGetLitShader();
+  BrushPhysicsAddStaticBox(&s->phys, (Vector3){3.0f, 0.75f, -6.0f},
+                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate A");
+  BrushPhysicsAddStaticBox(&s->phys, (Vector3){-2.5f, 0.75f, -9.0f},
+                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B");
+  BrushPhysicsAddStaticBox(&s->phys, (Vector3){-2.5f, 2.25f, -9.0f},
+                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate B top");
+  BrushPhysicsAddStaticBox(&s->phys, (Vector3){0.0f, 0.75f, -10.0f},
+                           (Vector3){1.5f, 1.5f, 1.5f}, 0, "crate C");
+
+  // Ramp: a rotated slab, so it exercises the triangle-MESH collider path
+  // (the box path is axis-aligned only). Visual and collision share the
+  // same transform — collision exactly matches what you see.
+  Mesh rampMesh = GenMeshCube(6.0f, 0.4f, 10.0f);
+  s->ramp = LoadModelFromMesh(rampMesh);
+  s->ramp.materials[0].shader = BrushGetLitShader();
+  s->rampXform = MatrixMultiply(MatrixRotateX(-20.0f * DEG2RAD),
+                                MatrixTranslate(8.0f, 1.55f, -12.0f));
+  BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
+                            "ramp");
+
+  // Kinematic capsule: radius/height match the mannequin (1.83 m tall).
+  BrushCharacterInit(&s->body, &s->phys, s->pos, 0.30f, 1.80f);
+  s->velY = 0.0f;
+
   BrushTodInit(&s->tod);
 
   BrushOrbitCamInit(&s->camera, s->pos);
+  s->camera.obstructFn = CameraObstructed;
+  s->camera.obstructUser = s;
 
   TraceLog(LOG_INFO, "SANDBOX: ready — move with WASD, jump with Space");
 }
@@ -143,20 +197,23 @@ static void SandboxFixedUpdate(void *user, float dt) {
   s->vel.x += (wishVel.x - s->vel.x) * blend;
   s->vel.z += (wishVel.z - s->vel.z) * blend;
 
-  // Jump + gravity against the flat ground plane (y = 0).
+  // Jump + gravity; the kinematic capsule handles collision, wall sliding,
+  // slopes, and stair steps.
   if (s->jumpQueued && s->grounded) {
-    s->vel.y = JUMP_VELOCITY;
+    s->velY = JUMP_VELOCITY;
     s->grounded = false;
   }
   s->jumpQueued = false;
-  if (!s->grounded) s->vel.y -= GRAVITY * dt;
+  if (!s->grounded) s->velY -= GRAVITY * dt;
+  else if (s->velY < 0.0f) s->velY = -2.0f; // gentle stick-to-floor bias
 
-  s->pos = Vector3Add(s->pos, Vector3Scale(s->vel, dt));
-  if (s->pos.y <= 0.0f) {
-    s->pos.y = 0.0f;
-    s->vel.y = 0.0f;
-    s->grounded = true;
-  }
+  BrushPhysicsStep(&s->phys, dt);
+  BrushCharacterMove(&s->body, &s->phys,
+                     (Vector3){s->vel.x, s->velY, s->vel.z}, dt);
+  s->pos = s->body.position;
+  s->grounded = s->body.isGrounded;
+  if (s->grounded && s->velY < 0.0f) s->velY = 0.0f;
+  s->vel.y = s->body.velocity.y;
 
   // Face the movement direction (shortest arc, smoothed).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
@@ -229,6 +286,23 @@ static void SandboxDraw(void *user) {
 
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->floor, MatrixIdentity(), WHITE);
 
+  Color crateCol = (Color){170, 120, 70, 255};
+  Matrix crateA = MatrixTranslate(3.0f, 0.75f, -6.0f);
+  Matrix crateB = MatrixTranslate(-2.5f, 0.75f, -9.0f);
+  Matrix crateB2 = MatrixTranslate(-2.5f, 2.25f, -9.0f);
+  Matrix crateC = MatrixTranslate(0.0f, 0.75f, -10.0f);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateC, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateC, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateA, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateA, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateB, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateB, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->crate, crateB2, crateCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->crate, crateB2, crateCol);
+  Color rampCol = (Color){120, 130, 150, 255};
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->ramp, s->rampXform, rampCol);
+  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
+
   // Skinned mannequin, feet at p (the animator already posed the meshes).
   // Submitted twice: once as scene geometry, once as a sun-shadow caster.
   Matrix xform = MatrixMultiply(rot, MatrixTranslate(p.x, p.y, p.z));
@@ -284,8 +358,12 @@ static void SandboxDrawUI(void *user) {
 
 static void SandboxShutdown(void *user) {
   Sandbox *s = user;
+  BrushCharacterCleanup(&s->body, &s->phys);
+  BrushPhysicsCleanup(&s->phys);
   BrushAnimatorUnload(&s->animator);
   UnloadModel(s->floor);
+  UnloadModel(s->crate);
+  UnloadModel(s->ramp);
   UnloadModel(s->mannequin);
   UnloadTexture(s->checkerTex);
 }

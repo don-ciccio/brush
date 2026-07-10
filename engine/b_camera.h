@@ -39,6 +39,13 @@ typedef struct BrushOrbitCam {
   float (*groundHeightFn)(float x, float z, void *user);
   void *groundHeightUser;
   float groundClearance;
+
+  // Optional obstruction test (usually a physics raycast): keep solid
+  // geometry from cutting between the focus and the camera. Cast from `from`
+  // toward `to`; on a hit set *hitPoint and return true. The boom is then
+  // shortened to just in front of the wall (never lengthened).
+  bool (*obstructFn)(Vector3 from, Vector3 to, Vector3 *hitPoint, void *user);
+  void *obstructUser;
 } BrushOrbitCam;
 
 void BrushOrbitCamInit(BrushOrbitCam *c, Vector3 focus);

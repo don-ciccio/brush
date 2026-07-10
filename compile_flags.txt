@@ -1,3 +1,4 @@
 -std=c11
 -Iengine
 -I/opt/homebrew/opt/raylib/include
+-Iexternal/joltc/include

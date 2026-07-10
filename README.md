@@ -36,9 +36,11 @@ the HDR post pipeline and **F4** the sun shadows.
 
 ## Build & run
 
-Requires a C11 compiler and raylib (`brew install raylib` on macOS).
+Requires a C11 compiler, CMake, and raylib (`brew install raylib cmake` on
+macOS).
 
 ```bash
+make deps   # once: builds vendored Jolt physics (fetches Jolt sources)
 make        # builds build/libbrush.a + build/sandbox
 make run    # run the sandbox
 make verify # 180 frames -> screenshot.png -> exit (automated visual check)
@@ -72,6 +74,8 @@ engine/     the brush library — never includes game code
   b_post      HDR pipeline: bloom, ACES + grade composite, CAS upscale
   b_shadow    sun shadow map: ortho depth pass, texel-snapped follow, PCSS
   b_tod       day/night clock: solar geometry + swappable look palette
+  b_physics   Jolt physics world: static box/mesh colliders, triggers, raycasts
+  b_character kinematic capsule controller: wall slide, slopes, stair steps
   b_anim      skeletal animator: named clips, 1-D gait blend, jump phases
   b_sky       procedural atmospheric-scattering sky + FBM clouds
   b_camera    third-person orbit camera with hybrid auto-follow
@@ -79,6 +83,7 @@ engine/     the brush library — never includes game code
   b_console   F1 log console
   shaders/    GLSL (330)
 sandbox/    the starter game — the template you copy to begin a new game
+external/   vendored dependencies (joltc -> Jolt Physics)
 assets/     CC0 content only (Quaternius mannequin + animations)
 docs/       roadmap and design notes
 ```
