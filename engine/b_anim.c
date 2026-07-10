@@ -30,6 +30,12 @@
 // the clip's own recovery.
 #define ROLL_EXIT_PHASE 0.92f
 
+// UAL's Jump_Start opens with a crouch ANTICIPATION that launches by ~7%%
+// of the clip; physics has already launched when the animator sees airborne,
+// so playing the windup mid-air reads as a second dip. Enter past it (games
+// trim anticipation for responsiveness).
+#define JUMP_START_SKIP_PHASE 0.10f
+
 // Landing absorption (procedural squat-and-recover on touchdown).
 #define LAND_DURATION 0.40f  // seconds from impact to recovered
 #define LAND_MAX_DIP 0.075f // peak pelvis drop (metres) at full strength
@@ -169,6 +175,8 @@ bool BrushAnimatorInit(BrushAnimator *a, Model *model, const char *animFile,
   if (a->clipIndex[BRUSH_CLIP_IDLE] < 0) return false;
 
   // Resolve the procedural-layer bones by name (UE-style rig names).
+  a->boneSpine1 = FindBone(model, "spine_01");
+  a->boneSpine2 = FindBone(model, "spine_02");
   a->bonePelvis = FindBone(model, "pelvis");
   a->boneThighL = FindBone(model, "thigh_l");
   a->boneCalfL = FindBone(model, "calf_l");
@@ -283,13 +291,17 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   bool landToLoco = (in.speed > LAND_RUN_THROUGH_SPEED);
   switch (a->state) {
   case BRUSH_ANIM_LOCOMOTION:
-    if (in.airborne) EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
-    else if (ground == BRUSH_ANIM_CROUCH)
+    if (in.airborne) {
+      EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
+      a->phase = JUMP_START_SKIP_PHASE;
+    } else if (ground == BRUSH_ANIM_CROUCH)
       EnterState(a, BRUSH_ANIM_CROUCH, FADE_TO_CROUCH);
     break;
   case BRUSH_ANIM_CROUCH:
-    if (in.airborne) EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
-    else if (ground == BRUSH_ANIM_LOCOMOTION)
+    if (in.airborne) {
+      EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
+      a->phase = JUMP_START_SKIP_PHASE;
+    } else if (ground == BRUSH_ANIM_LOCOMOTION)
       EnterState(a, BRUSH_ANIM_LOCOMOTION, FADE_TO_CROUCH);
     break;
   case BRUSH_ANIM_JUMP_START:
@@ -304,8 +316,11 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
                  landToLoco ? 0.12f : FADE_TO_LAND);
     break;
   case BRUSH_ANIM_JUMP_LAND:
-    if (in.airborne) EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
-    else if (a->phase >= LAND_EXIT_PHASE) EnterState(a, ground, FADE_TO_LOCO);
+    if (in.airborne) {
+      EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
+      a->phase = JUMP_START_SKIP_PHASE;
+    } else if (a->phase >= LAND_EXIT_PHASE)
+      EnterState(a, ground, FADE_TO_LOCO);
     break;
   case BRUSH_ANIM_ROLL:
     if (a->phase >= ROLL_EXIT_PHASE) EnterState(a, ground, FADE_TO_LOCO);
@@ -365,6 +380,48 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     if (t > 1.0f) t = 1.0f;
     t = t * t * (3.0f - 2.0f * t); // smoothstep
     BlendBonePoses(a->blendPose, a->fadePose, a->blendPose, a->boneCount, t);
+  }
+
+  // --- inertia leans: the body banks into acceleration and turns ----------
+  // The gait blend alone changes leg speed with no sense of mass; leaning the
+  // spine into acceleration (and slightly back on braking) plus into turns
+  // supplies the missing inertia.
+  {
+    float accel = (a->speedSmooth - a->prevSpeedSmooth) / fmaxf(dt, 1e-4f);
+    a->prevSpeedSmooth = a->speedSmooth;
+    float yawDelta = in.yawRad - a->prevYawRad;
+    while (yawDelta > PI) yawDelta -= 2.0f * PI;
+    while (yawDelta < -PI) yawDelta += 2.0f * PI;
+    a->prevYawRad = in.yawRad;
+    float turnRate = yawDelta / fmaxf(dt, 1e-4f);
+
+    float leanTargetF =
+        in.airborne ? 0.0f : Clamp(accel * 0.022f, -0.10f, 0.14f);
+    float leanTargetS =
+        in.airborne ? 0.0f
+                    : Clamp(turnRate * 0.05f *
+                                fminf(a->speedSmooth / 6.0f, 1.0f),
+                            -0.12f, 0.12f);
+    float leanBlend = 1.0f - expf(-8.0f * dt);
+    a->leanFwd += (leanTargetF - a->leanFwd) * leanBlend;
+    a->leanSide += (leanTargetS - a->leanSide) * leanBlend;
+
+    if (a->boneSpine1 >= 0 &&
+        (fabsf(a->leanFwd) > 0.004f || fabsf(a->leanSide) > 0.004f)) {
+      // Distribute the bend over two spine joints for a curve, not a hinge.
+      Quaternion qLean = QuaternionMultiply(
+          QuaternionFromAxisAngle((Vector3){1, 0, 0}, a->leanFwd * 0.6f),
+          QuaternionFromAxisAngle((Vector3){0, 0, 1}, -a->leanSide * 0.6f));
+      RotateSubtree(a, a->boneSpine1,
+                    a->blendPose[a->boneSpine1].translation, qLean);
+      if (a->boneSpine2 >= 0) {
+        Quaternion qLean2 = QuaternionMultiply(
+            QuaternionFromAxisAngle((Vector3){1, 0, 0}, a->leanFwd * 0.4f),
+            QuaternionFromAxisAngle((Vector3){0, 0, 1}, -a->leanSide * 0.4f));
+        RotateSubtree(a, a->boneSpine2,
+                      a->blendPose[a->boneSpine2].translation, qLean2);
+      }
+    }
   }
 
   // --- landing absorption (procedural squat-and-recover on touchdown) ------

@@ -124,7 +124,13 @@ typedef struct BrushAnimator {
   float pelvisOffset; // OUTPUT: add to the model's draw Y (<= 0). Includes
                       // the terrain pelvis drop and the landing dip.
 
+  // Inertia leans (procedural: bank into acceleration and turns).
+  float prevSpeedSmooth;
+  float prevYawRad;
+  float leanFwd, leanSide;
+
   // Leg bones resolved by name at init (-1 = not found, IK skipped).
+  int boneSpine1, boneSpine2;
   int bonePelvis;
   int boneThighL, boneCalfL, boneFootL;
   int boneThighR, boneCalfR, boneFootR;
