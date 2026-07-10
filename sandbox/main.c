@@ -52,7 +52,8 @@ typedef struct Sandbox {
   bool crouched;
   float rollTimer;     // seconds of roll movement burst remaining
 
-  BrushWorld *world; // chunk-streamed rolling-hills terrain
+  BrushWorld *world; // chunk-streamed terrain (flat by default)
+  Texture2D groundTex;
   Model crate;
   Model ramp;
   Matrix rampXform;
@@ -167,16 +168,29 @@ static void SandboxInit(void *user) {
     sscanf(spawn, "%f,%f,%f", &spx, &sy, &spz);
   }
 
-  // --- Chunk-streamed open world: rolling hills from SandboxHeight, with
-  // per-chunk Jolt terrain colliders. Created centered on the spawn; the
-  // initial ring blocks until resident, so ground height + collision are
-  // ready below. ---
+  // Classic checkerboard ground texture (tiles across chunks in world space).
+  Image checker = GenImageChecked(1024, 1024, 32, 32, RAYWHITE,
+                                  (Color){196, 199, 206, 255});
+  s->groundTex = LoadTextureFromImage(checker);
+  UnloadImage(checker);
+  GenTextureMipmaps(&s->groundTex);
+  SetTextureFilter(s->groundTex, TEXTURE_FILTER_TRILINEAR);
+  SetTextureWrap(s->groundTex, TEXTURE_WRAP_REPEAT);
+
+  // --- Chunk-streamed open world: FLAT terrain by default (heightFn NULL);
+  // BRUSH_HILLS plugs in SandboxHeight to shape rolling hills. Per-chunk Jolt
+  // colliders; the initial ring blocks until resident so ground + collision
+  // are ready below. Created centered on the spawn. ---
+  float (*heightFn)(void *, float, float) =
+      (getenv("BRUSH_HILLS") != NULL) ? SandboxHeight : NULL;
   s->world = BrushWorldCreate(
       (BrushWorldConfig){.seed = 1337,
-                         .heightFn = SandboxHeight,
+                         .heightFn = heightFn,
                          .chunkSize = 64.0f,
                          .loadRadius = 4,
-                         .physics = &s->phys},
+                         .physics = &s->phys,
+                         .groundTex = s->groundTex,
+                         .texMetresPerTile = 64.0f}, // 32 squares/chunk -> 2 m
       (Vector3){spx, 0, spz});
 
   float groundY = BrushWorldGroundHeight(s->world, spx, spz);
@@ -496,6 +510,7 @@ static void SandboxShutdown(void *user) {
   // World holds per-chunk terrain colliders in the physics world, so it must
   // tear down (stop the worker, remove bodies) before the physics world does.
   BrushWorldDestroy(s->world);
+  UnloadTexture(s->groundTex); // world doesn't own the game-supplied texture
   BrushCharacterCleanup(&s->body, &s->phys);
   BrushPhysicsCleanup(&s->phys);
   BrushAnimatorUnload(&s->animator);

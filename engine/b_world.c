@@ -195,7 +195,14 @@ static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
       chunk->mesh.normals[v * 3 + 2] = n.z;
       chunk->mesh.texcoords[v * 2 + 0] = wx * texScale;
       chunk->mesh.texcoords[v * 2 + 1] = wz * texScale;
-      SlopeColor(n.y, &chunk->mesh.colors[v * 4]);
+      // With a ground texture, keep vertex colours neutral so the texture
+      // reads true; without one, shade by slope (green lowland / grey rock).
+      if (w->cfg.groundTex.id > 0) {
+        unsigned char *col = &chunk->mesh.colors[v * 4];
+        col[0] = col[1] = col[2] = col[3] = 255;
+      } else {
+        SlopeColor(n.y, &chunk->mesh.colors[v * 4]);
+      }
       if (h > maxH) maxH = h;
     }
   }

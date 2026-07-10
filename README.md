@@ -77,6 +77,7 @@ engine/     the brush library — never includes game code
   b_shadow    sun shadow map: ortho depth pass, texel-snapped follow, PCSS
   b_tod       day/night clock: solar geometry + swappable look palette
   b_world     chunk-streamed terrain: worker thread, game heightFn, colliders
+              (flat + checker by default; BRUSH_HILLS for rolling hills)
   b_physics   Jolt physics world: static box/mesh colliders, triggers, raycasts
   b_character kinematic capsule controller: wall slide, slopes, stair steps
   b_anim      skeletal animator: gait/crouch blends, jump phases, roll,
