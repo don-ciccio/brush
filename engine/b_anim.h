@@ -65,6 +65,7 @@ typedef enum {
   BRUSH_ANIM_JUMP_LOOP,
   BRUSH_ANIM_JUMP_LAND,
   BRUSH_ANIM_ROLL,
+  BRUSH_ANIM_ONESHOT, // any named clip via BrushAnimatorPlayOneShot
 } BrushAnimState;
 
 // Per-frame gameplay inputs. Keeping the animator driven by this struct is
@@ -112,6 +113,10 @@ typedef struct BrushAnimator {
 
   // Cross-fade from a frozen snapshot of the previous pose.
   float fadeT, fadeDur;
+
+  // Generic one-shot state (any clip in the file, played by name).
+  int oneShotIndex;    // index into anims while BRUSH_ANIM_ONESHOT is active
+  float oneShotExit;   // phase at which control returns to the ground state
 
   // Landing absorption state
   bool prevAirborne;
@@ -161,6 +166,18 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt);
 
 // Fire the roll one-shot (no-op if already rolling or the clip is missing).
 void BrushAnimatorTriggerRoll(BrushAnimator *a);
+
+// Play ANY clip from the animation file by name as a one-shot that overrides
+// the state machine; locomotion/crouch resumes at `exitPhase` (0..1 — trim a
+// clip's recovery tail with < 1). This is how a game uses clips the engine
+// has no state for (mantles, attacks, emotes...). Returns the clip duration
+// in seconds (for timing gameplay to the clip, e.g. moving the capsule under
+// a mantle), or < 0 if the clip is not in the file. Calling again replaces
+// the current one-shot. NOTE: for clips that move the feet off the ground
+// (climbs, slides) pass ikWeight = 0 while the one-shot plays — foot IK
+// would pin the feet to the floor and fight the clip.
+float BrushAnimatorPlayOneShot(BrushAnimator *a, const char *clipName,
+                               float exitPhase);
 
 BrushAnimState BrushAnimatorState(const BrushAnimator *a);
 

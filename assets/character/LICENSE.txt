@@ -1,11 +1,14 @@
 -------------------------------------------------------
-Character & animations: "Universal Animation Library" by Quaternius
+Character & animations: "Universal Animation Library" 1 & 2 by Quaternius
 https://quaternius.com  |  https://www.patreon.com/quaternius
 
 License: CC0 1.0 Universal (Public Domain Dedication)
 https://creativecommons.org/publicdomain/zero/1.0/
 
 mannequin.glb is UAL1_Standard.glb trimmed to the core locomotion clips
-(Idle_Loop, Walk_Loop, Jog_Fwd_Loop, Sprint_Loop, Jump_Start/Loop/Land)
-via headless Blender.
+(Idle_Loop, Walk_Loop, Jog_Fwd_Loop, Sprint_Loop, Jump_Start/Loop/Land,
+Crouch_Idle_Loop, Crouch_Fwd_Loop, Roll) via headless Blender
+(tools/trim_ual.py), plus traversal clips merged from UAL2_Standard.glb
+(ClimbUp_1m, Slide_Start/Loop/Exit) via tools/merge_clips.py — both packs
+share the same universal humanoid rig.
 -------------------------------------------------------

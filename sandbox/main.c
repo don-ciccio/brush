@@ -52,6 +52,11 @@ typedef struct Sandbox {
   bool crouched;
   float rollTimer;     // seconds of roll movement burst remaining
 
+  // Mantle: jump at a waist-to-chest-high ledge -> ClimbUp_1m one-shot while
+  // the capsule is scripted from mantleFrom onto mantleTo.
+  float mantleTimer, mantleDur; // seconds remaining / total (0 = not mantling)
+  Vector3 mantleFrom, mantleTo;
+
   BrushWorld *world; // chunk-streamed terrain (flat by default)
   Texture2D groundTex;
 
@@ -323,6 +328,31 @@ static void SandboxFixedUpdate(void *user, float dt) {
     if (TextIsEqual(autoMove, "walk")) inY = 0.45f;
   }
 
+  // --- Mantle in progress: the capsule is scripted, not simulated. Rise
+  // finishes by 60% of the ride, then slide onto the ledge — the capsule
+  // never pushes through the face. IK stays off (the clip owns the feet).
+  if (s->mantleTimer > 0.0f) {
+    s->mantleTimer -= dt;
+    float t = 1.0f - fmaxf(s->mantleTimer, 0.0f) / s->mantleDur;
+    Vector3 p;
+    p.y = s->mantleFrom.y +
+          (s->mantleTo.y - s->mantleFrom.y) * fminf(t / 0.6f, 1.0f);
+    float f = fmaxf((t - 0.45f) / 0.55f, 0.0f);
+    f = f * f * (3.0f - 2.0f * f); // smoothstep the forward slide
+    p.x = s->mantleFrom.x + (s->mantleTo.x - s->mantleFrom.x) * f;
+    p.z = s->mantleFrom.z + (s->mantleTo.z - s->mantleFrom.z) * f;
+    BrushPhysicsStep(&s->phys, dt);
+    BrushCharacterWarp(&s->body, p);
+    s->pos = p;
+    s->vel = (Vector3){0};
+    s->velY = 0.0f;
+    s->grounded = true;
+    s->airTime = 0.0f;
+    s->ikWeight = 0.0f;
+    s->jumpQueued = false;
+    return;
+  }
+
   Vector3 camFwd = Vector3Subtract(s->camera.cam.target, s->camera.cam.position);
   camFwd.y = 0;
   camFwd = Vector3Normalize(camFwd);
@@ -352,6 +382,36 @@ static void SandboxFixedUpdate(void *user, float dt) {
   float blend = fminf(ACCEL * dt, 1.0f);
   s->vel.x += (wishVel.x - s->vel.x) * blend;
   s->vel.z += (wishVel.z - s->vel.z) * blend;
+
+  // --- Mantle detection: jumping while facing a waist-to-chest-high ledge
+  // climbs it instead (UAL2's ClimbUp_1m). Chest ray finds the face, a probe
+  // over the lip finds a standable top; taller obstacles (walls, stacked
+  // crates) reject on the rise limit and fall through to a normal jump.
+  if (s->jumpQueued && s->grounded) {
+    Vector3 fwd = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
+    Vector3 chest = Vector3Add(s->pos, (Vector3){0.0f, 0.7f, 0.0f});
+    Vector3 wallHit;
+    if (BrushPhysicsRaycast(&s->phys, chest, fwd, 0.9f, &wallHit, NULL)) {
+      Vector3 over = {wallHit.x + fwd.x * 0.35f, s->pos.y + 1.5f,
+                      wallHit.z + fwd.z * 0.35f};
+      Vector3 topHit;
+      if (BrushPhysicsRaycast(&s->phys, over, (Vector3){0, -1, 0}, 1.5f,
+                              &topHit, NULL)) {
+        float rise = topHit.y - s->pos.y;
+        if (rise > 0.5f && rise < 1.2f) {
+          float clipDur =
+              BrushAnimatorPlayOneShot(&s->animator, "ClimbUp_1m", 0.92f);
+          if (clipDur > 0.0f) {
+            s->mantleDur = clipDur * 0.92f; // ride matches the played span
+            s->mantleTimer = s->mantleDur;
+            s->mantleFrom = s->pos;
+            s->mantleTo = topHit;
+            s->jumpQueued = false;
+          }
+        }
+      }
+    }
+  }
 
   // Jump + gravity; the kinematic capsule handles collision, wall sliding,
   // slopes, and stair steps.
@@ -524,7 +584,7 @@ static void SandboxDrawUI(void *user) {
   DrawText(TextFormat("Press [F4] to toggle sun shadows: %s",
                       BrushRenderShadowsEnabled() ? "on" : "off"),
            16, 144, 20, DARKGRAY);
-  DrawText("Hold [LCtrl] to crouch, press [R] to roll", 16, 196, 20,
+  DrawText("Hold [LCtrl] to crouch, press [R] to roll, jump at a ledge to climb", 16, 196, 20,
            DARKGRAY);
   DrawText(TextFormat("Hold [ or ] to scrub time: %02d:%02d",
                       (int)s->tod.timeHours,

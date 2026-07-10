@@ -334,6 +334,27 @@ void BrushAnimatorTriggerRoll(BrushAnimator *a) {
   EnterState(a, BRUSH_ANIM_ROLL, 0.10f);
 }
 
+float BrushAnimatorPlayOneShot(BrushAnimator *a, const char *clipName,
+                               float exitPhase) {
+  if (a->blendPose == NULL || clipName == NULL) return -1.0f;
+  int idx = -1;
+  for (int i = 0; i < a->animCount; i++) {
+    if (TextIsEqual(a->anims[i].name, clipName)) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) {
+    TraceLog(LOG_WARNING, "BRUSH anim: one-shot clip '%s' not in file",
+             clipName);
+    return -1.0f;
+  }
+  a->oneShotIndex = idx;
+  a->oneShotExit = Clamp(exitPhase, 0.05f, 1.0f);
+  EnterState(a, BRUSH_ANIM_ONESHOT, 0.10f);
+  return (float)a->anims[idx].frameCount / BRUSH_ANIM_FPS;
+}
+
 BrushAnimState BrushAnimatorState(const BrushAnimator *a) { return a->state; }
 
 void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
@@ -400,6 +421,11 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     else if (a->phase >= ROLL_EXIT_PHASE)
       EnterState(a, ground, FADE_TO_LOCO);
     break;
+  case BRUSH_ANIM_ONESHOT:
+    // Runs to its exit phase regardless of airborne flickers — one-shots
+    // like mantles legitimately take the capsule off the ground mid-clip.
+    if (a->phase >= a->oneShotExit) EnterState(a, ground, FADE_TO_LOCO);
+    break;
   }
 
   // --- evaluate the current state's pose into blendPose ---
@@ -425,6 +451,9 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     break;
   case BRUSH_ANIM_ROLL:
     clip = Clip(a, BRUSH_CLIP_ROLL);
+    break;
+  case BRUSH_ANIM_ONESHOT:
+    clip = &a->anims[a->oneShotIndex];
     break;
   }
   if (clip != NULL) {

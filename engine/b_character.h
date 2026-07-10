@@ -37,4 +37,9 @@ void BrushCharacterCleanup(BrushCharacter *c, BrushPhysics *pw);
 // Returns the actual visual movement applied.
 Vector3 BrushCharacterMove(BrushCharacter *c, BrushPhysics *pw, Vector3 inputVelocity, float dt);
 
+// Teleport the capsule to a feet position and zero its velocity (respawns,
+// mantles, scripted moves). No collision sweep — the caller guarantees the
+// target is clear.
+void BrushCharacterWarp(BrushCharacter *c, Vector3 feetPos);
+
 #endif // B_CHARACTER_H

@@ -80,6 +80,16 @@ void BrushCharacterCleanup(BrushCharacter *c, BrushPhysics *pw) {
     c->capsuleShape = NULL;
 }
 
+void BrushCharacterWarp(BrushCharacter *c, Vector3 feetPos) {
+    if (!c || !c->character) return;
+    JPH_RVec3 comPos = { feetPos.x, feetPos.y + c->comOffset, feetPos.z };
+    JPH_CharacterVirtual_SetPosition(c->character, &comPos);
+    JPH_Vec3 zero = { 0.0f, 0.0f, 0.0f };
+    JPH_CharacterVirtual_SetLinearVelocity(c->character, &zero);
+    c->position = feetPos;
+    c->velocity = (Vector3){ 0.0f, 0.0f, 0.0f };
+}
+
 Vector3 BrushCharacterMove(BrushCharacter *c, BrushPhysics *pw, Vector3 inputVelocity, float dt) {
     if (!c || !c->character || !pw || !pw->system) return (Vector3){ 0.0f, 0.0f, 0.0f };
 
