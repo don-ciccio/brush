@@ -16,6 +16,7 @@
 #ifndef BRUSH_H
 #define BRUSH_H
 
+#include "b_anim.h"
 #include "b_app.h"
 #include "b_camera.h"
 #include "b_console.h"

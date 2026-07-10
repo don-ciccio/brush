@@ -27,6 +27,14 @@ Layered render pipeline (submit/execute, F2 term isolation), procedural sky
 render interpolation, orbit camera with auto-follow, action-based input
 (keyboard+gamepad), F1 log console, zero-asset sandbox, screenshot harness.
 
+Also landed early (was v1 item 8): **skeletal animation core** — b_anim ports
+the donor animator's sampling/blending (frame-interpolated clip sampling,
+per-bone lerp/slerp blending, phase-synced 1-D gait blend idle→walk→jog→sprint,
+three-phase jump, snapshot cross-fades), driving the CC0 Quaternius mannequin
+(assets/character/mannequin.glb, trimmed from UAL1 via headless Blender —
+tools/trim_ual.py). Still to port later: look-at/foot IK, procedural leans,
+landing absorption, 2-D strafe blends.
+
 ## v0.x — pipeline depth (ports from the donor)
 
 1. **HDR post pipeline**: scene renders to a float target; bloom (multi-scale),
@@ -47,9 +55,9 @@ render interpolation, orbit camera with auto-follow, action-based input
    chokepoint), hysteresis load/unload.
 7. **Instanced foliage**: per-layer scatter tables, unified cross-chunk
    instance batches, LOD decimation, trail interaction, horizon culling.
-8. **Skeletal animation**: clip registry + state machine (1D/2D blends),
-   look-at/foot IK, procedural leans + landing absorption. Needs a CC0 rigged
-   character (Quaternius/Kenney) — donor-game assets are license-bound.
+8. **Skeletal animation, advanced layer** (core landed in v0 — see above):
+   look-at/foot IK, procedural leans + landing absorption, 2-D strafe blends,
+   transition-condition tables.
 
 ## v1.x — foundation systems (new builds, not ports)
 

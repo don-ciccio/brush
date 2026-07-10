@@ -5,9 +5,10 @@ open-world games, built by extracting the proven systems out of a working game
 (HDR pipeline, chunk-streamed terrain, skeletal animation, Jolt physics — see
 the [roadmap](docs/roadmap.md) for what lands when).
 
-The repo ships **zero binary assets**: everything in the sandbox — the
-checkerboard, the mannequin, the sky with its volumetric clouds — is generated
-procedurally at runtime.
+The only binary asset in the repo is the CC0 [Quaternius](https://quaternius.com)
+mannequin + Universal Animation Library clips (`assets/character/`); everything
+else — the checkerboard, the blob shadow, the sky with its volumetric clouds —
+is generated procedurally at runtime.
 
 ## Design: the image is built in layers
 
@@ -60,17 +61,20 @@ engine/     the brush library — never includes game code
   brush.h     public umbrella header
   b_app       window + fixed-timestep loop (sim at 1/60 s, interpolated render)
   b_render    the layer stack + lit shader
+  b_anim      skeletal animator: named clips, 1-D gait blend, jump phases
   b_sky       procedural atmospheric-scattering sky + FBM clouds
   b_camera    third-person orbit camera with hybrid auto-follow
   b_input     action-based input (keyboard + gamepad)
   b_console   F1 log console
   shaders/    GLSL (330)
 sandbox/    the starter game — the template you copy to begin a new game
+assets/     CC0 content only (Quaternius mannequin + animations)
 docs/       roadmap and design notes
 ```
 
 Environment toggles: `BRUSH_PERF=1` (uncapped fps + frame-time logs),
-`BRUSH_AUTO_SCREENSHOT=1` (screenshot at frame 180, then exit).
+`BRUSH_AUTO_SCREENSHOT=1` (screenshot at frame 180, then exit),
+`BRUSH_AUTO_MOVE=walk|jog|sprint` (hold forward input for captures).
 
 ## License
 

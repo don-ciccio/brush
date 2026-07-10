@@ -1,0 +1,11 @@
+-------------------------------------------------------
+Character & animations: "Universal Animation Library" by Quaternius
+https://quaternius.com  |  https://www.patreon.com/quaternius
+
+License: CC0 1.0 Universal (Public Domain Dedication)
+https://creativecommons.org/publicdomain/zero/1.0/
+
+mannequin.glb is UAL1_Standard.glb trimmed to the core locomotion clips
+(Idle_Loop, Walk_Loop, Jog_Fwd_Loop, Sprint_Loop, Jump_Start/Loop/Land)
+via headless Blender.
+-------------------------------------------------------

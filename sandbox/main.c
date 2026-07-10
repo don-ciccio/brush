@@ -18,6 +18,7 @@
 
 #include <math.h>
 #include <raymath.h>
+#include <stdlib.h>
 
 // --- Character tuning (units: metres, seconds) ---
 #define WALK_SPEED 3.0f
@@ -42,9 +43,8 @@ typedef struct Sandbox {
   BrushOrbitCam camera;
 
   Model floor;
-  Model body;   // capsule torso + head baked into one mesh transform set
-  Model head;
-  Model nose;   // small facing marker
+  Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
+  BrushAnimator animator;
   Model shadowBlob;
 
   Texture2D checkerTex;
@@ -72,10 +72,14 @@ static void SandboxInit(void *user) {
   s->floor = LoadModelFromMesh(GenMeshPlane(120.0f, 120.0f, 1, 1));
   s->floor.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = s->checkerTex;
 
-  // Mannequin: capsule torso + sphere head + a nose cube marking the facing.
-  s->body = LoadModelFromMesh(GenMeshCylinder(0.30f, 0.85f, 16));
-  s->head = LoadModelFromMesh(GenMeshSphere(0.22f, 12, 16));
-  s->nose = LoadModelFromMesh(GenMeshCube(0.10f, 0.10f, 0.22f));
+  // Animated mannequin (CC0). Clips ride in the same GLB; the animator binds
+  // them by name (UAL defaults).
+  s->mannequin = LoadModel("assets/character/mannequin.glb");
+  BrushAnimatorInit(&s->animator, &s->mannequin,
+                    "assets/character/mannequin.glb", NULL);
+  BoundingBox bb = GetModelBoundingBox(s->mannequin);
+  TraceLog(LOG_INFO, "SANDBOX: mannequin bounds y [%.2f .. %.2f], %d bones",
+           bb.min.y, bb.max.y, s->mannequin.boneCount);
 
   // Soft radial blob shadow (transparent layer content).
   Image blob = GenImageGradientRadial(256, 256, 0.0f, (Color){0, 0, 0, 150},
@@ -88,9 +92,10 @@ static void SandboxInit(void *user) {
   // Everything lit by the engine's layered forward shader.
   Shader lit = BrushGetLitShader();
   s->floor.materials[0].shader = lit;
-  s->body.materials[0].shader = lit;
-  s->head.materials[0].shader = lit;
-  s->nose.materials[0].shader = lit;
+  // glTF loads prepend raylib's default material at index 0 (real materials
+  // shift to 1..N) — assign the shader to every material, never by index.
+  for (int i = 0; i < s->mannequin.materialCount; i++)
+    s->mannequin.materials[i].shader = lit;
 
   s->pos = s->prevPos = s->renderPos = (Vector3){0.0f, 0.0f, 0.0f};
   s->grounded = true;
@@ -115,6 +120,16 @@ static void SandboxFixedUpdate(void *user, float dt) {
   float inX = BrushInputAxis(BRUSH_AXIS_MOVE_X);
   float inY = BrushInputAxis(BRUSH_AXIS_MOVE_Y);
 
+  // Screenshot harness: BRUSH_AUTO_MOVE=walk|jog|sprint holds forward input
+  // so automated captures show the character in motion.
+  const char *autoMove = getenv("BRUSH_AUTO_MOVE");
+  bool autoSprint = false;
+  if (autoMove != NULL) {
+    inY = 1.0f;
+    autoSprint = TextIsEqual(autoMove, "sprint");
+    if (TextIsEqual(autoMove, "walk")) inY = 0.45f;
+  }
+
   Vector3 camFwd = Vector3Subtract(s->camera.cam.target, s->camera.cam.position);
   camFwd.y = 0;
   camFwd = Vector3Normalize(camFwd);
@@ -125,7 +140,9 @@ static void SandboxFixedUpdate(void *user, float dt) {
   float wishLen = Vector3Length(wishDir);
   if (wishLen > 1.0f) wishDir = Vector3Scale(wishDir, 1.0f / wishLen);
 
-  float maxSpeed = BrushInputDown(BRUSH_BTN_SPRINT) ? RUN_SPEED : WALK_SPEED;
+  float maxSpeed = (BrushInputDown(BRUSH_BTN_SPRINT) || autoSprint)
+                       ? RUN_SPEED
+                       : WALK_SPEED;
   Vector3 wishVel = Vector3Scale(wishDir, maxSpeed * fminf(wishLen, 1.0f));
 
   // Horizontal acceleration toward the wish velocity.
@@ -192,6 +209,13 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   s->renderYaw = s->prevYaw + yawDiff * alpha;
 
   BrushOrbitCamUpdate(&s->camera, s->renderPos, s->vel, dt);
+
+  // Drive the animator from gameplay state (per rendered frame).
+  float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
+  BrushAnimatorUpdate(&s->animator,
+                      (BrushAnimInput){.speed = horizSpeed,
+                                       .airborne = !s->grounded},
+                      dt);
 }
 
 // ------------------------------------------------------------------
@@ -205,17 +229,9 @@ static void SandboxDraw(void *user) {
 
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->floor, MatrixIdentity(), WHITE);
 
-  // Mannequin pieces (torso base at feet, head on top, nose forward).
-  Matrix torso = MatrixMultiply(rot, MatrixTranslate(p.x, p.y + 0.05f, p.z));
-  Matrix head = MatrixMultiply(rot, MatrixTranslate(p.x, p.y + 1.14f, p.z));
-  Matrix nose = MatrixMultiply(
-      MatrixMultiply(MatrixTranslate(0, 1.14f, 0.26f), rot),
-      MatrixTranslate(p.x, p.y, p.z));
-  Color skin = (Color){215, 215, 220, 255};
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->body, torso, skin);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->head, head, skin);
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->nose, nose,
-                    (Color){90, 120, 200, 255});
+  // Skinned mannequin, feet at p (the animator already posed the meshes).
+  Matrix xform = MatrixMultiply(rot, MatrixTranslate(p.x, p.y, p.z));
+  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->mannequin, xform, WHITE);
 
   // Blob shadow: shrinks and fades with jump height (transparent layer).
   float h = fminf(p.y / 3.0f, 1.0f);
@@ -265,10 +281,9 @@ static void SandboxDrawUI(void *user) {
 
 static void SandboxShutdown(void *user) {
   Sandbox *s = user;
+  BrushAnimatorUnload(&s->animator);
   UnloadModel(s->floor);
-  UnloadModel(s->body);
-  UnloadModel(s->head);
-  UnloadModel(s->nose);
+  UnloadModel(s->mannequin);
   UnloadModel(s->shadowBlob);
   UnloadTexture(s->checkerTex);
   UnloadTexture(s->blobTex);
