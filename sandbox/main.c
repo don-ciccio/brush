@@ -50,6 +50,7 @@ typedef struct Sandbox {
   float airTime;       // continuous seconds off the ground (debounced flag)
   float pelvisDrop;    // smoothed drop to the lowest foot contact (<= 0)
   float footDeltaL, footDeltaR; // per-foot IK inputs (>= 0)
+  float groundPitch;   // smoothed slope along facing (rad, uphill positive)
   bool crouched;
   float rollTimer;     // seconds of roll movement burst remaining
 
@@ -249,25 +250,53 @@ static void SandboxFixedUpdate(void *user, float dt) {
   // drops to the LOWEST contact (applied on the model transform, so the body
   // stays upright) and the other leg bends via knee IK to stay planted.
   float leftDelta = 0.0f, rightDelta = 0.0f, targetDrop = 0.0f;
+  float targetPitch = 0.0f;
   if (s->grounded) {
     Vector3 rightDir = {cosf(s->yaw), 0.0f, -sinf(s->yaw)};
+    Vector3 fwdDir = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
     Vector3 down = {0.0f, -1.0f, 0.0f};
+    Vector3 hit;
+
+    // Across-slope stance: probe under each foot (0.20 m lateral).
     Vector3 footL = Vector3Add(s->pos, Vector3Scale(rightDir, -0.20f));
     Vector3 footR = Vector3Add(s->pos, Vector3Scale(rightDir, 0.20f));
-    Vector3 hit;
     footL.y += 1.0f;
     if (BrushPhysicsRaycast(&s->phys, footL, down, 2.0f, &hit, NULL))
       leftDelta = hit.y - s->pos.y;
     footR.y += 1.0f;
     if (BrushPhysicsRaycast(&s->phys, footR, down, 2.0f, &hit, NULL))
       rightDelta = hit.y - s->pos.y;
+    // Ledge guard: a probe shooting past an edge reads metres of drop and
+    // dislocates the pose — cap everything at leg-believable ranges.
+    leftDelta = fmaxf(leftDelta, -0.45f);
+    rightDelta = fmaxf(rightDelta, -0.45f);
     if (leftDelta < 0.0f || rightDelta < 0.0f)
-      targetDrop = fmaxf(fminf(leftDelta, rightDelta), -0.4f);
+      targetDrop = fmaxf(fminf(leftDelta, rightDelta), -0.28f);
+
+    // Along-facing slope pitch: fore/aft probes rotate the feet onto the
+    // incline (the lateral probes read zero when facing straight up a ramp).
+    float hFore = 0.0f, hBack = 0.0f;
+    Vector3 pFore = Vector3Add(s->pos, Vector3Scale(fwdDir, 0.25f));
+    Vector3 pBack = Vector3Add(s->pos, Vector3Scale(fwdDir, -0.25f));
+    pFore.y += 1.0f;
+    pBack.y += 1.0f;
+    bool okF = BrushPhysicsRaycast(&s->phys, pFore, down, 2.0f, &hit, NULL);
+    if (okF) hFore = hit.y - s->pos.y;
+    bool okB = BrushPhysicsRaycast(&s->phys, pBack, down, 2.0f, &hit, NULL);
+    if (okB) hBack = hit.y - s->pos.y;
+    if (okF && okB && fabsf(hFore) < 0.6f && fabsf(hBack) < 0.6f) {
+      targetPitch = atan2f(hFore - hBack, 0.5f);
+      // Split the heel/toe error: sink the pelvis slightly so pitched feet
+      // meet the surface instead of hovering at the capsule contact point.
+      targetDrop -= 0.06f * fabsf(sinf(targetPitch));
+    }
   }
   s->pelvisDrop += (targetDrop - s->pelvisDrop) * (1.0f - expf(-15.0f * dt));
+  s->groundPitch +=
+      (targetPitch - s->groundPitch) * (1.0f - expf(-12.0f * dt));
   // Deltas relative to the lowered pelvis, clamped so legs only bend up.
-  s->footDeltaL = fminf(fmaxf(leftDelta - s->pelvisDrop, 0.0f), 0.5f);
-  s->footDeltaR = fminf(fmaxf(rightDelta - s->pelvisDrop, 0.0f), 0.5f);
+  s->footDeltaL = fminf(fmaxf(leftDelta - s->pelvisDrop, 0.0f), 0.35f);
+  s->footDeltaR = fminf(fmaxf(rightDelta - s->pelvisDrop, 0.0f), 0.35f);
 
   // Face the movement direction (shortest arc, smoothed).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
@@ -336,7 +365,8 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
                                        .airborne = s->airTime > 0.06f,
                                        .crouched = s->crouched,
                                        .leftFootDelta = s->footDeltaL,
-                                       .rightFootDelta = s->footDeltaR},
+                                       .rightFootDelta = s->footDeltaR,
+                                       .groundPitch = s->groundPitch},
                       dt);
 }
 

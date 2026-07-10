@@ -352,7 +352,10 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   if (landed) {
     a->landTimer = LAND_DURATION;
     a->landStrength = 0.6f + 0.4f * Clamp(in.speed / 6.0f, 0.0f, 1.0f);
+    a->ikRamp = 0.0f; // ease the slope IK back in while the capsule settles
   }
+  if (in.airborne) a->ikRamp = 0.0f;
+  else a->ikRamp = fminf(a->ikRamp + dt / 0.25f, 1.0f);
   float landDip = 0.0f;
   if (a->landTimer > 0.0f) {
     float p = 1.0f - a->landTimer / LAND_DURATION; // 0 at contact -> 1 done
@@ -374,11 +377,13 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     const float calfGain = 3.0f;
     const float footGain = 1.5f;
 
-    // Fold the landing knee-bend into both feet so the planted feet track
-    // the dropping pelvis.
+    // Slope IK is weighted by the post-touchdown ramp (raycasts right at
+    // landing are noisy: a probe off a ledge reads metres of drop and the
+    // legs snap). The landing knee-bend is NOT ramped — it IS the landing.
     float landBend = landDip * LAND_KNEE_RATIO;
-    float dl = in.leftFootDelta + landBend;
-    float dr = in.rightFootDelta + landBend;
+    float dl = in.leftFootDelta * a->ikRamp + landBend;
+    float dr = in.rightFootDelta * a->ikRamp + landBend;
+    float pitch = in.groundPitch * a->ikRamp;
 
     if (fabsf(dl) > 0.005f) {
       Quaternion qThigh = QuaternionFromEuler(-dl * thighGain, 0.0f, 0.0f);
@@ -390,6 +395,14 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
       Quaternion qFoot = QuaternionFromEuler(-dl * footGain, 0.0f, 0.0f);
       a->blendPose[a->boneFootL].rotation =
           QuaternionMultiply(a->blendPose[a->boneFootL].rotation, qFoot);
+    }
+    if (fabsf(pitch) > 0.01f) {
+      // Lay both feet onto the slope along the facing direction.
+      Quaternion qSlope = QuaternionFromEuler(pitch, 0.0f, 0.0f);
+      a->blendPose[a->boneFootL].rotation =
+          QuaternionMultiply(a->blendPose[a->boneFootL].rotation, qSlope);
+      a->blendPose[a->boneFootR].rotation =
+          QuaternionMultiply(a->blendPose[a->boneFootR].rotation, qSlope);
     }
     if (fabsf(dr) > 0.005f) {
       Quaternion qThigh = QuaternionFromEuler(-dr * thighGain, 0.0f, 0.0f);

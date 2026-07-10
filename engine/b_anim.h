@@ -84,6 +84,9 @@ typedef struct BrushAnimInput {
   // pelvisDrop, then lower the MODEL by pelvisDrop and pass deltas here.
   float leftFootDelta;
   float rightFootDelta;
+  // Ground pitch along the facing direction (radians, uphill-ahead positive):
+  // the foot bones rotate to lie on the slope. 0 on flat ground.
+  float groundPitch;
 } BrushAnimInput;
 
 typedef struct BrushAnimator {
@@ -110,6 +113,7 @@ typedef struct BrushAnimator {
   float landTimer;    // seconds remaining in the current dip (0 = idle)
   float landStrength; // 0..1 magnitude captured at impact
   bool landDebugPin;  // BRUSH_ANIM_LAND: hold the dip for screenshots
+  float ikRamp;       // slope-IK weight, eases 0->1 after touchdown
 
   // Leg bones resolved by name at init (-1 = not found, IK skipped).
   int bonePelvis;
