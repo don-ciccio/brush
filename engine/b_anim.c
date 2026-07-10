@@ -102,6 +102,25 @@ static const ModelAnimation *Clip(const BrushAnimator *a, BrushClip id) {
   return (idx >= 0) ? &a->anims[idx] : NULL;
 }
 
+// Global-pose blending lerps bone POSITIONS, and between very different
+// poses (airborne tuck vs land crouch) the linear chord SHORTENS limb
+// segments mid-blend — visibly thinner/shorter legs. Restore every segment
+// to its bind length, walking parents-first (raylib sorts parents before
+// children).
+static void FixBoneLengths(BrushAnimator *a) {
+  for (int i = 0; i < a->boneCount; i++) {
+    int p = a->model->bones[i].parent;
+    if (p < 0 || a->bindLen[i] <= 0.0001f) continue;
+    Vector3 d = Vector3Subtract(a->blendPose[i].translation,
+                                a->blendPose[p].translation);
+    float len = Vector3Length(d);
+    if (len < 0.0001f) continue;
+    a->blendPose[i].translation =
+        Vector3Add(a->blendPose[p].translation,
+                   Vector3Scale(d, a->bindLen[i] / len));
+  }
+}
+
 // Enter a new state: snapshot the current pose as the fade source.
 static void EnterState(BrushAnimator *a, BrushAnimState s, float fadeDur) {
   memcpy(a->fadePose, a->blendPose, sizeof(Transform) * (size_t)a->boneCount);
@@ -201,6 +220,14 @@ bool BrushAnimatorInit(BrushAnimator *a, Model *model, const char *animFile,
              "(remap animator.bone* for this skeleton)");
 
   int bc = a->boneCount;
+  a->bindLen = (float *)MemAlloc(sizeof(float) * (size_t)bc);
+  for (int i = 0; i < bc; i++) {
+    int p = model->bones[i].parent;
+    a->bindLen[i] =
+        (p >= 0) ? Vector3Distance(model->bindPose[i].translation,
+                                   model->bindPose[p].translation)
+                 : 0.0f;
+  }
   a->blendPose = (Transform *)MemAlloc(sizeof(Transform) * (size_t)bc);
   a->poseA = (Transform *)MemAlloc(sizeof(Transform) * (size_t)bc);
   a->poseB = (Transform *)MemAlloc(sizeof(Transform) * (size_t)bc);
@@ -335,6 +362,11 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     if (in.airborne) {
       EnterState(a, BRUSH_ANIM_JUMP_START, FADE_TO_JUMP);
       a->phase = JUMP_START_SKIP_PHASE;
+    } else if (landToLoco) {
+      // Movement cancels the recovery: the run-through gate only samples
+      // speed at the touchdown instant, so accelerating a moment later would
+      // otherwise moonwalk under the planted-feet clip until it finishes.
+      EnterState(a, ground, 0.15f);
     } else if (a->phase >= LAND_EXIT_PHASE)
       EnterState(a, ground, FADE_TO_LOCO);
     break;
@@ -397,6 +429,10 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     t = t * t * (3.0f - 2.0f * t); // smoothstep
     BlendBonePoses(a->blendPose, a->fadePose, a->blendPose, a->boneCount, t);
   }
+  // After all pose blending (1-D gait + fades), restore limb segment lengths
+  // the position-lerp shortened; the procedural layer below then operates on
+  // consistent joints.
+  FixBoneLengths(a);
 
   // --- inertia leans: the body banks into acceleration and turns ----------
   // The gait blend alone changes leg speed with no sense of mass; leaning the
@@ -626,6 +662,7 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
 void BrushAnimatorUnload(BrushAnimator *a) {
   if (a == NULL) return;
   if (a->anims != NULL) UnloadModelAnimations(a->anims, a->animCount);
+  if (a->bindLen) MemFree(a->bindLen);
   if (a->blendPose) MemFree(a->blendPose);
   if (a->poseA) MemFree(a->poseA);
   if (a->poseB) MemFree(a->poseB);

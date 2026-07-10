@@ -136,6 +136,8 @@ typedef struct BrushAnimator {
   int boneThighR, boneCalfR, boneFootR;
   int boneBallL, boneBallR; // toe joints (optional): second ground probe
 
+  float *bindLen; // per-bone bind-pose segment length (length preservation)
+
   // Scratch pose buffers (boneCount entries each).
   Transform *blendPose; // final pose applied to the model
   Transform *poseA, *poseB;
