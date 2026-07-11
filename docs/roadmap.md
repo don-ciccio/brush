@@ -158,6 +158,19 @@ D. ~~Terrain sculpting~~ — DONE (the namesake feature): sparse delta tiles
    with ring cursor, radius/strength, shift-lower, cmd+Z. STILL TODO:
    heightmap image import (Gaea/Blender bulk tile write), erode/noise ops,
    sculpt-aware vertex colors.
+E. ~~Materials + asset registry~~ — DONE (2026-07): b_assets ref-counted
+   texture cache; triplanar world-space block materials in lit.fs (UDN
+   normal blend, no tangents/UVs needed — scaled boxes tile seamlessly) +
+   tangent-space normal mapping for UV'd models; world.def v2 `material`
+   lines + per-block refs; `post` lines persist the render tunables the
+   editor's Environment panel exposes (scene carries its look). Editor:
+   Materials panel (paths/tile/spec/depth), Inspector material combo.
+F. **Model assets** (NEXT): `model <path> <pos rot scale>` entities in
+   world.def, glTF via a b_assets model cache, editor asset browser +
+   placement, collision through the existing worker-side mesh cooking.
+G. **Terrain texture painting**: splat-weight overlay riding the sculpt
+   tile machinery (same rebake/undo/save), 4-way blend in the terrain
+   path, paint brush in the editor sculpt mode.
 
 ## v2 — RPG toolkit
 
