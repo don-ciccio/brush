@@ -46,6 +46,29 @@ extern "C" int EditorMacPollMenuAction(void) {
     return a;
 }
 
+// Native open panel for importing images. Fills `out` with newline-separated
+// absolute paths (multi-select); returns the number of files picked.
+extern "C" int EditorMacOpenImageDialog(char *out, int cap) {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = @"Import Textures";
+    panel.allowsMultipleSelection = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowedFileTypes = @[ @"png", @"jpg", @"jpeg", @"tga", @"bmp" ];
+    if ([panel runModal] != NSModalResponseOK) return 0;
+    int count = 0, used = 0;
+    out[0] = '\0';
+    for (NSURL *url in panel.URLs) {
+        const char *p = url.fileSystemRepresentation;
+        int len = (int)strlen(p);
+        if (used + len + 2 > cap) break;
+        if (used > 0) out[used++] = '\n';
+        memcpy(out + used, p, (size_t)len + 1);
+        used += len;
+        count++;
+    }
+    return count;
+}
+
 static NSMenuItem *AddItem(NSMenu *menu, NSString *title, int tag,
                            NSString *key, NSEventModifierFlags mods) {
     NSMenuItem *item =

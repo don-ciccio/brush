@@ -37,6 +37,7 @@
 extern "C" void EditorMacSeamlessTitlebar(void *nsWindow);
 extern "C" void EditorMacDragWindow(void *nsWindow);
 extern "C" void EditorMacInstallMenu(void);
+extern "C" int EditorMacOpenImageDialog(char *out, int cap);
 extern "C" int EditorMacPollMenuAction(void);
 #endif
 
@@ -332,6 +333,42 @@ static bool TexPathCombo(const char *label, char *path, int cap) {
         ImGui::EndCombo();
     }
     return changed;
+}
+
+// Copy image files into the project's assets/textures (creating it on
+// demand — the Empty template starts without one) and rescan the pickers.
+// This is how textures enter a project: drag & drop onto the editor, or
+// the Import button's native dialog.
+static int ImportTextureFiles(const char **paths, int count) {
+    int imported = 0;
+    for (int i = 0; i < count; i++) {
+        if (!IsFileExtension(paths[i], ".png") &&
+            !IsFileExtension(paths[i], ".jpg") &&
+            !IsFileExtension(paths[i], ".jpeg") &&
+            !IsFileExtension(paths[i], ".tga") &&
+            !IsFileExtension(paths[i], ".bmp")) {
+            AddEditorLog("Skipped (not an image): %s", GetFileName(paths[i]));
+            continue;
+        }
+        mkdir("assets", 0755);
+        mkdir("assets/textures", 0755);
+        char dst[512];
+        snprintf(dst, sizeof(dst), "assets/textures/%s", GetFileName(paths[i]));
+        int size = 0;
+        unsigned char *data = LoadFileData(paths[i], &size);
+        if (data == NULL) {
+            AddEditorLog("ERROR: cannot read %s", paths[i]);
+            continue;
+        }
+        bool ok = SaveFileData(dst, data, size);
+        UnloadFileData(data);
+        if (ok) {
+            imported++;
+            AddEditorLog("Imported %s", dst);
+        }
+    }
+    if (imported > 0) RescanTextureDir();
+    return imported;
 }
 
 // --- Scene ops ---------------------------------------------------------------
@@ -685,7 +722,9 @@ static bool CreateProject(const char *parent, const char *name, int tmpl,
     }
     MakeDirs(outDir);
     char assets[600];
-    snprintf(assets, sizeof(assets), "%s/assets", outDir);
+    // assets/textures exists from birth so texture drops/imports always
+    // have a home (the Empty template ships no textures of its own).
+    snprintf(assets, sizeof(assets), "%s/assets/textures", outDir);
     MakeDirs(assets);
 
     BrushProject p = {0};
@@ -967,6 +1006,22 @@ int main(int argc, char **argv) {
             BrushRenderResize(GetScreenWidth(), GetScreenHeight());
 
         // --- Scene update -------------------------------------------------
+        // Drag & drop: images dropped anywhere on the window import into
+        // the project's assets/textures.
+        if (IsFileDropped()) {
+            FilePathList dropped = LoadDroppedFiles();
+            ImportTextureFiles((const char **)dropped.paths,
+                               (int)dropped.count);
+            UnloadDroppedFiles(dropped);
+        }
+        // Harness: BRUSH_TEST_IMPORT=<abs path> imports that image once,
+        // exercising the same path as drag & drop.
+        static bool testImportDone = false;
+        const char *ti = getenv("BRUSH_TEST_IMPORT");
+        if (ti != NULL && !testImportDone) {
+            testImportDone = true;
+            ImportTextureFiles(&ti, 1);
+        }
         // Texture import cache: land background re-imports of edited
         // source images and refresh the material table's handles.
         if (BrushAssetsUpdate()) {
@@ -1382,6 +1437,24 @@ int main(int argc, char **argv) {
                              g_scene.materials[i].name);
                 }
             }
+            // Bring textures INTO the project (drag & drop works too).
+            if (ImGui::Button("Import Textures...", ImVec2(-1, 0))) {
+#if defined(__APPLE__)
+                static char picked[8192];
+                int n = EditorMacOpenImageDialog(picked, sizeof(picked));
+                if (n > 0) {
+                    const char *files[64];
+                    int count = 0;
+                    for (char *tok = strtok(picked, "\n");
+                         tok != NULL && count < 64; tok = strtok(NULL, "\n"))
+                        files[count++] = tok;
+                    ImportTextureFiles(files, count);
+                }
+#else
+                AddEditorLog("Drop image files onto the window to import.");
+#endif
+            }
+            ImGui::Spacing();
             float bw = (ImGui::GetContentRegionAvail().x -
                         ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (ImGui::Button("+ Material", ImVec2(bw, 0)) &&
@@ -1434,6 +1507,35 @@ int main(int argc, char **argv) {
                                           sizeof(m->albedo));
                 reresolve |= TexPathCombo("Normal", m->normal,
                                           sizeof(m->normal));
+                // Thumbnails: proof the textures actually loaded. A path
+                // with no image = red MISSING (typo / file moved).
+                float thumb = 72.0f;
+                if (m->albedoTex.id != 0) {
+                    ImGui::Image((ImTextureID)(intptr_t)m->albedoTex.id,
+                                 ImVec2(thumb, thumb));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s (%dx%d)", m->albedo,
+                                          m->albedoTex.width,
+                                          m->albedoTex.height);
+                } else if (m->albedo[0] != '\0') {
+                    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
+                                       "albedo MISSING: %s", m->albedo);
+                }
+                if (m->normalTex.id != 0) {
+                    ImGui::SameLine();
+                    ImGui::Image((ImTextureID)(intptr_t)m->normalTex.id,
+                                 ImVec2(thumb, thumb));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip(
+                            "%s (%dx%d)%s", m->normal, m->normalTex.width,
+                            m->normalTex.height,
+                            BrushAssetsIsSwizzledNormal(m->normalTex)
+                                ? "\nDXT5nm (preview looks yellow — normal)"
+                                : "");
+                } else if (m->normal[0] != '\0') {
+                    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
+                                       "normal MISSING: %s", m->normal);
+                }
                 if (ImGui::DragFloat("Tile", &m->tile, 0.05f, 0.25f, 32.0f,
                                      "%.2f m")) g_dirty = true;
                 if (ImGui::SliderFloat("Specular", &m->spec, 0.0f, 1.0f))
