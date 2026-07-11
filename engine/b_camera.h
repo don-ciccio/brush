@@ -16,6 +16,10 @@
 #ifndef B_CAMERA_H
 #define B_CAMERA_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 #include <stdbool.h>
 
@@ -54,5 +58,9 @@ void BrushOrbitCamInit(BrushOrbitCam *c, Vector3 focus);
 // smooths toward the new boom position. `focusVel` is world-space velocity.
 void BrushOrbitCamUpdate(BrushOrbitCam *c, Vector3 focus, Vector3 focusVel,
                          float dt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_CAMERA_H

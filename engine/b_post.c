@@ -394,7 +394,7 @@ static void AddUpsample(Texture2D src, int srcW, int srcH, int destW,
   EndBlendMode();
 }
 
-void BrushPostRun(BrushPost *pp, float time) {
+void BrushPostRunNoPresent(BrushPost *pp, float time) {
   if (!pp->ready) return;
   int hw = pp->renderW / 2, hh = pp->renderH / 2;
   int qw = pp->renderW / 4, qh = pp->renderH / 4;
@@ -606,7 +606,6 @@ void BrushPostRun(BrushPost *pp, float time) {
   // 4. SMAA 1x on the LDR present image: edges -> blend weights ->
   //    neighborhood blend. The FBO path has no MSAA, so this is the engine's
   //    edge anti-aliasing. Result feeds the sharpen/upscale.
-  RenderTexture2D *finalSrc = &pp->present;
   if (pp->smaaEnabled) {
     float metrics[4] = {1.0f / (float)pp->outW, 1.0f / (float)pp->outH,
                         (float)pp->outW, (float)pp->outH};
@@ -644,8 +643,21 @@ void BrushPostRun(BrushPost *pp, float time) {
     BlitTexture(pp->present.texture, pp->outW, pp->outH, pp->outW, pp->outH);
     EndShaderMode();
     EndTextureMode();
-    finalSrc = &pp->presentAA;
   }
+}
+
+Texture2D BrushPostGetFinalTexture(const BrushPost *pp) {
+  if (pp->smaaEnabled) {
+    return pp->presentAA.texture;
+  }
+  return pp->present.texture;
+}
+
+void BrushPostRun(BrushPost *pp, float time) {
+  if (!pp->ready) return;
+  BrushPostRunNoPresent(pp, time);
+
+  RenderTexture2D *finalSrc = pp->smaaEnabled ? &pp->presentAA : &pp->present;
 
   // 5. Upscale to the backbuffer with CAS fused into the blit. Only worth it
   //    when the blit actually upscales (render scale < 1 and/or retina 2x).

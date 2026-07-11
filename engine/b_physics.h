@@ -14,6 +14,10 @@
 #ifndef B_PHYSICS_H
 #define B_PHYSICS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <joltc.h>
 #include <raylib.h>
 #include <stdbool.h>
@@ -45,9 +49,8 @@ void BrushPhysicsStep(BrushPhysics *pw, float dt); // call per fixed step
 void BrushPhysicsCleanup(BrushPhysics *pw); // destroy characters first
 
 // Static axis-aligned box collider (props, floors, walls).
-JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position,
-                                    Vector3 size, int userData,
-                                    const char *tag);
+JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position, Vector3 size, Vector3 rotation,
+                                    int userData, const char *tag);
 
 // Static triangle-mesh collider: `mesh` vertices are transformed by
 // `transform` into world space (exact collision for arbitrary geometry).
@@ -81,5 +84,14 @@ void BrushPhysicsRemoveBody(BrushPhysics *pw, JPH_BodyID bodyID);
 bool BrushPhysicsRaycast(BrushPhysics *pw, Vector3 origin, Vector3 direction,
                          float maxDistance, Vector3 *hitPoint,
                          Vector3 *hitNormal);
+
+// Raycast against solid bodies. Returns true on hit with point/normal/bodyID filled.
+bool BrushPhysicsRaycastEx(BrushPhysics *pw, Vector3 origin, Vector3 direction,
+                           float maxDistance, Vector3 *hitPoint,
+                           Vector3 *hitNormal, JPH_BodyID *hitBodyID);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_PHYSICS_H

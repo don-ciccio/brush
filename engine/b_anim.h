@@ -36,6 +36,10 @@
 #ifndef B_ANIM_H
 #define B_ANIM_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 #include <stdbool.h>
 
@@ -183,5 +187,9 @@ float BrushAnimatorPlayOneShot(BrushAnimator *a, const char *clipName,
 BrushAnimState BrushAnimatorState(const BrushAnimator *a);
 
 void BrushAnimatorUnload(BrushAnimator *a);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_ANIM_H

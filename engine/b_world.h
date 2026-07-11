@@ -35,6 +35,10 @@
 #ifndef B_WORLD_H
 #define B_WORLD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "b_physics.h"
 
 #include <raylib.h>
@@ -98,5 +102,9 @@ float BrushWorldGroundHeight(BrushWorld *w, float wx, float wz);
 
 // Which chunk a world position falls in (floor division, negative-safe).
 BrushChunkCoord BrushWorldChunkAt(const BrushWorld *w, Vector3 worldPos);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_WORLD_H

@@ -7,6 +7,10 @@
 #ifndef B_CHARACTER_H
 #define B_CHARACTER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "b_physics.h"
 #include <raylib.h>
 #include <joltc.h>
@@ -41,5 +45,9 @@ Vector3 BrushCharacterMove(BrushCharacter *c, BrushPhysics *pw, Vector3 inputVel
 // mantles, scripted moves). No collision sweep — the caller guarantees the
 // target is clear.
 void BrushCharacterWarp(BrushCharacter *c, Vector3 feetPos);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_CHARACTER_H

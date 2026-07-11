@@ -20,6 +20,10 @@
 #ifndef B_TOD_H
 #define B_TOD_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 
 // Elevation-keyed keyframes (elevation = sun direction Y, -1..1).
@@ -70,5 +74,9 @@ Vector3 BrushTodMoonColor(const BrushTimeOfDay *tod); // black below horizon
 Vector3 BrushTodAmbientColor(const BrushTimeOfDay *tod); // color * level
 Vector3 BrushTodFogColor(const BrushTimeOfDay *tod);
 float BrushTodExposure(const BrushTimeOfDay *tod);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_TOD_H

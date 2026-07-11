@@ -26,6 +26,10 @@
 #ifndef B_POST_H
 #define B_POST_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 #include <stdbool.h>
 
@@ -158,5 +162,15 @@ void BrushPostEndScene(BrushPost *pp);
 // Bloom + composite + sharpen-upscale to the active target (the backbuffer).
 // `time` drives the film-grain dither.
 void BrushPostRun(BrushPost *pp, float time);
+
+// Bloom + composite + AA (same as BrushPostRun but skips the final blit to screen/backbuffer).
+void BrushPostRunNoPresent(BrushPost *pp, float time);
+
+// Get the final composited LDR texture (either presentAA or present, depending on SMAA).
+Texture2D BrushPostGetFinalTexture(const BrushPost *pp);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_POST_H

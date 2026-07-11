@@ -54,6 +54,7 @@ typedef struct BrushRenderState {
 
   BrushShadow shadow;
   bool shadowsEnabled;
+  bool editorMode;
 
   BrushDrawCmd cmds[BRUSH_LAYER_COUNT][BRUSH_MAX_DRAWS_PER_LAYER];
   int cmdCount[BRUSH_LAYER_COUNT];
@@ -370,7 +371,11 @@ void BrushRenderExecute(Camera3D camera) {
     g_r.post.shadowMap =
         shadowsOn ? g_r.shadow.map[BRUSH_SHADOW_CASCADES - 1].depth
                   : (Texture2D){0};
-    BrushPostRun(&g_r.post, (float)GetTime());
+    if (g_r.editorMode) {
+      BrushPostRunNoPresent(&g_r.post, (float)GetTime());
+    } else {
+      BrushPostRun(&g_r.post, (float)GetTime());
+    }
   }
 
   for (int i = 0; i < BRUSH_LAYER_COUNT; i++) g_r.cmdCount[i] = 0;
@@ -397,6 +402,10 @@ bool BrushRenderShadowsEnabled(void) {
 
 struct BrushPost *BrushRenderGetPost(void) {
   return g_r.post.ready ? &g_r.post : NULL;
+}
+
+void BrushRenderSetEditorMode(bool enabled) {
+  g_r.editorMode = enabled;
 }
 
 void BrushRenderCycleLayerView(void) {

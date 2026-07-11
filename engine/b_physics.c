@@ -144,7 +144,7 @@ void BrushPhysicsCleanup(BrushPhysics *pw) {
     TraceLog(LOG_INFO, "JoltC: Centralized BrushPhysics shut down and cleaned up");
 }
 
-JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position, Vector3 size, int userData, const char *tag) {
+JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position, Vector3 size, Vector3 rotation, int userData, const char *tag) {
     if (!pw || !pw->bodyInterface) return BRUSH_BODY_INVALID;
 
     // Jolt box shapes are defined by half-extents
@@ -155,7 +155,13 @@ JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position, Vector3 
     
     // Create creation settings
     JPH_RVec3 pos = { position.x, position.y, position.z };
-    JPH_Quat rot = { 0.0f, 0.0f, 0.0f, 1.0f }; // Identity rotation
+    // Euler XYZ order — must match BrushEulerXYZ (b_scene) and ImGuizmo, or
+    // the collider silently diverges from the rendered block.
+    Matrix rm = MatrixMultiply(MatrixMultiply(MatrixRotateX(rotation.x * DEG2RAD),
+                                              MatrixRotateY(rotation.y * DEG2RAD)),
+                               MatrixRotateZ(rotation.z * DEG2RAD));
+    Quaternion q = QuaternionFromMatrix(rm);
+    JPH_Quat rot = { q.x, q.y, q.z, q.w };
     JPH_BodyCreationSettings* bodySettings = JPH_BodyCreationSettings_Create3(
         (const JPH_Shape*)boxShape,
         &pos,
@@ -316,6 +322,10 @@ void BrushPhysicsRemoveBody(BrushPhysics *pw, JPH_BodyID bodyID) {
 }
 
 bool BrushPhysicsRaycast(BrushPhysics *pw, Vector3 origin, Vector3 direction, float maxDistance, Vector3 *hitPoint, Vector3 *hitNormal) {
+    return BrushPhysicsRaycastEx(pw, origin, direction, maxDistance, hitPoint, hitNormal, NULL);
+}
+
+bool BrushPhysicsRaycastEx(BrushPhysics *pw, Vector3 origin, Vector3 direction, float maxDistance, Vector3 *hitPoint, Vector3 *hitNormal, JPH_BodyID *hitBodyID) {
     if (!pw || !pw->system) return false;
 
     const JPH_NarrowPhaseQuery* query = JPH_PhysicsSystem_GetNarrowPhaseQuery(pw->system);
@@ -354,6 +364,9 @@ bool BrushPhysicsRaycast(BrushPhysics *pw, Vector3 origin, Vector3 direction, fl
             } else {
                 *hitNormal = (Vector3){ 0.0f, 1.0f, 0.0f };
             }
+        }
+        if (hitBodyID) {
+            *hitBodyID = hit.bodyID;
         }
         return true;
     }

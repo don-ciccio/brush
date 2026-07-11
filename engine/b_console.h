@@ -11,11 +11,19 @@
 #ifndef B_CONSOLE_H
 #define B_CONSOLE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 
 void BrushConsoleInit(void); // installs the TraceLog callback
 void BrushConsoleToggle(void);
 bool BrushConsoleIsOpen(void);
 void BrushConsoleDraw(void); // no-op while closed
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_CONSOLE_H

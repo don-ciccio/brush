@@ -73,9 +73,7 @@ typedef struct Sandbox {
   JPH_BodyID blockBodies[BRUSH_SCENE_MAX_BLOCKS];
   int blockBodyCount;
   Model unitCube;
-  Model ramp; // rotated slab: mesh collider — stays procedural (v1 def has
-              // axis-aligned boxes only)
-  Matrix rampXform;
+
 
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
@@ -212,7 +210,7 @@ static void ApplySceneColliders(Sandbox *s) {
   for (int i = 0; i < s->scene.blockCount; i++) {
     BrushSceneBlock *k = &s->scene.blocks[i];
     s->blockBodies[s->blockBodyCount++] =
-        BrushPhysicsAddStaticBox(&s->phys, k->pos, k->size, 0, "block");
+        BrushPhysicsAddStaticBox(&s->phys, k->pos, k->size, k->rot, i, "block");
   }
 }
 
@@ -299,19 +297,6 @@ static void SandboxInit(void *user) {
   }
   ApplySceneColliders(s);
 
-  // Ramp chain up to the high platform: a rotated slab (triangle-MESH
-  // collider path) rising 2 m over ~6.3 m (18 deg), meeting the platform lip.
-  s->ramp = LoadModelFromMesh(GenMeshCube(3.0f, 0.3f, 6.6f));
-  s->ramp.materials[0].shader = BrushGetLitShader();
-  // Placed so the TOP surface (not the slab centre) runs flush: ground level
-  // at the approach, exactly 2.0 m at the platform face (z=-17.5). The slab's
-  // lower half buries into ground/platform — no lip at either end.
-  float rampAng = asinf(2.0f / 6.6f); // surface rises 2 m over its 6.6 m span
-  s->rampXform = MatrixMultiply(
-      MatrixRotateX(rampAng),
-      MatrixTranslate(9.0f, gy + 0.857f, -14.40f));
-  BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
-                            "ramp");
 
   // Harness: BRUSH_TEST_TRIGGER drops a big sensor volume across the
   // default camera boom — raycasts (camera anti-clip, IK probes) must see
@@ -644,15 +629,10 @@ static void SandboxDraw(void *user) {
   // Scene blocks (world.def data): one shared unit cube, scaled per block.
   for (int i = 0; i < s->scene.blockCount; i++) {
     BrushSceneBlock *k = &s->scene.blocks[i];
-    Matrix xf =
-        MatrixMultiply(MatrixScale(k->size.x, k->size.y, k->size.z),
-                       MatrixTranslate(k->pos.x, k->pos.y, k->pos.z));
+    Matrix xf = BrushBlockGetModelMatrix(k);
     BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, k->color);
     BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, k->color);
   }
-  Color rampCol = (Color){120, 130, 150, 255};
-  BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->ramp, s->rampXform, rampCol);
-  BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
 
   // Scene lights, submitted per frame like draws. Flickering ones get two
   // detuned sines; colors are linear HDR (>1 blooms).
@@ -743,7 +723,7 @@ static void SandboxShutdown(void *user) {
   BrushPhysicsCleanup(&s->phys);
   BrushAnimatorUnload(&s->animator);
   UnloadModel(s->unitCube);
-  UnloadModel(s->ramp);
+
   UnloadModel(s->mannequin);
 }
 

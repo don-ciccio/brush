@@ -26,6 +26,10 @@
 #ifndef B_SCENE_H
 #define B_SCENE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "b_render.h" // BrushPointLight
 
 #include <raylib.h>
@@ -37,6 +41,7 @@
 
 typedef struct BrushSceneBlock {
   Vector3 pos, size;
+  Vector3 rot; // Euler angles in degrees (pitch, yaw, roll)
   Color color;
 } BrushSceneBlock;
 
@@ -65,10 +70,18 @@ bool BrushSceneLoad(BrushScene *s, const char *path);
 
 // Write the scene as a world.def text file (and adopt the file's new mtime
 // so saving never triggers a self hot-reload). Returns false on I/O failure.
-bool BrushSceneSave(BrushScene *s, const char *path);
+bool BrushSceneSave(BrushScene *scene, const char *path);
+// Euler XYZ (degrees) rotation matrix — the one convention shared by the
+// editor gizmo, block rendering, and box colliders.
+Matrix BrushEulerXYZ(Vector3 degrees);
+Matrix BrushBlockGetModelMatrix(const BrushSceneBlock *k);
 
 // Re-load if the file changed on disk since the last Load/HotReload. Returns
 // true when a reload happened (the game should re-apply colliders etc.).
 bool BrushSceneHotReload(BrushScene *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_SCENE_H

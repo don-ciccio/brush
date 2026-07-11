@@ -26,6 +26,10 @@
 #include <raylib.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define BRUSH_FIXED_TIMESTEP (1.0f / 60.0f)
 #define BRUSH_MAX_SUBSTEPS 5
 
@@ -54,5 +58,9 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb);
 
 // Request a clean exit at the end of the current frame.
 void BrushQuit(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_APP_H

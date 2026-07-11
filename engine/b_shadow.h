@@ -19,6 +19,10 @@
 #ifndef B_SHADOW_H
 #define B_SHADOW_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 #include <stdbool.h>
 
@@ -50,5 +54,9 @@ void BrushShadowEnd(BrushShadow *sh);
 // Bind every cascade's depth texture on its reserved slot (call before
 // drawing receivers).
 void BrushShadowBindMaps(BrushShadow *sh);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_SHADOW_H

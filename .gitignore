@@ -5,3 +5,5 @@ screenshot.png
 *.d
 compile_commands.json
 external/joltc/build/
+imgui.ini
+editor_layout.ini

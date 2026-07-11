@@ -30,6 +30,10 @@
 #ifndef B_RENDER_H
 #define B_RENDER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 #include <stdbool.h>
 
@@ -71,6 +75,9 @@ bool BrushRenderShadowsEnabled(void);
 // Access the post pipeline's tunables (bloom threshold/intensity, exposure,
 // sharpen). Returns NULL if the HDR target could not be created.
 struct BrushPost *BrushRenderGetPost(void);
+
+// Set whether the renderer is in editor mode (disables final screen presentation in post-processing).
+void BrushRenderSetEditorMode(bool enabled);
 
 // The engine's forward lit shader. Assign it to your models' materials:
 //   model.materials[i].shader = BrushGetLitShader();
@@ -127,5 +134,9 @@ void BrushRenderExecute(Camera3D camera);
 void BrushRenderCycleLayerView(void);
 BrushLayerView BrushRenderGetLayerView(void);
 const char *BrushRenderLayerViewName(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_RENDER_H

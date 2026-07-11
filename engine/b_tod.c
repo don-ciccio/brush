@@ -60,7 +60,9 @@ static const BrushTodFloatKey DEFAULT_EXPOSURE[] = {
 // --- smoothstep-interpolated LUT lookups ------------------------------------
 
 static float SegmentT(float e, float a, float b) {
-  float t = (e - a) / (b - a);
+  float diff = b - a;
+  if (fabsf(diff) < 0.0001f) return 0.0f;
+  float t = (e - a) / diff;
   return t * t * (3.0f - 2.0f * t);
 }
 

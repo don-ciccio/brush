@@ -16,6 +16,10 @@
 #ifndef BRUSH_H
 #define BRUSH_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "b_anim.h"
 #include "b_app.h"
 #include "b_camera.h"
@@ -30,5 +34,9 @@
 #include "b_sky.h"
 #include "b_tod.h"
 #include "b_world.h"
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // BRUSH_H

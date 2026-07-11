@@ -16,6 +16,10 @@
 #ifndef B_SKY_H
 #define B_SKY_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <raylib.h>
 
 void BrushSkyInit(void);
@@ -28,5 +32,9 @@ void BrushSkyDraw(Camera3D camera, Vector3 sunDir, Vector3 moonDir);
 // Cloud drift (world XZ direction * speed) and haze factor.
 void BrushSkySetWind(Vector2 windDir);
 void BrushSkySetTurbidity(float turbidity);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_SKY_H

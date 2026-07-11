@@ -9,11 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <raymath.h>
 
 bool BrushSceneLoad(BrushScene *s, const char *path) {
-  memset(s, 0, sizeof(*s));
-  s->timeHours = -1.0f;
-  strncpy(s->path, path, BRUSH_SCENE_PATH_MAX - 1);
+  BrushScene temp = {0};
+  temp.timeHours = -1.0f;
+  strncpy(temp.path, path, BRUSH_SCENE_PATH_MAX - 1);
+  temp.path[BRUSH_SCENE_PATH_MAX - 1] = '\0';
 
   FILE *f = fopen(path, "r");
   if (f == NULL) return false;
@@ -28,7 +30,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     if (*p == '\0' || *p == '\n' || *p == '#') continue;
 
     int version;
-    float x, y, z, sx, sy, sz, r, g, b, radius;
+    float x, y, z, rx, ry, rz, sx, sy, sz, r, g, b, radius;
     int ir, ig, ib, flicker;
 
     if (sscanf(p, "version %d", &version) == 1) {
@@ -36,23 +38,31 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         TraceLog(LOG_WARNING, "BRUSH scene: %s is version %d (engine reads 1)",
                  path, version);
     } else if (sscanf(p, "spawn %f %f %f", &x, &y, &z) == 3) {
-      s->spawn = (Vector3){x, y, z};
+      temp.spawn = (Vector3){x, y, z};
     } else if (sscanf(p, "time %f", &x) == 1) {
-      s->timeHours = x;
-    } else if (sscanf(p, "block %f %f %f %f %f %f %d %d %d", &x, &y, &z, &sx,
-                      &sy, &sz, &ir, &ig, &ib) == 9) {
-      if (s->blockCount < BRUSH_SCENE_MAX_BLOCKS) {
-        s->blocks[s->blockCount++] = (BrushSceneBlock){
+      temp.timeHours = x;
+    } else if (sscanf(p, "block %f %f %f %f %f %f %f %f %f %d %d %d", &x, &y, &z, &rx, &ry, &rz, &sx, &sy, &sz, &ir, &ig, &ib) == 12) {
+      if (temp.blockCount < BRUSH_SCENE_MAX_BLOCKS) {
+        temp.blocks[temp.blockCount++] = (BrushSceneBlock){
             .pos = {x, y, z},
             .size = {sx, sy, sz},
-            .color = {(unsigned char)ir, (unsigned char)ig, (unsigned char)ib,
-                      255},
+            .rot = {rx, ry, rz},
+            .color = {(unsigned char)ir, (unsigned char)ig, (unsigned char)ib, 255},
+        };
+      }
+    } else if (sscanf(p, "block %f %f %f %f %f %f %d %d %d", &x, &y, &z, &sx, &sy, &sz, &ir, &ig, &ib) == 9) {
+      if (temp.blockCount < BRUSH_SCENE_MAX_BLOCKS) {
+        temp.blocks[temp.blockCount++] = (BrushSceneBlock){
+            .pos = {x, y, z},
+            .size = {sx, sy, sz},
+            .rot = {0, 0, 0},
+            .color = {(unsigned char)ir, (unsigned char)ig, (unsigned char)ib, 255},
         };
       }
     } else if (sscanf(p, "light %f %f %f %f %f %f %f %d", &x, &y, &z, &r, &g,
                       &b, &radius, &flicker) == 8) {
-      if (s->lightCount < BRUSH_SCENE_MAX_LIGHTS) {
-        s->lights[s->lightCount++] = (BrushSceneLight){
+      if (temp.lightCount < BRUSH_SCENE_MAX_LIGHTS) {
+        temp.lights[temp.lightCount++] = (BrushSceneLight){
             .light = {.position = {x, y, z},
                       .color = {r, g, b},
                       .radius = radius},
@@ -67,7 +77,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   }
   fclose(f);
 
-  s->modTime = GetFileModTime(path);
+  temp.modTime = GetFileModTime(path);
+  *s = temp;
   TraceLog(LOG_INFO, "BRUSH scene: loaded %s (%d blocks, %d lights)", path,
            s->blockCount, s->lightCount);
   return true;
@@ -83,12 +94,12 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   fprintf(f, "version 1\n\n");
   fprintf(f, "spawn %g %g %g\n", s->spawn.x, s->spawn.y, s->spawn.z);
   if (s->timeHours >= 0.0f) fprintf(f, "time %g\n", s->timeHours);
-  fprintf(f, "\n# block  x y z  sx sy sz  r g b\n");
+  fprintf(f, "\n# block  x y z  rx ry rz  sx sy sz  r g b\n");
   for (int i = 0; i < s->blockCount; i++) {
     const BrushSceneBlock *k = &s->blocks[i];
-    fprintf(f, "block %g %g %g  %g %g %g  %d %d %d\n", k->pos.x, k->pos.y,
-            k->pos.z, k->size.x, k->size.y, k->size.z, k->color.r, k->color.g,
-            k->color.b);
+    fprintf(f, "block %g %g %g  %g %g %g  %g %g %g  %d %d %d\n", k->pos.x, k->pos.y,
+            k->pos.z, k->rot.x, k->rot.y, k->rot.z, k->size.x, k->size.y, k->size.z, 
+            k->color.r, k->color.g, k->color.b);
   }
   fprintf(f, "\n# light  x y z  r g b (linear)  radius  flicker\n");
   for (int i = 0; i < s->lightCount; i++) {
@@ -119,4 +130,21 @@ bool BrushSceneHotReload(BrushScene *s) {
   if (!BrushSceneLoad(s, path)) return false;
   TraceLog(LOG_INFO, "BRUSH scene: hot-reloaded %s", path);
   return true;
+}
+
+// Euler (degrees) -> rotation matrix, composed X then Y then Z in raylib's
+// row-vector convention. This is EXACTLY ImGuizmo's Recompose/Decompose
+// order — the editor gizmo, this render matrix, and the physics collider
+// (QuaternionFromMatrix of the same rotation in b_physics) must all agree
+// or blocks visibly jump when a gizmo drag ends.
+Matrix BrushEulerXYZ(Vector3 degrees) {
+  Matrix r = MatrixMultiply(MatrixRotateX(degrees.x * DEG2RAD),
+                            MatrixRotateY(degrees.y * DEG2RAD));
+  return MatrixMultiply(r, MatrixRotateZ(degrees.z * DEG2RAD));
+}
+
+Matrix BrushBlockGetModelMatrix(const BrushSceneBlock *k) {
+  Matrix xf = MatrixScale(k->size.x, k->size.y, k->size.z);
+  xf = MatrixMultiply(xf, BrushEulerXYZ(k->rot));
+  return MatrixMultiply(xf, MatrixTranslate(k->pos.x, k->pos.y, k->pos.z));
 }

@@ -17,6 +17,10 @@
 #ifndef B_INPUT_H
 #define B_INPUT_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 
 typedef enum {
@@ -42,5 +46,9 @@ typedef enum {
 float BrushInputAxis(BrushAxis axis);
 bool BrushInputDown(BrushButton btn);
 bool BrushInputPressed(BrushButton btn);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // B_INPUT_H

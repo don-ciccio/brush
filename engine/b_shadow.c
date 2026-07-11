@@ -77,9 +77,12 @@ void BrushShadowInit(BrushShadow *sh, int resolution) {
 }
 
 void BrushShadowUnload(BrushShadow *sh) {
-  for (int i = 0; i < BRUSH_SHADOW_CASCADES; i++)
-    if (sh->map[i].id > 0)
-      rlUnloadFramebuffer(sh->map[i].id); // depth texture goes with the FBO
+  for (int i = 0; i < BRUSH_SHADOW_CASCADES; i++) {
+    if (sh->map[i].id > 0) {
+      rlUnloadFramebuffer(sh->map[i].id);
+      if (sh->map[i].depth.id > 0) rlUnloadTexture(sh->map[i].depth.id);
+    }
+  }
   *sh = (BrushShadow){0};
 }
 
