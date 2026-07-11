@@ -7,3 +7,6 @@ compile_commands.json
 external/joltc/build/
 imgui.ini
 editor_layout.ini
+
+# Per-project import cache (docs/asset-pipeline.md)
+.brush/

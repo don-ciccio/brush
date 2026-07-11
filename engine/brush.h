@@ -29,6 +29,7 @@ extern "C" {
 #include "b_input.h"
 #include "b_physics.h"
 #include "b_post.h"
+#include "b_project.h"
 #include "b_render.h"
 #include "b_scene.h"
 #include "b_shadow.h"

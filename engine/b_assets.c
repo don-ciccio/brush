@@ -6,11 +6,73 @@
 
 #include "b_assets.h"
 
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 #define BRUSH_ASSETS_MAX_TEXTURES 128
 #define BRUSH_ASSETS_PATH_MAX 256
+
+// --- Engine-root resolution ---------------------------------------------------
+// The engine root is the directory that contains engine/shaders — found by
+// walking up from the executable (handles build/, build/Brush.app/..., and
+// any future install layout). Resolved once.
+static const char *EngineRoot(void) {
+  static char root[PATH_MAX];
+  static bool inited = false;
+  if (inited) return root;
+  inited = true;
+  root[0] = '\0';
+
+  char exe[PATH_MAX] = {0};
+#if defined(__APPLE__)
+  uint32_t sz = sizeof(exe);
+  if (_NSGetExecutablePath(exe, &sz) != 0) exe[0] = '\0';
+#elif defined(__linux__)
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+  if (n > 0) exe[n] = '\0';
+#endif
+
+  char real[PATH_MAX];
+  if (exe[0] != '\0' && realpath(exe, real) != NULL) {
+    // Start at the binary's directory, walk up looking for engine/shaders.
+    char *slash = strrchr(real, '/');
+    if (slash != NULL) *slash = '\0';
+    for (int up = 0; up < 6 && real[0] != '\0'; up++) {
+      char probe[PATH_MAX + 64];
+      snprintf(probe, sizeof(probe), "%s/engine/shaders/lit.fs", real);
+      if (access(probe, R_OK) == 0) {
+        snprintf(root, sizeof(root), "%s", real);
+        break;
+      }
+      slash = strrchr(real, '/');
+      if (slash == NULL) break;
+      *slash = '\0';
+    }
+  }
+  if (root[0] == '\0') {
+    // Fallback: cwd (running from the repo root, the pre-project behavior).
+    snprintf(root, sizeof(root), ".");
+  }
+  TraceLog(LOG_INFO, "ASSETS: engine root = %s", root);
+  return root;
+}
+
+const char *BrushEnginePath(const char *relative) {
+  static char ring[4][PATH_MAX + 64];
+  static int idx = 0;
+  char *out = ring[idx];
+  idx = (idx + 1) & 3;
+  snprintf(out, sizeof(ring[0]), "%s/%s", EngineRoot(), relative);
+  return out;
+}
 
 typedef struct TexEntry {
   char path[BRUSH_ASSETS_PATH_MAX];

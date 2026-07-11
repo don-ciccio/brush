@@ -4,6 +4,7 @@
  *   LICENSE: zlib/libpng
  ********************************************************************************************/
 
+#include "b_assets.h"
 #include "b_sky.h"
 
 #include <raymath.h>
@@ -25,7 +26,7 @@ typedef struct BrushSkyState {
 static BrushSkyState g_sky = {0};
 
 void BrushSkyInit(void) {
-  g_sky.shader = LoadShader("engine/shaders/sky.vs", "engine/shaders/sky.fs");
+  g_sky.shader = LoadShader(BrushEnginePath("engine/shaders/sky.vs"), BrushEnginePath("engine/shaders/sky.fs"));
   g_sky.locTime = GetShaderLocation(g_sky.shader, "uTime");
   g_sky.locSunDir = GetShaderLocation(g_sky.shader, "uSunDir");
   g_sky.locWindDir = GetShaderLocation(g_sky.shader, "uWindDir");

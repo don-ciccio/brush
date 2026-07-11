@@ -1,0 +1,4 @@
+# brush project definition (see engine/b_project.h)
+version 1
+name Sandbox Gym
+scene assets/gym.def

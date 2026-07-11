@@ -19,6 +19,7 @@
 #include <math.h>
 #include <raymath.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 
 // --- Character tuning (units: metres, seconds) ---
@@ -72,6 +73,13 @@ typedef struct Sandbox {
   JPH_BodyID blockBodies[BRUSH_SCENE_MAX_BLOCKS];
   int blockBodyCount;
   Model unitCube;
+
+  // Project this player is running (see b_project.h): the process cwd is
+  // the project root, scenePath/terrainPath come from project.def.
+  BrushProject project;
+  bool projectLoaded;
+  char scenePath[BRUSH_PROJECT_SCENE_MAX];
+  char terrainPath[BRUSH_PROJECT_SCENE_MAX];
 
 
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
@@ -238,8 +246,8 @@ static void SandboxInit(void *user) {
 
   BrushPhysicsInit(&s->phys);
 
-  // World definition: the gym lives in assets/gym.def (data, not code).
-  bool sceneLoaded = BrushSceneLoad(&s->scene, "assets/gym.def");
+  // World definition from the project's main scene (data, not code).
+  bool sceneLoaded = BrushSceneLoad(&s->scene, s->scenePath);
 
   // Spawn: BRUSH_SPAWN env > scene file > origin.
   float spx = s->scene.spawn.x, spz = s->scene.spawn.z;
@@ -275,7 +283,7 @@ static void SandboxInit(void *user) {
       (Vector3){spx, 0, spz});
 
   // Terrain sculpt overlay (authored in the editor, saved beside the scene).
-  BrushWorldSculptLoad(s->world, "assets/gym.terrain");
+  BrushWorldSculptLoad(s->world, s->terrainPath);
 
   // Harness: BRUSH_TEST_SCULPT raises a hill ahead of spawn — verifies the
   // sculpt compose, dirty-chunk rebake, and collider swap without the editor.
@@ -301,8 +309,15 @@ static void SandboxInit(void *user) {
   // Bootstrap: no def file yet -> build the gym in code and SAVE it. From
   // then on the file is the authority (and hot-reloads while running).
   if (!sceneLoaded) {
-    BuildGymScene(s, gy);
-    BrushSceneSave(&s->scene, "assets/gym.def");
+    if (s->projectLoaded) {
+      // A declared project with no scene yet (Empty template before the
+      // editor's first save): minimal spawn-only scene, not the gym.
+      s->scene.spawn = (Vector3){0, 0.5f, 8};
+      s->scene.timeHours = 12.0f;
+    } else {
+      BuildGymScene(s, gy);
+    }
+    BrushSceneSave(&s->scene, s->scenePath);
   }
   ApplySceneColliders(s);
   BrushSceneApplyRenderSettings(&s->scene); // scene carries its look
@@ -766,10 +781,24 @@ static void SandboxShutdown(void *user) {
   BrushAssetsShutdown();
 }
 
-int main(void) {
+int main(int argc, char **argv) {
   static Sandbox s = {0};
+
+  // Enter the project (--project <dir> / BRUSH_PROJECT env / cwd) before
+  // anything opens files: from here on the cwd IS the project root.
+  s.projectLoaded = BrushProjectBoot(&s.project, argc, argv);
+  snprintf(s.scenePath, sizeof(s.scenePath), "%s", s.project.scene);
+  // Terrain sculpt overlay lives beside the scene: <scene>.terrain.
+  snprintf(s.terrainPath, sizeof(s.terrainPath), "%s", s.scenePath);
+  char *dot = strrchr(s.terrainPath, '.');
+  if (dot != NULL && dot != s.terrainPath) *dot = '\0';
+  strncat(s.terrainPath, ".terrain",
+          sizeof(s.terrainPath) - strlen(s.terrainPath) - 1);
+
   BrushRun(
-      (BrushConfig){.width = 1600, .height = 900, .title = "brush sandbox"},
+      (BrushConfig){.width = 1600, .height = 900,
+                    .title = s.projectLoaded ? s.project.name
+                                             : "brush sandbox"},
       (BrushCallbacks){
           .init = SandboxInit,
           .fixedUpdate = SandboxFixedUpdate,

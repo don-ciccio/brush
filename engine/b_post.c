@@ -4,6 +4,7 @@
  *   LICENSE: zlib/libpng
  ********************************************************************************************/
 
+#include "b_assets.h"
 #include "b_post.h"
 
 #include <raymath.h>
@@ -162,10 +163,10 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   SetTextureWrap(pp->smaaBlendTex.texture, TEXTURE_WRAP_CLAMP);
   SetTextureWrap(pp->presentAA.texture, TEXTURE_WRAP_CLAMP);
 
-  pp->bright = LoadShader(NULL, "engine/shaders/bloom_bright.fs");
-  pp->blur = LoadShader(NULL, "engine/shaders/blur.fs");
-  pp->composite = LoadShader(NULL, "engine/shaders/composite.fs");
-  pp->sharpen = LoadShader(NULL, "engine/shaders/sharpen.fs");
+  pp->bright = LoadShader(NULL, BrushEnginePath("engine/shaders/bloom_bright.fs"));
+  pp->blur = LoadShader(NULL, BrushEnginePath("engine/shaders/blur.fs"));
+  pp->composite = LoadShader(NULL, BrushEnginePath("engine/shaders/composite.fs"));
+  pp->sharpen = LoadShader(NULL, BrushEnginePath("engine/shaders/sharpen.fs"));
 
   pp->locBrightThreshold = GetShaderLocation(pp->bright, "uThreshold");
   pp->locBlurDir = GetShaderLocation(pp->blur, "uDir");
@@ -181,8 +182,8 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locSharpAmount = GetShaderLocation(pp->sharpen, "uSharpen");
 
   // --- SSAO ---
-  pp->ssao = LoadShader(NULL, "engine/shaders/ssao.fs");
-  pp->ssaoBlur = LoadShader(NULL, "engine/shaders/ssao_blur.fs");
+  pp->ssao = LoadShader(NULL, BrushEnginePath("engine/shaders/ssao.fs"));
+  pp->ssaoBlur = LoadShader(NULL, BrushEnginePath("engine/shaders/ssao_blur.fs"));
   pp->locSsaoDepth = GetShaderLocation(pp->ssao, "uDepth");
   pp->locSsaoNoise = GetShaderLocation(pp->ssao, "uNoise");
   pp->locSsaoKernel = GetShaderLocation(pp->ssao, "uSamples");
@@ -206,7 +207,7 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locDofEnabled = GetShaderLocation(pp->composite, "uDofEnabled");
 
   // --- God rays ---
-  pp->godrays = LoadShader(NULL, "engine/shaders/godrays.fs");
+  pp->godrays = LoadShader(NULL, BrushEnginePath("engine/shaders/godrays.fs"));
   pp->locGRDepth = GetShaderLocation(pp->godrays, "uDepth");
   pp->locGRShadowMap = GetShaderLocation(pp->godrays, "uShadowMap");
   pp->locGRInvVP = GetShaderLocation(pp->godrays, "uInvViewProj");
@@ -224,7 +225,7 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locGodRaysOn = GetShaderLocation(pp->composite, "uGodRaysOn");
 
   // --- Volumetric ground fog ---
-  pp->volFog = LoadShader(NULL, "engine/shaders/volfog.fs");
+  pp->volFog = LoadShader(NULL, BrushEnginePath("engine/shaders/volfog.fs"));
   pp->locVFDepth = GetShaderLocation(pp->volFog, "uDepth");
   pp->locVFInvVP = GetShaderLocation(pp->volFog, "uInvViewProj");
   pp->locVFCamPos = GetShaderLocation(pp->volFog, "uCameraPos");
@@ -275,11 +276,11 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   SetTextureWrap(pp->noise, TEXTURE_WRAP_REPEAT);
 
   // --- SMAA 1x ---
-  pp->smaaEdges = LoadShader(NULL, "engine/shaders/smaa_edges.fs");
-  pp->smaaWeights = LoadShader(NULL, "engine/shaders/smaa_weights.fs");
-  pp->smaaBlend = LoadShader(NULL, "engine/shaders/smaa_blend.fs");
-  pp->smaaArea = LoadTexture("assets/smaa/AreaTex.png");
-  pp->smaaSearch = LoadTexture("assets/smaa/SearchTex.png");
+  pp->smaaEdges = LoadShader(NULL, BrushEnginePath("engine/shaders/smaa_edges.fs"));
+  pp->smaaWeights = LoadShader(NULL, BrushEnginePath("engine/shaders/smaa_weights.fs"));
+  pp->smaaBlend = LoadShader(NULL, BrushEnginePath("engine/shaders/smaa_blend.fs"));
+  pp->smaaArea = LoadTexture(BrushEnginePath("engine/resources/smaa/AreaTex.png"));
+  pp->smaaSearch = LoadTexture(BrushEnginePath("engine/resources/smaa/SearchTex.png"));
   SetTextureFilter(pp->smaaArea, TEXTURE_FILTER_BILINEAR);
   SetTextureFilter(pp->smaaSearch, TEXTURE_FILTER_POINT);
   SetTextureWrap(pp->smaaArea, TEXTURE_WRAP_CLAMP);

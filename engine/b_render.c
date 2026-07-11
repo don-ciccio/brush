@@ -4,6 +4,7 @@
  *   LICENSE: zlib/libpng
  ********************************************************************************************/
 
+#include "b_assets.h"
 #include "b_render.h"
 #include "b_post.h"
 #include "b_shadow.h"
@@ -73,7 +74,7 @@ typedef struct BrushRenderState {
 static BrushRenderState g_r = {0};
 
 void BrushRenderInit(int width, int height, float renderScale) {
-  g_r.lit = LoadShader("engine/shaders/lit.vs", "engine/shaders/lit.fs");
+  g_r.lit = LoadShader(BrushEnginePath("engine/shaders/lit.vs"), BrushEnginePath("engine/shaders/lit.fs"));
   g_r.lit.locs[SHADER_LOC_VECTOR_VIEW] =
       GetShaderLocation(g_r.lit, "viewPos");
   g_r.locSunDir = GetShaderLocation(g_r.lit, "uSunDir");

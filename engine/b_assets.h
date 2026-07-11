@@ -27,6 +27,17 @@ extern "C" {
 
 #include <raylib.h>
 
+// Resolve a path relative to the ENGINE installation (the tree holding
+// engine/shaders, engine/resources, build/). Found once by walking up from
+// the executable's directory; falls back to the cwd if nothing matches, so
+// running from the repo root keeps working. Engine-internal loads (shaders,
+// lookup textures) MUST use this — the process cwd belongs to the PROJECT
+// (the editor/player chdir into the open project; see docs/asset-pipeline.md).
+//
+// Returns a pointer into a small ring of static buffers: valid until three
+// more calls, so `LoadShader(BrushEnginePath(a), BrushEnginePath(b))` is fine.
+const char *BrushEnginePath(const char *relative);
+
 // Acquire the texture at `path` (+1 ref). Returns id 0 if the file is
 // missing/unreadable.
 Texture2D BrushAssetsTexture(const char *path);

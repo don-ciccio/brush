@@ -2,7 +2,7 @@
 version 2
 
 spawn -0.260871 1.33069e-06 -11.7171
-time 18.5376
+time 10.055
 
 # material  name  albedo  normal  tile spec depth
 material rock assets/textures/rock_color.png assets/textures/rock_normal.png 2.5 0.15 1
@@ -13,7 +13,7 @@ material grass assets/textures/grass_color.png assets/textures/grass_normal.png 
 # block  x y z  rx ry rz  sx sy sz  r g b  material
 block 0 1.5 -26  0 0 0  28.6 3 0.6  225 225 228  rock
 block -9.25 1.5 -2  0 0 0  10.1 3 0.6  225 225 228  rock
-block 9.25 1.5 -2  0 0 0  10.1 3 0.6  225 225 228  rock
+block 9.25 1.5 -2  0 0 0  10.1 3 0.6  225 225 228  dirt
 block -14 1.5 -14  0 0 0  0.6 3 24.6  225 225 228  rock
 block 14 1.5 -14  0 0 0  0.6 3 24.6  225 225 228  rock
 block 10.6353 1 -24.7457  0 0 0  8 2 7  210 214 222  gravel
@@ -22,11 +22,33 @@ block 4.33797 0.165 -19.5206  0 0 0  3 0.33 0.9  190 205 235  gravel
 block 4.32193 0.352117 -20.25  0 0 0  3 0.66 0.9  190 205 235  gravel
 block -8.96442 2.25 -20.2703  0 0 0  1.5 1.5 1.5  225 150 125  dirt
 block -9 0.75 -20  0 0 0  1.5 1.5 1.5  225 190 125  dirt
-block 11.4584 0.851784 -17.9457  17.5651 -0 0  3 0.3 6.6  200 208 225  gravel
-block -7.21442 2.8671 -20.5179  0 0 0  2 1.11834 2  200 200 200  -
+block 11.4584 0.851784 -17.9457  17.5651 -0 0  3 0.3 6.6  200 208 225  dirt
+block -7.21442 2.8671 -20.5179  0 0 0  2 1.11834 2  200 200 200  grass
 
 # light  x y z  r g b (linear)  radius  flicker
 light -4.6 2.4 -2.3  2.4 1.25 0.45  9 1
 light 4.6 2.4 -2.3  2.4 1.25 0.45  9 1
 light 13.3827 1.52818 -25.5  2.4 1.25 0.45  9 1
 light -13.5 2.01357 -10.9291  1.8 1.2 0.6  6 0
+
+# post  key value (render tunables)
+post exposure 0.85
+post bloom_threshold 1.5
+post bloom_intensity 0.32
+post sharpen 1
+post sharpen_amount 0.1
+post ssao 1
+post ssao_radius 0.5
+post ssao_strength 0.5
+post dof 1
+post dof_range 120
+post dof_strength 0.25
+post godrays 1
+post godrays_density 0.04
+post godrays_exposure 0.7
+post volfog 0
+post volfog_density 0.12
+post volfog_ground 0
+post volfog_top 3
+post volfog_coverage 0.44
+post shadow_softness 4

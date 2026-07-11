@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -263,9 +264,14 @@ static void SaveScene() {
 static void PlayGame() {
     SaveScene(); // the game loads (and hot-reloads) the same file
     if (GameRunning()) { AddEditorLog("Game already running."); return; }
+    // Player binary lives in the ENGINE tree; the child inherits our cwd,
+    // which is the open project's root — so it runs THIS project.
+    static char playerPath[600];
+    snprintf(playerPath, sizeof(playerPath), "%s",
+             BrushEnginePath("build/sandbox"));
     g_gamePid = fork();
     if (g_gamePid == 0) {
-        char *args[] = { (char *)"./build/sandbox", NULL };
+        char *args[] = { playerPath, NULL };
         execvp(args[0], args);
         perror("execvp failed");
         _exit(1);
@@ -556,20 +562,190 @@ static bool ToolButton(const char *label, bool active) {
 }
 
 // ---------------------------------------------------------------------------
-int main() {
-    BrushConsoleInit();
-    SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI);
-    InitWindow(1600, 900, "brush editor");
-#if defined(__APPLE__)
-    EditorMacSeamlessTitlebar(GetWindowHandle());
-    EditorMacInstallMenu(); // File/Edit/View live in the macOS top bar
-#endif
-    SetWindowState(FLAG_WINDOW_MAXIMIZED); // fill whatever screen this is
-    SetTargetFPS(60);
-    SetExitKey(KEY_NULL); // ESC deselects, never quits
+// --- Project management --------------------------------------------------------
+// The editor is a two-state app (Godot-style): PROJECT MANAGER -> EDITOR.
+// A project is a folder with project.def (see b_project.h); opening one
+// chdir()s into it so every project-relative path in the codebase keeps
+// working. Engine files resolve via BrushEnginePath. Known projects persist
+// in ~/.brush/projects, most recent first.
 
-    BrushRenderInit(GetScreenWidth(), GetScreenHeight(), 1.0f);
-    BrushRenderSetEditorMode(true);
+static BrushProject g_project;
+static bool g_projectOpen = false;
+
+#define MAX_RECENT_PROJECTS 16
+static char g_recent[MAX_RECENT_PROJECTS][512];
+static int g_recentCount = 0;
+
+static const char *BrushUserDir() {
+    static char dir[512] = "";
+    if (dir[0] == '\0') {
+        const char *home = getenv("HOME");
+        snprintf(dir, sizeof(dir), "%s/.brush", home ? home : ".");
+        mkdir(dir, 0755); // idempotent
+    }
+    return dir;
+}
+
+static void LoadRecents() {
+    char path[560];
+    snprintf(path, sizeof(path), "%s/projects", BrushUserDir());
+    g_recentCount = 0;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        // First run: the engine repo is itself a project (the sandbox gym) —
+        // seed the list so the manager never starts empty.
+        char probe[600];
+        snprintf(probe, sizeof(probe), "%s", BrushEnginePath("project.def"));
+        if (FileExists(probe)) {
+            snprintf(probe, sizeof(probe), "%s", BrushEnginePath(""));
+            char *end = probe + strlen(probe);
+            while (end > probe && (end[-1] == '/' || end[-1] == '.')) *--end = '\0';
+            if (probe[0])
+                snprintf(g_recent[g_recentCount++], sizeof(g_recent[0]), "%s",
+                         probe);
+        }
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f) && g_recentCount < MAX_RECENT_PROJECTS) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        if (line[0] != '\0')
+            snprintf(g_recent[g_recentCount++], sizeof(g_recent[0]), "%s", line);
+    }
+    fclose(f);
+}
+
+static void SaveRecents() {
+    char path[560];
+    snprintf(path, sizeof(path), "%s/projects", BrushUserDir());
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    for (int i = 0; i < g_recentCount; i++) fprintf(f, "%s\n", g_recent[i]);
+    fclose(f);
+}
+
+static void AddRecent(const char *dir) {
+    char abs[512];
+    if (realpath(dir, abs) == NULL) snprintf(abs, sizeof(abs), "%s", dir);
+    for (int i = 0; i < g_recentCount; i++) {
+        if (strcmp(g_recent[i], abs) != 0) continue;
+        for (int j = i; j > 0; j--) strcpy(g_recent[j], g_recent[j - 1]);
+        strcpy(g_recent[0], abs);
+        SaveRecents();
+        return;
+    }
+    if (g_recentCount < MAX_RECENT_PROJECTS) g_recentCount++;
+    for (int j = g_recentCount - 1; j > 0; j--)
+        strcpy(g_recent[j], g_recent[j - 1]);
+    snprintf(g_recent[0], sizeof(g_recent[0]), "%s", abs);
+    SaveRecents();
+}
+
+// mkdir -p
+static void MakeDirs(const char *path) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        mkdir(buf, 0755);
+        *p = '/';
+    }
+    mkdir(buf, 0755);
+}
+
+static bool CopyFileRaw(const char *src, const char *dst) {
+    int size = 0;
+    unsigned char *data = LoadFileData(src, &size);
+    if (data == NULL) return false;
+    bool ok = SaveFileData(dst, data, size);
+    UnloadFileData(data);
+    return ok;
+}
+
+// Copy every file under srcDir (recursive) into dstDir, preserving layout.
+static void CopyTree(const char *srcDir, const char *dstDir) {
+    char src[512];
+    snprintf(src, sizeof(src), "%s", srcDir); // srcDir may be in the
+                                              // BrushEnginePath ring buffer
+    FilePathList fl = LoadDirectoryFilesEx(src, NULL, true);
+    for (unsigned int i = 0; i < fl.count; i++) {
+        const char *rel = fl.paths[i] + strlen(src);
+        while (*rel == '/') rel++;
+        char dst[1024];
+        snprintf(dst, sizeof(dst), "%s/%s", dstDir, rel);
+        char parent[1024];
+        snprintf(parent, sizeof(parent), "%s", dst);
+        char *slash = strrchr(parent, '/');
+        if (slash) { *slash = '\0'; MakeDirs(parent); }
+        CopyFileRaw(fl.paths[i], dst);
+    }
+    UnloadDirectoryFiles(fl);
+}
+
+enum { TEMPLATE_GYM = 0, TEMPLATE_EMPTY };
+
+// Create <parent>/<name> from a template. v0 templates source the engine
+// repo's own assets (the gym IS the template). Returns the project dir.
+static bool CreateProject(const char *parent, const char *name, int tmpl,
+                          char *outDir, int outCap) {
+    snprintf(outDir, (size_t)outCap, "%s/%s", parent, name);
+    char probe[600];
+    snprintf(probe, sizeof(probe), "%s/project.def", outDir);
+    if (FileExists(probe)) {
+        AddEditorLog("ERROR: %s already exists", probe);
+        return false;
+    }
+    MakeDirs(outDir);
+    char assets[600];
+    snprintf(assets, sizeof(assets), "%s/assets", outDir);
+    MakeDirs(assets);
+
+    BrushProject p = {0};
+    snprintf(p.name, sizeof(p.name), "%s", name);
+    snprintf(p.scene, sizeof(p.scene),
+             tmpl == TEMPLATE_GYM ? "assets/gym.def" : "assets/main.def");
+    if (!BrushProjectSave(&p, outDir)) return false;
+
+    // Both templates need the character (the player binary loads it).
+    char dst[600];
+    snprintf(dst, sizeof(dst), "%s/assets/character", outDir);
+    CopyTree(BrushEnginePath("assets/character"), dst);
+    if (tmpl == TEMPLATE_GYM) {
+        snprintf(dst, sizeof(dst), "%s/assets/textures", outDir);
+        CopyTree(BrushEnginePath("assets/textures"), dst);
+        snprintf(dst, sizeof(dst), "%s/assets/gym.def", outDir);
+        CopyFileRaw(BrushEnginePath("assets/gym.def"), dst);
+        snprintf(dst, sizeof(dst), "%s/assets/gym.terrain", outDir);
+        CopyFileRaw(BrushEnginePath("assets/gym.terrain"), dst);
+    }
+    AddEditorLog("Created project %s", outDir);
+    return true;
+}
+
+// Enter a project and bring up everything that depends on it. The
+// project-independent systems (window, renderer, ImGui) are already up.
+static bool OpenProjectAt(const char *dir) {
+    if (chdir(dir) != 0) {
+        AddEditorLog("ERROR: cannot enter %s", dir);
+        return false;
+    }
+    if (!BrushProjectLoad(&g_project, ".")) {
+        // Opening a bare folder (CLI): adopt it with defaults so the next
+        // save makes it a real project.
+        const char *base = GetFileName(GetWorkingDirectory());
+        if (base && base[0]) snprintf(g_project.name, sizeof(g_project.name), "%s", base);
+        BrushProjectSave(&g_project, ".");
+        AddEditorLog("Created project.def in %s", dir);
+    }
+    snprintf(g_scenePath, sizeof(g_scenePath), "%s", g_project.scene);
+    snprintf(g_terrainPath, sizeof(g_terrainPath), "%s", g_scenePath);
+    char *dot = strrchr(g_terrainPath, '.');
+    if (dot != NULL && dot != g_terrainPath) *dot = '\0';
+    strncat(g_terrainPath, ".terrain",
+            sizeof(g_terrainPath) - strlen(g_terrainPath) - 1);
+
     BrushPhysicsInit(&g_phys);
 
     if (!BrushSceneLoad(&g_scene, g_scenePath)) {
@@ -586,13 +762,6 @@ int main() {
 
     BrushTodInit(&g_tod);
     g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
-
-    Image checker = GenImageChecked(1024, 1024, 32, 32, RAYWHITE, (Color){196, 199, 206, 255});
-    g_groundTex = LoadTextureFromImage(checker);
-    UnloadImage(checker);
-    GenTextureMipmaps(&g_groundTex);
-    SetTextureFilter(g_groundTex, TEXTURE_FILTER_TRILINEAR);
-    SetTextureWrap(g_groundTex, TEXTURE_WRAP_REPEAT);
 
     g_world = BrushWorldCreate(
         (BrushWorldConfig){ .seed = 1337, .heightFn = NULL, .chunkSize = 64.0f,
@@ -611,26 +780,179 @@ int main() {
         BrushWorldSculptSave(g_world, g_terrainPath);
     }
 
-    g_unitCube = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
-    g_unitCube.materials[0].shader = BrushGetLitShader();
-
     g_spawnMarker = LoadModel("assets/character/mannequin.glb");
     for (int i = 0; i < g_spawnMarker.materialCount; i++)
         g_spawnMarker.materials[i].shader = BrushGetLitShader();
 
     RebuildAllColliders();
     g_camera.Init();
+    RescanTextureDir(); // material path pickers browse assets/textures
+
+    SetWindowTitle(g_project.name);
+    AddRecent(dir);
+    g_projectOpen = true;
+    return true;
+}
+
+int main(int argc, char **argv) {
+    BrushConsoleInit();
+    SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI);
+    InitWindow(1600, 900, "Brush");
+#if defined(__APPLE__)
+    EditorMacSeamlessTitlebar(GetWindowHandle());
+    EditorMacInstallMenu(); // File/Edit/View live in the macOS top bar
+#endif
+    SetWindowState(FLAG_WINDOW_MAXIMIZED); // fill whatever screen this is
+    SetTargetFPS(60);
+    SetExitKey(KEY_NULL); // ESC deselects, never quits
+
+    BrushRenderInit(GetScreenWidth(), GetScreenHeight(), 1.0f);
+    BrushRenderSetEditorMode(true);
+
+    // Project-independent GPU objects.
+    Image checker = GenImageChecked(1024, 1024, 32, 32, RAYWHITE, (Color){196, 199, 206, 255});
+    g_groundTex = LoadTextureFromImage(checker);
+    UnloadImage(checker);
+    GenTextureMipmaps(&g_groundTex);
+    SetTextureFilter(g_groundTex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(g_groundTex, TEXTURE_WRAP_REPEAT);
+
+    g_unitCube = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
+    g_unitCube.materials[0].shader = BrushGetLitShader();
 
     rlImGuiBeginInitImGui();
     ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    // Own layout file (imgui.ini may hold layouts from older window names).
-    ImGui::GetIO().IniFilename = "editor_layout.ini";
+    // Editor-global layout, outside any project tree. Static: ImGui keeps
+    // the POINTER, not a copy.
+    static char iniPath[560];
+    snprintf(iniPath, sizeof(iniPath), "%s/editor_layout.ini", BrushUserDir());
+    ImGui::GetIO().IniFilename = iniPath;
     ApplyEditorStyle(); // loads the UI font — must run before EndInitImGui
     rlImGuiEndInitImGui(); // bakes the font atlas
 
-    RescanTextureDir(); // material path pickers browse assets/textures
+    LoadRecents();
 
+    // CLI/env project selection skips the manager (also how the headless
+    // harnesses run: BRUSH_PROJECT=. from the repo root).
+    const char *bootDir = getenv("BRUSH_PROJECT");
+    for (int i = 1; i + 1 < argc; i++)
+        if (strcmp(argv[i], "--project") == 0) bootDir = argv[i + 1];
+    if (bootDir != NULL && bootDir[0] != '\0') OpenProjectAt(bootDir);
+
+    // Harness: BRUSH_TEST_CREATE=<parent>/<name> exercises template
+    // creation + open headlessly (BRUSH_TEST_TEMPLATE=empty for the empty
+    // template; default gym).
+    const char *tc = getenv("BRUSH_TEST_CREATE");
+    if (tc != NULL && !g_projectOpen) {
+        char parent[512];
+        snprintf(parent, sizeof(parent), "%s", tc);
+        char *slash = strrchr(parent, '/');
+        if (slash != NULL && slash[1] != '\0') {
+            *slash = '\0';
+            const char *te = getenv("BRUSH_TEST_TEMPLATE");
+            int tmpl = (te && strcmp(te, "empty") == 0) ? TEMPLATE_EMPTY
+                                                        : TEMPLATE_GYM;
+            char dir[600];
+            if (CreateProject(parent, slash + 1, tmpl, dir, sizeof(dir)))
+                OpenProjectAt(dir);
+        }
+    }
+
+    // === Project Manager =================================================
+    static char newName[64] = "My Game";
+    static char newParent[512] = "";
+    if (newParent[0] == '\0') {
+        const char *home = getenv("HOME");
+        snprintf(newParent, sizeof(newParent), "%s/Projects", home ? home : ".");
+    }
+    static int newTemplate = TEMPLATE_GYM;
+    int selRecent = -1;
+
+    while (!g_projectOpen && !WindowShouldClose()) {
+        BeginDrawing();
+        ClearBackground((Color){ 22, 23, 27, 255 });
+        rlImGuiBegin();
+
+        ImGuiViewport *vp = ImGui::GetMainViewport();
+        float w = fminf(720.0f, vp->WorkSize.x - 80.0f);
+        float h = fminf(640.0f, vp->WorkSize.y - 80.0f);
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + (vp->WorkSize.x - w) * 0.5f,
+                                       vp->WorkPos.y + (vp->WorkSize.y - h) * 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(w, h));
+        ImGui::Begin("##projectmanager", NULL,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove);
+
+        ImGui::SetWindowFontScale(1.6f);
+        ImGui::TextUnformatted("Brush");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::TextDisabled("Select a project or create a new one.");
+        ImGui::Spacing();
+
+        ImGui::SeparatorText("Projects");
+        ImGui::BeginChild("##recents", ImVec2(0, h * 0.42f));
+        for (int i = 0; i < g_recentCount; i++) {
+            char pd[560];
+            snprintf(pd, sizeof(pd), "%s/project.def", g_recent[i]);
+            bool exists = FileExists(pd);
+            BrushProject rp;
+            if (exists) BrushProjectLoad(&rp, g_recent[i]);
+            char label[640];
+            snprintf(label, sizeof(label), "%s##rec%d",
+                     exists ? rp.name : "(missing)", i);
+            if (ImGui::Selectable(label, selRecent == i,
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
+                selRecent = i;
+                if (exists && ImGui::IsMouseDoubleClicked(0))
+                    OpenProjectAt(g_recent[i]);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", g_recent[i]);
+        }
+        if (g_recentCount == 0)
+            ImGui::TextDisabled("No projects yet — create one below.");
+        ImGui::EndChild();
+        if (ImGui::Button("Open") && selRecent >= 0)
+            OpenProjectAt(g_recent[selRecent]);
+        ImGui::SameLine();
+        if (ImGui::Button("Remove from list") && selRecent >= 0) {
+            for (int j = selRecent; j < g_recentCount - 1; j++)
+                strcpy(g_recent[j], g_recent[j + 1]);
+            g_recentCount--;
+            selRecent = -1;
+            SaveRecents();
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("New Project");
+        ImGui::InputText("Name", newName, sizeof(newName));
+        ImGui::InputText("Location", newParent, sizeof(newParent));
+        ImGui::Combo("Template", &newTemplate, "Sandbox Gym\0Empty\0");
+        if (ImGui::Button("Create & Open", ImVec2(-1, 0)) && newName[0]) {
+            char dir[600];
+            if (CreateProject(newParent, newName, newTemplate, dir,
+                              sizeof(dir)))
+                OpenProjectAt(dir);
+        }
+
+        ImGui::End();
+        rlImGuiEnd();
+        EndDrawing();
+
+        // Screenshot harness for the manager screen itself.
+        static int pmFrames = 0;
+        pmFrames++;
+        if (getenv("BRUSH_AUTO_SCREENSHOT") != NULL && pmFrames == 30) {
+            TakeScreenshot("screenshot.png");
+            break;
+        }
+    }
+
+    if (!g_projectOpen) { // closed from the manager
+        rlImGuiShutdown();
+        CloseWindow();
+        return 0;
+    }
 
     bool viewportHovered = false;
 
