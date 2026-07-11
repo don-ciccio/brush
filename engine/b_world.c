@@ -132,6 +132,30 @@ static float SampleHeightmap(const BrushWorld *w, const WorldChunk *c, float wx,
   return Lerp(Lerp(h00, h10, fx), Lerp(h01, h11, fx), fz);
 }
 
+// Apron-aware bilinear heightmap sample for the MESH BAKE: grid coordinates
+// may reach one texel outside the chunk (-1 .. hmRes), which is exactly what
+// the apron stores — edge normals difference into the neighbour chunk's
+// surface without calling heightFn again. (SampleHeightmap above is the
+// gameplay-query variant, clamped to the chunk interior.)
+static float SampleHeightApron(const BrushWorld *w, const WorldChunk *c,
+                               float wx, float wz) {
+  Vector3 o = ChunkOrigin(w, c->coord);
+  float step = w->cfg.chunkSize / (float)(w->cfg.hmRes - 1);
+  float gx = Clamp((wx - o.x) / step, -1.0f, (float)w->cfg.hmRes);
+  float gz = Clamp((wz - o.z) / step, -1.0f, (float)w->cfg.hmRes);
+  int x0 = (int)floorf(gx), z0 = (int)floorf(gz);
+  int x1 = (x0 + 1 <= w->cfg.hmRes) ? x0 + 1 : x0;
+  int z1 = (z0 + 1 <= w->cfg.hmRes) ? z0 + 1 : z0;
+  float fx = gx - (float)x0, fz = gz - (float)z0;
+  int tr = w->hmTexRes;
+  const float *hm = c->heightmap;
+  float h00 = hm[(z0 + 1) * tr + (x0 + 1)]; // +1: apron offset
+  float h10 = hm[(z0 + 1) * tr + (x1 + 1)];
+  float h01 = hm[(z1 + 1) * tr + (x0 + 1)];
+  float h11 = hm[(z1 + 1) * tr + (x1 + 1)];
+  return Lerp(Lerp(h00, h10, fx), Lerp(h01, h11, fx), fz);
+}
+
 // Vertex colour by slope: green lowland fading to grey rock on steep faces.
 // Zero-asset default shading (the lit shader multiplies albedo by this).
 static void SlopeColor(float ny, unsigned char *out) {
@@ -152,7 +176,12 @@ static void SlopeColor(float ny, unsigned char *out) {
 static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
   const int R = w->cfg.meshRes;
   const float cell = w->cfg.chunkSize / (float)(R - 1);
-  const float e = 1.0f; // normal epsilon (m)
+  // Normal epsilon = one heightmap texel: heights and their differences come
+  // from the chunk's own apron'd heightmap (built just before this) instead
+  // of re-calling heightFn 5x per vertex — with an expensive noise function
+  // that was most of the chunk build cost. The apron supplies the samples
+  // one texel OUTSIDE the chunk that edge normals need.
+  const float e = w->cfg.chunkSize / (float)(w->cfg.hmRes - 1);
   const float texScale = 1.0f / w->cfg.texMetresPerTile;
   Vector3 o = ChunkOrigin(w, chunk->coord);
 
@@ -185,9 +214,11 @@ static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
     for (int i = 0; i < R; i++) {
       float lx = (float)i * cell, lz = (float)j * cell;
       float wx = o.x + lx, wz = o.z + lz;
-      float h = Height(w, wx, wz);
-      float hL = Height(w, wx - e, wz), hR = Height(w, wx + e, wz);
-      float hD = Height(w, wx, wz - e), hU = Height(w, wx, wz + e);
+      float h = SampleHeightApron(w, chunk, wx, wz);
+      float hL = SampleHeightApron(w, chunk, wx - e, wz);
+      float hR = SampleHeightApron(w, chunk, wx + e, wz);
+      float hD = SampleHeightApron(w, chunk, wx, wz - e);
+      float hU = SampleHeightApron(w, chunk, wx, wz + e);
       Vector3 n = Vector3Normalize((Vector3){hL - hR, 2.0f * e, hD - hU});
       int v = j * R + i;
       chunk->mesh.vertices[v * 3 + 0] = lx;
@@ -443,6 +474,7 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
     TraceLog(LOG_WARNING, "BRUSH world: worker failed; building inline");
 
   // Queue the initial ring and block until it's all resident (no pop-in).
+  double t0 = GetTime();
   BrushWorldUpdate(w, spawn);
   for (;;) {
     int pending = 0;
@@ -454,8 +486,10 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
     if (pending == 0) break;
   }
   TraceLog(LOG_INFO,
-           "BRUSH world: ready at chunk (%d,%d), %d chunks, %.0fm each",
-           w->center.x, w->center.z, w->chunkCount, w->cfg.chunkSize);
+           "BRUSH world: ready at chunk (%d,%d), %d chunks, %.0fm each "
+           "(initial ring built in %.0f ms)",
+           w->center.x, w->center.z, w->chunkCount, w->cfg.chunkSize,
+           (GetTime() - t0) * 1000.0);
   return w;
 }
 
