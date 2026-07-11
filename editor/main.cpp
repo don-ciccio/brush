@@ -697,7 +697,67 @@ int main() {
         rlImGuiBegin();
         ImGuizmo::BeginFrame();
 
-        ImGuiID dockspaceId = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+        // --- Top strip: a slim bar the macOS traffic lights float over.
+        // Hosts Play/Stop + save state and doubles as the window drag area;
+        // the dockspace starts below it so no tab ever hides under the
+        // window buttons.
+        const float TOPBAR_H = 38.0f;
+        ImGuiViewport *mainVp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(mainVp->Pos);
+        ImGui::SetNextWindowSize(ImVec2(mainVp->Size.x, TOPBAR_H));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.086f, 0.090f, 0.106f, 1.0f));
+        ImGui::Begin("##topbar", NULL,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                         ImGuiWindowFlags_NoDocking |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus);
+        {
+#if defined(__APPLE__)
+            ImGui::SetCursorPosX(84.0f); // clear the traffic lights
+#endif
+            ImGui::SetCursorPosY((TOPBAR_H - ImGui::GetFrameHeight()) * 0.5f);
+            bool running = GameRunning();
+            if (running) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 1.0f));
+                if (ImGui::Button("  Stop  ")) StopGame();
+                ImGui::PopStyleColor();
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
+                if (ImGui::Button("  Play  ")) PlayGame();
+                ImGui::PopStyleColor();
+            }
+            ImGui::SameLine();
+            if (g_dirty)
+                ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1), "* unsaved");
+            else
+                ImGui::TextDisabled("saved");
+
+            // Right side: scene path + fps.
+            char status[128];
+            snprintf(status, sizeof(status), "%s   %d fps", g_scenePath, GetFPS());
+            float sw = ImGui::CalcTextSize(status).x;
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - sw - 8);
+            ImGui::TextDisabled("%s", status);
+        }
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+
+        // Dockspace fills everything below the top strip.
+        ImGui::SetNextWindowPos(ImVec2(mainVp->Pos.x, mainVp->Pos.y + TOPBAR_H));
+        ImGui::SetNextWindowSize(ImVec2(mainVp->Size.x, mainVp->Size.y - TOPBAR_H));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::Begin("##dockhost", NULL,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus |
+                         ImGuiWindowFlags_NoBackground);
+        ImGuiID dockspaceId = ImGui::GetID("BrushDockspace");
+        ImGui::DockSpace(dockspaceId);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
 
         // Default layout only when none exists yet — imgui.ini keeps the
         // user's arrangement across sessions.
@@ -705,7 +765,8 @@ int main() {
         if (rootNode == NULL || rootNode->IsLeafNode()) {
             ImGui::DockBuilderRemoveNode(dockspaceId);
             ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_None);
-            ImGui::DockBuilderSetNodeSize(dockspaceId, ImGui::GetMainViewport()->Size);
+            ImGui::DockBuilderSetNodeSize(
+                dockspaceId, ImVec2(mainVp->Size.x, mainVp->Size.y - TOPBAR_H));
             ImGuiID dockLeft, dockCenter, dockRight, dockView, dockBottom, dockViewFinal;
             ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.16f, &dockLeft, &dockCenter);
             ImGui::DockBuilderSplitNode(dockCenter, ImGuiDir_Right, 0.24f, &dockRight, &dockView);
@@ -740,7 +801,7 @@ int main() {
 
         // Drag the window from the (otherwise empty) top strip, like a
         // titlebar — the dock tab row sits under the traffic lights.
-        if (GetMousePosition().y < 30.0f &&
+        if (GetMousePosition().y < 38.0f &&
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
             !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive())
             EditorMacDragWindow(GetWindowHandle());
@@ -1161,33 +1222,6 @@ int main() {
                 ImGui::SliderFloat("Strength", &g_brushStrength, 0.1f, 4.0f, "%.1f");
             }
             ImGui::EndGroup();
-
-            // Play/Stop + save state, top-right of the viewport.
-            {
-                float clusterW = ImGui::CalcTextSize("  Stop  ").x +
-                                 ImGui::CalcTextSize("* unsaved").x +
-                                 ImGui::GetStyle().ItemSpacing.x * 2 +
-                                 ImGui::GetStyle().FramePadding.x * 4;
-                ImGui::SetCursorScreenPos(
-                    ImVec2(imgPos.x + imgSize.x - clusterW - 10, imgPos.y + 10));
-                ImGui::BeginGroup();
-                bool running = GameRunning();
-                if (running) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 1.0f));
-                    if (ImGui::Button("  Stop  ")) StopGame();
-                    ImGui::PopStyleColor();
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
-                    if (ImGui::Button("  Play  ")) PlayGame();
-                    ImGui::PopStyleColor();
-                }
-                ImGui::SameLine();
-                if (g_dirty)
-                    ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1), "* unsaved");
-                else
-                    ImGui::TextDisabled("saved");
-                ImGui::EndGroup();
-            }
 
             // --- Nav hint bar (bottom of the image) ----------------------------
             const char *hints =

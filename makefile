@@ -92,9 +92,20 @@ deps:
 run: $(SANDBOX)
 	./$(SANDBOX)
 
-# Run the editor
+# Run the editor. On macOS it runs from a minimal .app bundle: that is the
+# ONLY reliable way to name the app menu (recent macOS locks the menu-bar
+# app name to the bundle/process name — runtime renames don't stick).
+ifeq ($(UNAME_S),Darwin)
+EDITOR_APP = $(BUILD_DIR)/Brush.app
+run-editor: $(EDITOR)
+	@mkdir -p $(EDITOR_APP)/Contents/MacOS
+	@cp editor/Info.plist $(EDITOR_APP)/Contents/Info.plist
+	@cp $(EDITOR) $(EDITOR_APP)/Contents/MacOS/Brush
+	./$(EDITOR_APP)/Contents/MacOS/Brush
+else
 run-editor: $(EDITOR)
 	./$(EDITOR)
+endif
 
 # Automated visual check: renders 180 frames, saves screenshot.png, exits.
 verify: $(SANDBOX)
