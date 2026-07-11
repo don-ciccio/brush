@@ -247,6 +247,7 @@ static bool GameRunning() {
 
 static void SaveScene() {
     g_scene.timeHours = g_tod.timeHours;
+    BrushSceneCaptureRenderSettings(&g_scene); // scene carries its look
     if (BrushSceneSave(&g_scene, g_scenePath)) {
         g_dirty = false;
         AddEditorLog("Saved %s", g_scenePath);
@@ -281,6 +282,52 @@ static void StopGame() {
     g_gamePid = -1;
 }
 
+// --- Texture browser (material path pickers) ----------------------------------
+#define MAX_TEX_FILES 128
+static char g_texFiles[MAX_TEX_FILES][128];
+static int g_texFileCount = 0;
+
+static void RescanTextureDir() {
+    g_texFileCount = 0;
+    FilePathList fl = LoadDirectoryFiles("assets/textures");
+    for (unsigned int i = 0; i < fl.count && g_texFileCount < MAX_TEX_FILES; i++) {
+        if (!IsFileExtension(fl.paths[i], ".png") &&
+            !IsFileExtension(fl.paths[i], ".jpg")) continue;
+        snprintf(g_texFiles[g_texFileCount++], sizeof(g_texFiles[0]), "%s",
+                 fl.paths[i]);
+    }
+    UnloadDirectoryFiles(fl);
+    // Alphabetical, so *_color / *_normal pairs sit together.
+    qsort(g_texFiles, (size_t)g_texFileCount, sizeof(g_texFiles[0]),
+          [](const void *a, const void *b) {
+              return strcmp((const char *)a, (const char *)b);
+          });
+}
+
+// Combo over assets/textures. Writes the project-relative path into `path`;
+// returns true when it changed (caller re-resolves the scene materials).
+static bool TexPathCombo(const char *label, char *path, int cap) {
+    bool changed = false;
+    char preview[128];
+    snprintf(preview, sizeof(preview), "%s",
+             path[0] ? GetFileName(path) : "(none)");
+    if (ImGui::BeginCombo(label, preview)) {
+        if (ImGui::Selectable("(none)", path[0] == '\0') && path[0] != '\0') {
+            path[0] = '\0';
+            changed = true;
+        }
+        for (int i = 0; i < g_texFileCount; i++) {
+            bool sel = (strcmp(path, g_texFiles[i]) == 0);
+            if (ImGui::Selectable(GetFileName(g_texFiles[i]), sel) && !sel) {
+                snprintf(path, (size_t)cap, "%s", g_texFiles[i]);
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
 // --- Scene ops ---------------------------------------------------------------
 static void RebuildAllColliders() {
     for (int i = 0; i < g_blockBodyCount; i++)
@@ -299,6 +346,7 @@ static void ReloadScene() {
         g_dirty = false;
         g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
         RebuildAllColliders();
+        BrushSceneApplyRenderSettings(&g_scene);
         g_selectedType = ENTITY_NONE;
         g_selectedIdx = -1;
         AddEditorLog("Reloaded %s", g_scenePath);
@@ -530,9 +578,11 @@ int main() {
         BrushSceneSave(&g_scene, g_scenePath);
         AddEditorLog("Created new scene %s", g_scenePath);
     } else {
-        AddEditorLog("Loaded %s (%d blocks, %d lights)", g_scenePath,
-                     g_scene.blockCount, g_scene.lightCount);
+        AddEditorLog("Loaded %s (%d blocks, %d lights, %d materials)",
+                     g_scenePath, g_scene.blockCount, g_scene.lightCount,
+                     g_scene.materialCount);
     }
+    BrushSceneApplyRenderSettings(&g_scene);
 
     BrushTodInit(&g_tod);
     g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
@@ -579,6 +629,8 @@ int main() {
     ApplyEditorStyle(); // loads the UI font — must run before EndInitImGui
     rlImGuiEndInitImGui(); // bakes the font atlas
 
+    RescanTextureDir(); // material path pickers browse assets/textures
+
 
     bool viewportHovered = false;
 
@@ -608,7 +660,10 @@ int main() {
         for (int i = 0; i < g_scene.blockCount; i++) {
             BrushSceneBlock *k = &g_scene.blocks[i];
             Matrix xf = BrushBlockGetModelMatrix(k); // includes rotation
-            BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &g_unitCube, xf, k->color);
+            BrushMaterialProps props;
+            bool hasMat = BrushSceneBlockProps(&g_scene, k, &props);
+            BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &g_unitCube, xf, k->color,
+                                hasMat ? &props : NULL);
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &g_unitCube, xf, k->color);
         }
 
@@ -774,6 +829,7 @@ int main() {
             ImGui::DockBuilderDockWindow("Hierarchy", dockLeft);
             ImGui::DockBuilderDockWindow("Viewport", dockViewFinal);
             ImGui::DockBuilderDockWindow("Inspector", dockRight);
+            ImGui::DockBuilderDockWindow("Materials", dockRight);
             ImGui::DockBuilderDockWindow("Environment", dockRight);
             ImGui::DockBuilderDockWindow("Console", dockBottom);
             ImGui::DockBuilderFinish(dockspaceId);
@@ -929,6 +985,25 @@ int main() {
             if (ImGui::ColorEdit3("Color", col)) {
                 b->color = Float3ToColor(col); g_dirty = true;
             }
+            // Material assignment (materials themselves live in the
+            // Materials panel; the color above tints the texture).
+            const char *matPreview = b->material[0] ? b->material : "(none)";
+            if (ImGui::BeginCombo("Material", matPreview)) {
+                if (ImGui::Selectable("(none)", b->material[0] == '\0') &&
+                    b->material[0] != '\0') {
+                    b->material[0] = '\0';
+                    g_dirty = true;
+                }
+                for (int i = 0; i < g_scene.materialCount; i++) {
+                    const char *mn = g_scene.materials[i].name;
+                    bool sel = (strcmp(b->material, mn) == 0);
+                    if (ImGui::Selectable(mn, sel) && !sel) {
+                        snprintf(b->material, sizeof(b->material), "%s", mn);
+                        g_dirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
         } else if (g_selectedType == ENTITY_LIGHT && g_selectedIdx >= 0 &&
                    g_selectedIdx < g_scene.lightCount) {
             BrushSceneLight *l = &g_scene.lights[g_selectedIdx];
@@ -945,6 +1020,98 @@ int main() {
                 g_dirty = true;
             if (ImGui::Checkbox("Flicker", &l->flicker)) g_dirty = true;
         }
+        ImGuiID inspectorDockId = ImGui::GetWindowDockID();
+        ImGui::End();
+
+        // === Materials =======================================================
+        // Scene-owned material library: triplanar texture sets blocks
+        // reference by name (assigned in the Inspector).
+        if (inspectorDockId != 0)
+            ImGui::SetNextWindowDockID(inspectorDockId, ImGuiCond_FirstUseEver);
+        ImGui::Begin("Materials");
+        {
+            static int selMat = -1;
+            static char nameBuf[BRUSH_SCENE_NAME_MAX] = "";
+            if (selMat >= g_scene.materialCount) selMat = -1;
+
+            for (int i = 0; i < g_scene.materialCount; i++) {
+                if (ImGui::Selectable(
+                        TextFormat("%s##mat%d", g_scene.materials[i].name, i),
+                        selMat == i)) {
+                    selMat = i;
+                    snprintf(nameBuf, sizeof(nameBuf), "%s",
+                             g_scene.materials[i].name);
+                }
+            }
+            float bw = (ImGui::GetContentRegionAvail().x -
+                        ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            if (ImGui::Button("+ Material", ImVec2(bw, 0)) &&
+                g_scene.materialCount < BRUSH_SCENE_MAX_MATERIALS) {
+                BrushSceneMaterial *m =
+                    &g_scene.materials[g_scene.materialCount];
+                memset(m, 0, sizeof(*m));
+                snprintf(m->name, sizeof(m->name), "mat_%d",
+                         g_scene.materialCount);
+                m->tile = 2.0f;
+                m->spec = 0.25f;
+                m->normalDepth = 1.0f;
+                selMat = g_scene.materialCount++;
+                snprintf(nameBuf, sizeof(nameBuf), "%s", m->name);
+                g_dirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Delete", ImVec2(bw, 0)) && selMat >= 0) {
+                // Clear references so blocks fall back to plain color.
+                for (int i = 0; i < g_scene.blockCount; i++)
+                    if (strcmp(g_scene.blocks[i].material,
+                               g_scene.materials[selMat].name) == 0)
+                        g_scene.blocks[i].material[0] = '\0';
+                BrushAssetsReleaseTexture(g_scene.materials[selMat].albedoTex);
+                BrushAssetsReleaseTexture(g_scene.materials[selMat].normalTex);
+                for (int i = selMat; i < g_scene.materialCount - 1; i++)
+                    g_scene.materials[i] = g_scene.materials[i + 1];
+                g_scene.materialCount--;
+                selMat = -1;
+                g_dirty = true;
+            }
+
+            if (selMat >= 0 && selMat < g_scene.materialCount) {
+                BrushSceneMaterial *m = &g_scene.materials[selMat];
+                ImGui::SeparatorText("Selected Material");
+                ImGui::InputText("Name", nameBuf, sizeof(nameBuf));
+                if (ImGui::IsItemDeactivatedAfterEdit() && nameBuf[0] != '\0' &&
+                    strcmp(nameBuf, m->name) != 0) {
+                    // Rename: keep every block reference pointing here.
+                    for (int i = 0; i < g_scene.blockCount; i++)
+                        if (strcmp(g_scene.blocks[i].material, m->name) == 0)
+                            snprintf(g_scene.blocks[i].material,
+                                     sizeof(g_scene.blocks[i].material), "%s",
+                                     nameBuf);
+                    snprintf(m->name, sizeof(m->name), "%s", nameBuf);
+                    g_dirty = true;
+                }
+                bool reresolve = false;
+                reresolve |= TexPathCombo("Albedo", m->albedo,
+                                          sizeof(m->albedo));
+                reresolve |= TexPathCombo("Normal", m->normal,
+                                          sizeof(m->normal));
+                if (ImGui::DragFloat("Tile", &m->tile, 0.05f, 0.25f, 32.0f,
+                                     "%.2f m")) g_dirty = true;
+                if (ImGui::SliderFloat("Specular", &m->spec, 0.0f, 1.0f))
+                    g_dirty = true;
+                if (ImGui::SliderFloat("Normal Depth", &m->normalDepth, 0.0f,
+                                       3.0f)) g_dirty = true;
+                if (reresolve) {
+                    BrushSceneResolveMaterials(&g_scene);
+                    g_dirty = true;
+                }
+                if (ImGui::SmallButton("Rescan texture folder"))
+                    RescanTextureDir();
+            } else {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Select or add a material.");
+            }
+        }
         ImGui::End();
 
         // === Environment =====================================================
@@ -952,17 +1119,52 @@ int main() {
         ImGui::SeparatorText("Time of Day");
         if (ImGui::SliderFloat("Hour", &g_tod.timeHours, 0.0f, 24.0f, "%.2f")) g_dirty = true;
         ImGui::DragFloat("Speed", &g_tod.timeScale, 0.01f, -10.0f, 10.0f);
+        // Everything below persists into world.def "post" lines on save
+        // (BrushSceneCaptureRenderSettings) — the scene carries its look.
         ImGui::SeparatorText("Post Processing");
         if (pp) {
-            ImGui::Checkbox("SSAO", &pp->ssaoEnabled);
-            ImGui::Checkbox("Depth of Field", &pp->dofEnabled);
-            ImGui::Checkbox("God Rays", &pp->godRaysEnabled);
-            ImGui::Checkbox("Volumetric Fog", &pp->volFogEnabled);
-            ImGui::Checkbox("SMAA", &pp->smaaEnabled);
-            ImGui::Spacing();
-            ImGui::DragFloat("Exposure", &pp->exposure, 0.05f, 0.1f, 5.0f);
-            ImGui::DragFloat("Bloom", &pp->bloomIntensity, 0.05f, 0.0f, 10.0f);
-            ImGui::DragFloat("Bloom Threshold", &pp->bloomThreshold, 0.05f, 0.0f, 5.0f);
+            bool ch = false;
+            ch |= ImGui::DragFloat("Exposure", &pp->exposure, 0.05f, 0.1f, 5.0f);
+            ch |= ImGui::DragFloat("Bloom", &pp->bloomIntensity, 0.05f, 0.0f, 10.0f);
+            ch |= ImGui::DragFloat("Bloom Threshold", &pp->bloomThreshold, 0.05f, 0.0f, 5.0f);
+            ImGui::Checkbox("SMAA", &pp->smaaEnabled); // AA is a machine pref, not scene look
+
+            ImGui::SeparatorText("Ambient Occlusion");
+            ch |= ImGui::Checkbox("SSAO", &pp->ssaoEnabled);
+            if (pp->ssaoEnabled) {
+                ch |= ImGui::SliderFloat("Radius##ao", &pp->ssaoRadius, 0.1f, 3.0f, "%.2f m");
+                ch |= ImGui::SliderFloat("Strength##ao", &pp->ssaoStrength, 0.0f, 2.0f);
+            }
+
+            ImGui::SeparatorText("Depth of Field");
+            ch |= ImGui::Checkbox("DOF", &pp->dofEnabled);
+            if (pp->dofEnabled) {
+                ch |= ImGui::DragFloat("Range##dof", &pp->dofRange, 1.0f, 5.0f, 400.0f, "%.0f m");
+                ch |= ImGui::SliderFloat("Strength##dof", &pp->dofStrength, 0.0f, 1.0f);
+            }
+
+            ImGui::SeparatorText("God Rays");
+            ch |= ImGui::Checkbox("God Rays", &pp->godRaysEnabled);
+            if (pp->godRaysEnabled) {
+                ch |= ImGui::SliderFloat("Density##gr", &pp->godRaysDensity, 0.0f, 3.0f);
+                ch |= ImGui::SliderFloat("Brightness##gr", &pp->godRaysExposure, 0.0f, 3.0f);
+            }
+
+            ImGui::SeparatorText("Volumetric Fog");
+            ch |= ImGui::Checkbox("Fog", &pp->volFogEnabled);
+            if (pp->volFogEnabled) {
+                ch |= ImGui::SliderFloat("Density##vf", &pp->volFogDensity, 0.0f, 0.3f, "%.3f");
+                ch |= ImGui::DragFloat("Ground Y##vf", &pp->volFogGroundY, 0.1f, -50.0f, 200.0f, "%.1f m");
+                ch |= ImGui::DragFloat("Height##vf", &pp->volFogTopY, 0.1f, 0.5f, 60.0f, "%.1f m");
+                ch |= ImGui::SliderFloat("Coverage##vf", &pp->volFogCoverage, 0.0f, 1.0f);
+            }
+
+            BrushShadow *sh = BrushRenderGetShadow();
+            if (sh) {
+                ImGui::SeparatorText("Sun Shadows");
+                ch |= ImGui::SliderFloat("Softness", &sh->softness, 1.0f, 16.0f);
+            }
+            if (ch) g_dirty = true; // persisted via "post" lines on save
         } else {
             ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "HDR pipeline offline");
         }
@@ -1294,6 +1496,8 @@ int main() {
     rlImGuiShutdown();
     UnloadTexture(g_groundTex);
     UnloadModel(g_unitCube);
+    BrushSceneUnloadMaterials(&g_scene);
+    BrushAssetsShutdown();
     UnloadModel(g_spawnMarker);
     BrushWorldDestroy(g_world);
     BrushPhysicsCleanup(&g_phys);
