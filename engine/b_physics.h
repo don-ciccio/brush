@@ -55,6 +55,20 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh,
                                      Matrix transform, int userData,
                                      const char *tag);
 
+// Cook a static triangle-mesh shape without touching the physics world.
+// THREAD-SAFE (after BrushPhysicsInit): mesh-shape cooking is the expensive
+// part of AddStaticMesh, so streaming workers can run it off the main
+// thread. Returns NULL on failure. Hand the result to
+// BrushPhysicsAddStaticShape (which consumes it) or discard it with
+// BrushPhysicsReleaseShape.
+JPH_Shape *BrushPhysicsCookMeshShape(Mesh mesh, Matrix transform);
+void BrushPhysicsReleaseShape(JPH_Shape *shape);
+
+// Add a pre-cooked shape as a static body (already in world space). CONSUMES
+// the caller's shape reference — do not release it afterwards.
+JPH_BodyID BrushPhysicsAddStaticShape(BrushPhysics *pw, JPH_Shape *shape,
+                                      int userData, const char *tag);
+
 // Sensor volume: overlaps report but never collide.
 JPH_BodyID BrushPhysicsAddTriggerBox(BrushPhysics *pw, Vector3 position,
                                      Vector3 size, int userData,

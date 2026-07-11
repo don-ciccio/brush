@@ -49,7 +49,10 @@ typedef struct WorldChunk {
   bool meshUploaded;
   float maxY;
 
-  JPH_BodyID terrainBody; // Jolt static-mesh collider, or BRUSH_BODY_INVALID
+  JPH_BodyID terrainBody;  // Jolt static-mesh collider, or BRUSH_BODY_INVALID
+  JPH_Shape *pendingShape; // collider cooked on the WORKER (BVH build is the
+                           // expensive half of AddStaticMesh); the main-thread
+                           // finalize only creates the body from it
 } WorldChunk;
 
 struct BrushChunkJobQueue; // fwd
@@ -223,6 +226,15 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     }
   }
   BuildMesh(w, chunk);
+
+  // Cook the Jolt collider here on the worker: the BVH build is the
+  // expensive half of collider creation and needs no physics-world access.
+  // The main-thread finalize just wraps a body around it.
+  if (w->cfg.physics) {
+    Vector3 ro = WorldToRender(w, o);
+    Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
+    chunk->pendingShape = BrushPhysicsCookMeshShape(chunk->mesh, xf);
+  }
   chunk->valid = true;
 }
 
@@ -336,17 +348,17 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
     }
   }
 
-  if (w->cfg.physics) {
+  if (w->cfg.physics && chunk->pendingShape) {
     if (chunk->terrainBody != BRUSH_BODY_INVALID) {
       BrushPhysicsRemoveBody(w->cfg.physics, chunk->terrainBody);
       chunk->terrainBody = BRUSH_BODY_INVALID;
     }
-    Vector3 ro = WorldToRender(w, ChunkOrigin(w, chunk->coord));
-    Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
     char tag[48];
     snprintf(tag, sizeof(tag), "terrain_%d_%d", chunk->coord.x, chunk->coord.z);
-    chunk->terrainBody =
-        BrushPhysicsAddStaticMesh(w->cfg.physics, chunk->mesh, xf, 0, tag);
+    // Consumes pendingShape's reference (cooked on the worker in BuildCpu).
+    chunk->terrainBody = BrushPhysicsAddStaticShape(
+        w->cfg.physics, chunk->pendingShape, 0, tag);
+    chunk->pendingShape = NULL;
   }
 
   atomic_store(&chunk->state, CHUNK_ACTIVE);
@@ -357,6 +369,11 @@ static void ReleaseChunk(BrushWorld *w, WorldChunk *chunk) {
   if (w->cfg.physics && chunk->terrainBody != BRUSH_BODY_INVALID) {
     BrushPhysicsRemoveBody(w->cfg.physics, chunk->terrainBody);
     chunk->terrainBody = BRUSH_BODY_INVALID;
+  }
+  // A chunk unloaded while CPU_READY still owns its worker-cooked shape.
+  if (chunk->pendingShape) {
+    BrushPhysicsReleaseShape(chunk->pendingShape);
+    chunk->pendingShape = NULL;
   }
   // Keep heightmap + mesh buffers allocated for slot reuse.
   chunk->state = CHUNK_EMPTY;

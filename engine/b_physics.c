@@ -182,9 +182,8 @@ JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position, Vector3 
     return bodyID;
 }
 
-JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh, Matrix transform, int userData, const char *tag) {
-    if (!pw || !pw->bodyInterface) return BRUSH_BODY_INVALID;
-    if (mesh.vertexCount == 0 || mesh.triangleCount == 0) return BRUSH_BODY_INVALID;
+JPH_Shape *BrushPhysicsCookMeshShape(Mesh mesh, Matrix transform) {
+    if (mesh.vertexCount == 0 || mesh.triangleCount == 0) return NULL;
 
     // Convert Raylib mesh triangles directly to JoltC triangles
     uint32_t triangleCount = mesh.triangleCount;
@@ -217,16 +216,28 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh, Matrix transfo
         joltTriangles[i].materialIndex = 0;
     }
 
-    // Create Mesh Shape
+    // Cook the BVH-optimized mesh shape — the expensive step, and the reason
+    // this function exists separately: it touches no physics-world state, so
+    // streaming workers call it off the main thread.
     JPH_MeshShapeSettings* meshSettings = JPH_MeshShapeSettings_Create(joltTriangles, triangleCount);
     JPH_MeshShape* meshShape = JPH_MeshShapeSettings_CreateShape(meshSettings);
-    JPH_ShapeSettings_Destroy((JPH_ShapeSettings*)meshSettings); // Free settings memory after shape is created!
+    JPH_ShapeSettings_Destroy((JPH_ShapeSettings*)meshSettings);
+    free(joltTriangles);
+    return (JPH_Shape*)meshShape;
+}
 
-    // Static meshes are already transformed to world coordinates, so spawn them at (0,0,0)
+void BrushPhysicsReleaseShape(JPH_Shape *shape) {
+    if (shape) JPH_Shape_Destroy(shape); // drops our reference (refcounted)
+}
+
+JPH_BodyID BrushPhysicsAddStaticShape(BrushPhysics *pw, JPH_Shape *shape, int userData, const char *tag) {
+    if (!pw || !pw->bodyInterface || !shape) return BRUSH_BODY_INVALID;
+
+    // Pre-cooked shapes are already in world coordinates: spawn at origin.
     JPH_RVec3 pos = { 0.0f, 0.0f, 0.0f };
     JPH_Quat rot = { 0.0f, 0.0f, 0.0f, 1.0f };
     JPH_BodyCreationSettings* bodySettings = JPH_BodyCreationSettings_Create3(
-        (const JPH_Shape*)meshShape,
+        shape,
         &pos,
         &rot,
         JPH_MotionType_Static,
@@ -237,18 +248,26 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh, Matrix transfo
 
     JPH_BodyID bodyID = JPH_BodyInterface_CreateAndAddBody(pw->bodyInterface, bodySettings, JPH_Activation_DontActivate);
 
-    // Clean up temporary allocations
     JPH_BodyCreationSettings_Destroy(bodySettings);
-    free(joltTriangles);
+    // The body holds its own shape reference; drop the caller's (this API
+    // consumes it). Without this every recycled chunk leaked a cooked shape.
+    JPH_Shape_Destroy(shape);
 
     if (bodyID == BRUSH_BODY_INVALID) {
-        TraceLog(LOG_WARNING, "JoltC: Failed to create static mesh collider '%s'", tag ? tag : "unnamed");
+        TraceLog(LOG_WARNING, "JoltC: Failed to create static shape body '%s'", tag ? tag : "unnamed");
     } else {
-        TraceLog(LOG_INFO, "JoltC: Registered static mesh '%s' (BodyID: %u) with %u triangles", 
-                 tag ? tag : "unnamed", bodyID, triangleCount);
+        TraceLog(LOG_INFO, "JoltC: Registered static shape '%s' (BodyID: %u)",
+                 tag ? tag : "unnamed", bodyID);
     }
 
     return bodyID;
+}
+
+JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh, Matrix transform, int userData, const char *tag) {
+    if (!pw || !pw->bodyInterface) return BRUSH_BODY_INVALID;
+    JPH_Shape *shape = BrushPhysicsCookMeshShape(mesh, transform);
+    if (!shape) return BRUSH_BODY_INVALID;
+    return BrushPhysicsAddStaticShape(pw, shape, userData, tag);
 }
 
 JPH_BodyID BrushPhysicsAddTriggerBox(BrushPhysics *pw, Vector3 position, Vector3 size, int userData, const char *tag) {
