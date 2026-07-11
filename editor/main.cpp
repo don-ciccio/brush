@@ -335,6 +335,37 @@ static bool TexPathCombo(const char *label, char *path, int cap) {
     return changed;
 }
 
+// --- Assets panel file list (everything under assets/) -----------------------
+#define MAX_ASSET_FILES 512
+static char g_assetFiles[MAX_ASSET_FILES][192];
+static int g_assetFileCount = 0;
+
+static Texture2D g_assetPreview = { 0 };
+static char g_assetPreviewPath[192] = "";
+
+static void RescanAssetFiles() {
+    g_assetFileCount = 0;
+    FilePathList fl = LoadDirectoryFilesEx("assets", NULL, true);
+    for (unsigned int i = 0; i < fl.count && g_assetFileCount < MAX_ASSET_FILES; i++) {
+        const char *name = GetFileName(fl.paths[i]);
+        if (name == NULL || name[0] == '.') continue;      // .DS_Store etc.
+        if (IsFileExtension(fl.paths[i], ".import")) continue; // sidecars ride along
+        snprintf(g_assetFiles[g_assetFileCount++], sizeof(g_assetFiles[0]),
+                 "%s", fl.paths[i]);
+    }
+    UnloadDirectoryFiles(fl);
+    qsort(g_assetFiles, (size_t)g_assetFileCount, sizeof(g_assetFiles[0]),
+          [](const void *a, const void *b) {
+              return strcmp((const char *)a, (const char *)b);
+          });
+}
+
+static bool IsImageAsset(const char *path) {
+    return IsFileExtension(path, ".png") || IsFileExtension(path, ".jpg") ||
+           IsFileExtension(path, ".jpeg") || IsFileExtension(path, ".tga") ||
+           IsFileExtension(path, ".bmp");
+}
+
 // Copy image files into the project's assets/textures (creating it on
 // demand — the Empty template starts without one) and rescan the pickers.
 // This is how textures enter a project: drag & drop onto the editor, or
@@ -367,7 +398,10 @@ static int ImportTextureFiles(const char **paths, int count) {
             AddEditorLog("Imported %s", dst);
         }
     }
-    if (imported > 0) RescanTextureDir();
+    if (imported > 0) {
+        RescanTextureDir();
+        RescanAssetFiles();
+    }
     return imported;
 }
 
@@ -824,6 +858,7 @@ static bool OpenProjectAt(const char *dir) {
     RebuildAllColliders();
     g_camera.Init();
     RescanTextureDir(); // material path pickers browse assets/textures
+    RescanAssetFiles(); // Assets panel file list
 
     SetWindowTitle(g_project.name);
     if (!engineDev) AddRecent(dir);
@@ -1026,6 +1061,12 @@ int main(int argc, char **argv) {
         // source images and refresh the material table's handles.
         if (BrushAssetsUpdate()) {
             BrushSceneResolveMaterials(&g_scene);
+            // The Assets preview may hold the swapped-out texture: refresh
+            // (release tolerates the stale id via the registry's prevId).
+            if (g_assetPreviewPath[0] != '\0') {
+                BrushAssetsReleaseTexture(g_assetPreview);
+                g_assetPreview = BrushAssetsTexture(g_assetPreviewPath);
+            }
             AddEditorLog("Re-imported changed textures");
         }
         BrushTodUpdate(&g_tod, dt);
@@ -1226,6 +1267,7 @@ int main(int argc, char **argv) {
             ImGui::DockBuilderDockWindow("Materials", dockRight);
             ImGui::DockBuilderDockWindow("Environment", dockRight);
             ImGui::DockBuilderDockWindow("Console", dockBottom);
+            ImGui::DockBuilderDockWindow("Assets", dockBottom);
             ImGui::DockBuilderFinish(dockspaceId);
         }
 
@@ -1437,24 +1479,6 @@ int main(int argc, char **argv) {
                              g_scene.materials[i].name);
                 }
             }
-            // Bring textures INTO the project (drag & drop works too).
-            if (ImGui::Button("Import Textures...", ImVec2(-1, 0))) {
-#if defined(__APPLE__)
-                static char picked[8192];
-                int n = EditorMacOpenImageDialog(picked, sizeof(picked));
-                if (n > 0) {
-                    const char *files[64];
-                    int count = 0;
-                    for (char *tok = strtok(picked, "\n");
-                         tok != NULL && count < 64; tok = strtok(NULL, "\n"))
-                        files[count++] = tok;
-                    ImportTextureFiles(files, count);
-                }
-#else
-                AddEditorLog("Drop image files onto the window to import.");
-#endif
-            }
-            ImGui::Spacing();
             float bw = (ImGui::GetContentRegionAvail().x -
                         ImGui::GetStyle().ItemSpacing.x) * 0.5f;
             if (ImGui::Button("+ Material", ImVec2(bw, 0)) &&
@@ -1553,52 +1577,6 @@ int main(int argc, char **argv) {
                 ImGui::TextDisabled("Select or add a material.");
             }
 
-            // --- Import settings: edits the texture's .import sidecar; the
-            // live watch re-cooks and swaps automatically (no apply logic
-            // here beyond writing the file).
-            ImGui::Spacing();
-            ImGui::SeparatorText("Import Settings");
-            static int selTex = -1;
-            static BrushTexImportParams impParams;
-            if (selTex >= g_texFileCount) selTex = -1;
-            const char *texPreview =
-                (selTex >= 0) ? GetFileName(g_texFiles[selTex]) : "(pick a texture)";
-            if (ImGui::BeginCombo("Texture", texPreview)) {
-                for (int i = 0; i < g_texFileCount; i++) {
-                    if (ImGui::Selectable(GetFileName(g_texFiles[i]), selTex == i) &&
-                        selTex != i) {
-                        selTex = i;
-                        BrushAssetsGetImportParams(g_texFiles[i], &impParams);
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            if (selTex >= 0) {
-                bool edited = false;
-                const int sizes[] = { 0, 256, 512, 1024, 2048, 4096 };
-                int sizeIdx = 0;
-                for (int i = 0; i < 6; i++)
-                    if (impParams.maxSize == sizes[i]) sizeIdx = i;
-                if (ImGui::Combo("Max Size", &sizeIdx,
-                                 "no limit\0 256\0 512\0 1024\0 2048\0 4096\0")) {
-                    impParams.maxSize = sizes[sizeIdx];
-                    edited = true;
-                }
-                int compIdx = (strcmp(impParams.compress, "bc1") == 0) ? 1
-                              : (strcmp(impParams.compress, "bc3") == 0) ? 2 : 0;
-                if (ImGui::Combo("Compression", &compIdx,
-                                 "none (RGBA8)\0BC1 (opaque, 8:1)\0BC3 (alpha/normal, 4:1)\0")) {
-                    snprintf(impParams.compress, sizeof(impParams.compress),
-                             compIdx == 1 ? "bc1" : compIdx == 2 ? "bc3" : "none");
-                    edited = true;
-                }
-                edited |= ImGui::Checkbox("Mipmaps", &impParams.mipmaps);
-                edited |= ImGui::Checkbox("Normal map (DXT5nm)", &impParams.isNormalMap);
-                if (edited &&
-                    BrushAssetsSetImportParams(g_texFiles[selTex], &impParams))
-                    AddEditorLog("Import settings saved: %s (re-importing)",
-                                 GetFileName(g_texFiles[selTex]));
-            }
         }
         ImGui::End();
 
@@ -1660,12 +1638,135 @@ int main(int argc, char **argv) {
 
         // === Console =========================================================
         ImGui::Begin("Console");
+        ImGuiID consoleDockId = ImGui::GetWindowDockID();
         if (ImGui::SmallButton("Clear")) g_logLineCount = 0;
         ImGui::Separator();
         ImGui::BeginChild("##log", ImVec2(0, 0), ImGuiChildFlags_None);
         for (int i = 0; i < g_logLineCount; i++) ImGui::TextUnformatted(g_logLines[i]);
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
+        ImGui::End();
+
+        // === Assets ==========================================================
+        // Project file browser (Godot's FileSystem dock): everything under
+        // assets/. Selecting a texture shows its preview and IMPORT
+        // SETTINGS — how that file cooks into the GPU cache (max size,
+        // BC compression, mipmaps, normal profile). Editing writes the
+        // .import sidecar; the live watch re-cooks and the viewport
+        // updates. Materials reference these files; import settings are
+        // per FILE, so every material sharing a texture is affected.
+        if (consoleDockId != 0)
+            ImGui::SetNextWindowDockID(consoleDockId, ImGuiCond_FirstUseEver);
+        ImGui::Begin("Assets");
+        {
+            static int selAsset = -1;
+            static BrushTexImportParams impParams;
+            if (selAsset >= g_assetFileCount) selAsset = -1;
+
+            if (ImGui::Button("Import Textures...")) {
+#if defined(__APPLE__)
+                static char picked[8192];
+                int n = EditorMacOpenImageDialog(picked, sizeof(picked));
+                if (n > 0) {
+                    const char *files[64];
+                    int count = 0;
+                    for (char *tok = strtok(picked, "\n");
+                         tok != NULL && count < 64; tok = strtok(NULL, "\n"))
+                        files[count++] = tok;
+                    ImportTextureFiles(files, count);
+                }
+#else
+                AddEditorLog("Drop image files onto the window to import.");
+#endif
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Refresh")) {
+                RescanAssetFiles();
+                RescanTextureDir();
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("drag & drop images anywhere to import");
+            ImGui::Separator();
+
+            // Left: file list. Right: preview + per-file import settings.
+            float listW = ImGui::GetContentRegionAvail().x * 0.45f;
+            ImGui::BeginChild("##assetlist", ImVec2(listW, 0));
+            for (int i = 0; i < g_assetFileCount; i++) {
+                const char *rel = g_assetFiles[i] + 7; // strip "assets/"
+                if (ImGui::Selectable(rel, selAsset == i)) {
+                    selAsset = i;
+                    // Swap the preview ref: release the old, acquire the new
+                    // (acquiring cooks on first touch, same as a material).
+                    if (g_assetPreviewPath[0] != '\0') {
+                        BrushAssetsReleaseTexture(g_assetPreview);
+                        g_assetPreview = (Texture2D){ 0 };
+                        g_assetPreviewPath[0] = '\0';
+                    }
+                    if (IsImageAsset(g_assetFiles[i])) {
+                        g_assetPreview = BrushAssetsTexture(g_assetFiles[i]);
+                        snprintf(g_assetPreviewPath, sizeof(g_assetPreviewPath),
+                                 "%s", g_assetFiles[i]);
+                        BrushAssetsGetImportParams(g_assetFiles[i], &impParams);
+                    }
+                }
+            }
+            if (g_assetFileCount == 0)
+                ImGui::TextDisabled("No files yet — import textures above.");
+            ImGui::EndChild();
+
+            ImGui::SameLine();
+            ImGui::BeginChild("##assetdetail", ImVec2(0, 0));
+            if (selAsset >= 0 && selAsset < g_assetFileCount) {
+                const char *path = g_assetFiles[selAsset];
+                ImGui::TextUnformatted(GetFileName(path));
+                ImGui::TextDisabled("%s  (%d KB)", path,
+                                    GetFileLength(path) / 1024);
+                ImGui::Spacing();
+                if (IsImageAsset(path)) {
+                    if (g_assetPreview.id != 0) {
+                        float side = fminf(
+                            ImGui::GetContentRegionAvail().x * 0.5f, 140.0f);
+                        ImGui::Image((ImTextureID)(intptr_t)g_assetPreview.id,
+                                     ImVec2(side, side));
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("%dx%d\n%d mips\ncooked",
+                                            g_assetPreview.width,
+                                            g_assetPreview.height,
+                                            g_assetPreview.mipmaps);
+                    }
+                    ImGui::SeparatorText("Import Settings");
+                    bool edited = false;
+                    const int sizes[] = { 0, 256, 512, 1024, 2048, 4096 };
+                    int sizeIdx = 0;
+                    for (int i = 0; i < 6; i++)
+                        if (impParams.maxSize == sizes[i]) sizeIdx = i;
+                    if (ImGui::Combo("Max Size", &sizeIdx,
+                                     "no limit\0 256\0 512\0 1024\0 2048\0 4096\0")) {
+                        impParams.maxSize = sizes[sizeIdx];
+                        edited = true;
+                    }
+                    int compIdx = (strcmp(impParams.compress, "bc1") == 0) ? 1
+                                  : (strcmp(impParams.compress, "bc3") == 0) ? 2 : 0;
+                    if (ImGui::Combo("Compression", &compIdx,
+                                     "none (RGBA8)\0BC1 (opaque, 8:1)\0BC3 (alpha/normal, 4:1)\0")) {
+                        snprintf(impParams.compress, sizeof(impParams.compress),
+                                 compIdx == 1 ? "bc1" : compIdx == 2 ? "bc3" : "none");
+                        edited = true;
+                    }
+                    edited |= ImGui::Checkbox("Mipmaps", &impParams.mipmaps);
+                    edited |= ImGui::Checkbox("Normal map (DXT5nm)",
+                                              &impParams.isNormalMap);
+                    if (edited && BrushAssetsSetImportParams(path, &impParams))
+                        AddEditorLog("Import settings saved: %s (re-importing)",
+                                     GetFileName(path));
+                } else {
+                    ImGui::TextDisabled("No import options for this file type.");
+                }
+            } else {
+                ImGui::TextDisabled("Select a file to see its details.");
+            }
+            ImGui::EndChild();
+        }
         ImGui::End();
 
         // === Viewport ========================================================

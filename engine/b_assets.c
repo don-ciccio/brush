@@ -614,6 +614,10 @@ typedef struct TexEntry {
   bool watch;         // cookable source on disk — eligible for re-import
   bool cookPending;   // a worker job is in flight for this source
   bool normalSwizzled; // cooked with the DXT5nm profile
+  unsigned int prevId; // GL id this entry held before its last re-import
+                       // swap — lets holders of the OLD Texture2D value
+                       // still release their reference (one swap deep;
+                       // callers refresh on every BrushAssetsUpdate)
   uint64_t srcSize, srcMtime; // last identity we imported/saw
   uint64_t impSize, impMtime; // .import sidecar identity (0 if absent)
 } TexEntry;
@@ -697,7 +701,7 @@ Texture2D BrushAssetsTexture(const char *path) {
 void BrushAssetsReleaseTexture(Texture2D tex) {
   if (tex.id == 0) return;
   for (int i = 0; i < g_texCount; i++) {
-    if (g_tex[i].tex.id != tex.id) continue;
+    if (g_tex[i].tex.id != tex.id && g_tex[i].prevId != tex.id) continue;
     if (--g_tex[i].refs > 0) return;
     UnloadTexture(g_tex[i].tex);
     TraceLog(LOG_DEBUG, "ASSETS: unloaded texture %s", g_tex[i].path);
@@ -737,6 +741,7 @@ bool BrushAssetsUpdate(void) {
           TraceLog(LOG_WARNING, "ASSETS: re-import upload failed for %s",
                    doneSrc[d]);
         if (fresh.id != 0) {
+          e->prevId = e->tex.id;
           if (e->tex.id != 0) UnloadTexture(e->tex);
           e->tex = fresh;
           e->normalSwizzled = swizzled;
