@@ -164,6 +164,25 @@ static EntityType g_selectedType = ENTITY_NONE;
 static int g_selectedIdx = -1;
 
 static ImGuizmo::OPERATION g_gizmoOp = ImGuizmo::TRANSLATE;
+
+// --- Terrain sculpting ---
+enum EditorMode { MODE_SELECT, MODE_SCULPT };
+static EditorMode g_mode = MODE_SELECT;
+static BrushSculptOp g_sculptOp = BRUSH_SCULPT_ADD;
+static float g_brushRadius = 6.0f;
+static float g_brushStrength = 1.0f;
+static bool g_sculptStroking = false;
+static float g_flattenY = 0.0f;
+static bool g_cursorOnGround = false;
+static Vector3 g_cursorPos = {0, 0, 0};
+static char g_terrainPath[512] = "assets/gym.terrain";
+
+#define MAX_UNDO 32
+static unsigned char *g_undoBlobs[MAX_UNDO];
+static int g_undoSizes[MAX_UNDO];
+static int g_undoCount = 0;
+
+
 static bool g_dirty = false;
 static bool g_surfaceSnap = true;
 static bool g_quit = false;
@@ -187,6 +206,32 @@ static void AddEditorLog(const char *fmt, ...) {
     snprintf(g_logLines[g_logLineCount++], 256, "%s", buf);
 }
 
+static void PushSculptUndo() {
+    int size = 0;
+    // Whole-overlay snapshot (editor scale keeps this small; tiles are sparse).
+    unsigned char *blob = BrushWorldSculptSnapshot(
+        g_world, (Vector2){-32000, -32000}, (Vector2){32000, 32000}, &size);
+    if (blob == NULL) return;
+    if (g_undoCount == MAX_UNDO) { // drop the oldest
+        MemFree(g_undoBlobs[0]);
+        memmove(g_undoBlobs, g_undoBlobs + 1, sizeof(g_undoBlobs[0]) * (MAX_UNDO - 1));
+        memmove(g_undoSizes, g_undoSizes + 1, sizeof(g_undoSizes[0]) * (MAX_UNDO - 1));
+        g_undoCount--;
+    }
+    g_undoBlobs[g_undoCount] = blob;
+    g_undoSizes[g_undoCount] = size;
+    g_undoCount++;
+}
+
+static void PopSculptUndo() {
+    if (g_undoCount == 0) return;
+    g_undoCount--;
+    BrushWorldSculptRestore(g_world, g_undoBlobs[g_undoCount], g_undoSizes[g_undoCount]);
+    MemFree(g_undoBlobs[g_undoCount]);
+    g_dirty = true;
+    AddEditorLog("Undo sculpt");
+}
+
 // --- Game process (Play button) ----------------------------------------------
 static pid_t g_gamePid = -1;
 
@@ -205,6 +250,10 @@ static void SaveScene() {
         AddEditorLog("Saved %s", g_scenePath);
     } else {
         AddEditorLog("ERROR: could not save %s", g_scenePath);
+    }
+    if (g_world && BrushWorldSculptAny(g_world)) {
+        if (BrushWorldSculptSave(g_world, g_terrainPath))
+            AddEditorLog("Saved %s", g_terrainPath);
     }
 }
 
@@ -486,6 +535,17 @@ int main() {
                             .groundTex = g_groundTex, .texMetresPerTile = 64.0f },
         (Vector3){ g_scene.spawn.x, 0, g_scene.spawn.z });
 
+    BrushWorldSculptLoad(g_world, g_terrainPath);
+
+    // Harness: scripted sculpt + save (headless end-to-end check of the
+    // editor -> .terrain -> game pipeline).
+    if (getenv("BRUSH_TEST_SCULPT") != NULL) {
+        for (int i = 0; i < 40; i++)
+            BrushWorldSculpt(g_world, BRUSH_SCULPT_ADD, (Vector3){0, 0, 14},
+                             9.0f, 0.09f, 0.0f);
+        BrushWorldSculptSave(g_world, g_terrainPath);
+    }
+
     g_unitCube = LoadModelFromMesh(GenMeshCube(1.0f, 1.0f, 1.0f));
     g_unitCube.materials[0].shader = BrushGetLitShader();
 
@@ -566,8 +626,33 @@ int main() {
 
         BrushPost *pp = BrushRenderGetPost();
 
+        // Sculpt brush cursor: a ring hugging the terrain under the mouse.
+        if (pp && g_mode == MODE_SCULPT && g_cursorOnGround) {
+            RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
+            BeginTextureMode(*target);
+            BeginMode3D(g_camera.cam);
+            Color ringCol = (g_sculptOp == BRUSH_SCULPT_ADD)    ? GREEN
+                            : (g_sculptOp == BRUSH_SCULPT_SMOOTH) ? SKYBLUE
+                                                                  : GOLD;
+            const int SEGS = 48;
+            Vector3 prev = {0};
+            for (int i = 0; i <= SEGS; i++) {
+                float a = (float)i / SEGS * 2.0f * PI;
+                Vector3 pt = { g_cursorPos.x + cosf(a) * g_brushRadius, 0,
+                               g_cursorPos.z + sinf(a) * g_brushRadius };
+                pt.y = BrushWorldGroundHeight(g_world, pt.x, pt.z) + 0.08f;
+                if (i > 0) DrawLine3D(prev, pt, ringCol);
+                prev = pt;
+            }
+            DrawLine3D((Vector3){ g_cursorPos.x, g_cursorPos.y, g_cursorPos.z },
+                       (Vector3){ g_cursorPos.x, g_cursorPos.y + 1.0f, g_cursorPos.z },
+                       Fade(ringCol, 0.6f));
+            EndMode3D();
+            EndTextureMode();
+        }
+
         // Selection outline drawn onto the final LDR target (respects rotation).
-        if (pp && g_selectedType != ENTITY_NONE) {
+        if (pp && g_mode == MODE_SELECT && g_selectedType != ENTITY_NONE) {
             RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
             BeginTextureMode(*target);
             BeginMode3D(g_camera.cam);
@@ -865,8 +950,8 @@ int main() {
                 return true;
             };
 
-            // --- Gizmo -------------------------------------------------------
-            if (g_selectedType != ENTITY_NONE) {
+            // --- Gizmo (select mode only) -------------------------------------
+            if (g_mode == MODE_SELECT && g_selectedType != ENTITY_NONE) {
                 ImGuizmo::SetDrawlist();
                 ImGuizmo::SetRect(imgPos.x, imgPos.y, imgSize.x, imgSize.y);
 
@@ -949,8 +1034,48 @@ int main() {
                 }
             }
 
-            // --- Picking -------------------------------------------------------
-            if (viewportHovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            // --- Sculpting ------------------------------------------------------
+            g_cursorOnGround = false;
+            if (g_mode == MODE_SCULPT && viewportHovered) {
+                Ray ray;
+                if (mouseToRay(GetMousePosition(), &ray)) {
+                    Vector3 hitPt, hitNorm;
+                    if (BrushPhysicsRaycastEx(&g_phys, ray.position, ray.direction,
+                                              2000.0f, &hitPt, &hitNorm, NULL)) {
+                        g_cursorOnGround = true;
+                        g_cursorPos = hitPt;
+                    }
+                }
+                if (g_cursorOnGround) {
+                    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                        PushSculptUndo();     // stroke-level undo record
+                        g_sculptStroking = true;
+                        g_flattenY = g_cursorPos.y; // flatten to press height
+                    }
+                    if (g_sculptStroking && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                        float dtStroke = GetFrameTime();
+                        bool lower = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+                        float strength;
+                        if (g_sculptOp == BRUSH_SCULPT_ADD)
+                            strength = (lower ? -1.0f : 1.0f) * g_brushStrength * 6.0f * dtStroke;
+                        else
+                            strength = fminf(g_brushStrength * 8.0f * dtStroke, 1.0f);
+                        BrushWorldSculpt(g_world, g_sculptOp, g_cursorPos,
+                                         g_brushRadius, strength, g_flattenY);
+                        g_dirty = true;
+                    }
+                }
+                if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) g_sculptStroking = false;
+                // Radius on [ ] keys (scroll stays camera navigation).
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))
+                    g_brushRadius = fmaxf(g_brushRadius - 1.0f, 1.0f);
+                if (ImGui::IsKeyPressed(ImGuiKey_RightBracket))
+                    g_brushRadius = fminf(g_brushRadius + 1.0f, 60.0f);
+            }
+
+            // --- Picking (select mode only) -------------------------------------
+            if (g_mode == MODE_SELECT && viewportHovered &&
+                IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
                 !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
                 Ray ray;
                 if (mouseToRay(GetMousePosition(), &ray)) {
@@ -998,22 +1123,48 @@ int main() {
             // --- Floating toolbar (top-left of the image) ----------------------
             ImGui::SetCursorScreenPos(ImVec2(imgPos.x + 10, imgPos.y + 10));
             ImGui::BeginGroup();
-            if (ToolButton(" Move (W) ", g_gizmoOp == ImGuizmo::TRANSLATE))
-                g_gizmoOp = ImGuizmo::TRANSLATE;
+            if (ToolButton(" Select ", g_mode == MODE_SELECT)) g_mode = MODE_SELECT;
             ImGui::SameLine();
-            if (ToolButton(" Rotate (E) ", g_gizmoOp == ImGuizmo::ROTATE))
-                g_gizmoOp = ImGuizmo::ROTATE;
+            if (ToolButton(" Sculpt ", g_mode == MODE_SCULPT)) g_mode = MODE_SCULPT;
             ImGui::SameLine();
-            if (ToolButton(" Scale (R) ", g_gizmoOp == ImGuizmo::SCALE))
-                g_gizmoOp = ImGuizmo::SCALE;
+            ImGui::TextDisabled("|");
             ImGui::SameLine();
-            ImGui::Checkbox("Snap", &g_surfaceSnap);
+            if (g_mode == MODE_SELECT) {
+                if (ToolButton(" Move (W) ", g_gizmoOp == ImGuizmo::TRANSLATE))
+                    g_gizmoOp = ImGuizmo::TRANSLATE;
+                ImGui::SameLine();
+                if (ToolButton(" Rotate (E) ", g_gizmoOp == ImGuizmo::ROTATE))
+                    g_gizmoOp = ImGuizmo::ROTATE;
+                ImGui::SameLine();
+                if (ToolButton(" Scale (R) ", g_gizmoOp == ImGuizmo::SCALE))
+                    g_gizmoOp = ImGuizmo::SCALE;
+                ImGui::SameLine();
+                ImGui::Checkbox("Snap", &g_surfaceSnap);
+            } else {
+                if (ToolButton(" Raise ", g_sculptOp == BRUSH_SCULPT_ADD))
+                    g_sculptOp = BRUSH_SCULPT_ADD;
+                ImGui::SameLine();
+                if (ToolButton(" Smooth ", g_sculptOp == BRUSH_SCULPT_SMOOTH))
+                    g_sculptOp = BRUSH_SCULPT_SMOOTH;
+                ImGui::SameLine();
+                if (ToolButton(" Flatten ", g_sculptOp == BRUSH_SCULPT_FLATTEN))
+                    g_sculptOp = BRUSH_SCULPT_FLATTEN;
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(140);
+                ImGui::SliderFloat("Radius", &g_brushRadius, 1.0f, 60.0f, "%.0f m");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(140);
+                ImGui::SliderFloat("Strength", &g_brushStrength, 0.1f, 4.0f, "%.1f");
+            }
             ImGui::EndGroup();
 
             // --- Nav hint bar (bottom of the image) ----------------------------
             const char *hints =
-                "scroll orbit   |   shift+scroll pan   |   cmd+scroll zoom   |   "
-                "right-drag fly (WASD)   |   F frame   |   B block   L light";
+                (g_mode == MODE_SCULPT)
+                    ? "drag sculpt   |   shift+drag lower   |   [ ] radius   |   "
+                      "scroll orbit   |   cmd+Z undo   |   1 select  2 sculpt"
+                    : "scroll orbit   |   shift+scroll pan   |   cmd+scroll zoom   |   "
+                      "right-drag fly (WASD)   |   F frame   |   B block   L light";
             ImVec2 hintSize = ImGui::CalcTextSize(hints);
             ImGui::SetCursorScreenPos(ImVec2(imgPos.x + (imgSize.x - hintSize.x) * 0.5f,
                                              imgPos.y + imgSize.y - hintSize.y - 8));
@@ -1030,6 +1181,7 @@ int main() {
         if (!typing) {
             if (ImGui::IsKeyPressed(ImGuiKey_F5)) { GameRunning() ? StopGame() : PlayGame(); }
             if (cmd && ImGui::IsKeyPressed(ImGuiKey_S)) SaveScene();
+            if (cmd && ImGui::IsKeyPressed(ImGuiKey_Z)) PopSculptUndo();
             if (cmd && ImGui::IsKeyPressed(ImGuiKey_D)) DuplicateSelected();
             if (cmd && ImGui::IsKeyPressed(ImGuiKey_Q)) g_quit = true;
 
@@ -1042,6 +1194,8 @@ int main() {
                     if (ImGui::IsKeyPressed(ImGuiKey_B)) AddBlockEntity();
                     if (ImGui::IsKeyPressed(ImGuiKey_L)) AddLightEntity();
                 }
+                if (ImGui::IsKeyPressed(ImGuiKey_1)) g_mode = MODE_SELECT;
+                if (ImGui::IsKeyPressed(ImGuiKey_2)) g_mode = MODE_SCULPT;
                 if (ImGui::IsKeyPressed(ImGuiKey_F)) {
                     if (io.KeyShift) { g_selectedType = ENTITY_NONE; g_selectedIdx = -1; }
                     FrameSelected();

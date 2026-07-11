@@ -275,6 +275,16 @@ static void SandboxInit(void *user) {
                          .texMetresPerTile = 64.0f}, // 32 squares/chunk -> 2 m
       (Vector3){spx, 0, spz});
 
+  // Terrain sculpt overlay (authored in the editor, saved beside the scene).
+  BrushWorldSculptLoad(s->world, "assets/gym.terrain");
+
+  // Harness: BRUSH_TEST_SCULPT raises a hill ahead of spawn — verifies the
+  // sculpt compose, dirty-chunk rebake, and collider swap without the editor.
+  if (getenv("BRUSH_TEST_SCULPT") != NULL)
+    for (int i = 0; i < 40; i++)
+      BrushWorldSculpt(s->world, BRUSH_SCULPT_ADD, (Vector3){0, 0, 14}, 9.0f,
+                       0.09f, 0.0f);
+
   float groundY = BrushWorldGroundHeight(s->world, spx, spz);
   s->pos = s->prevPos = s->renderPos = (Vector3){spx, groundY + 0.2f, spz};
   s->grounded = true;

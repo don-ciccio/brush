@@ -53,7 +53,19 @@ typedef struct WorldChunk {
   JPH_Shape *pendingShape; // collider cooked on the WORKER (BVH build is the
                            // expensive half of AddStaticMesh); the main-thread
                            // finalize only creates the body from it
+
+  bool needsRebake; // sculpted while mid-build: re-enqueue after finalize
+                    // (main-thread only)
 } WorldChunk;
+
+// Sparse sculpt tile: `tileRes`^2 delta samples on the heightmap grid.
+// Tile (tx,tz) canonically owns global grid indices [t*tileRes,
+// (t+1)*tileRes - 1] per axis — chunk-edge samples belong to exactly one
+// tile, so writers and readers never disagree across borders.
+typedef struct SculptTile {
+  int tx, tz;
+  float *d; // tileRes * tileRes deltas (metres)
+} SculptTile;
 
 struct BrushChunkJobQueue; // fwd
 
@@ -71,6 +83,15 @@ struct BrushWorld {
 
   Material material; // shared across every chunk mesh
   bool ownsGroundTex;
+
+  // Sculpt overlay: sparse delta tiles on the heightmap grid. The worker
+  // composes them during chunk bakes while the main thread writes brush
+  // strokes — the mutex covers the tile array and its data.
+  SculptTile *tiles;
+  int tileCount, tileCap;
+  int tileRes;         // hmRes - 1 samples per tile side
+  float gridStep;      // metres between grid samples (chunkSize / (hmRes-1))
+  pthread_mutex_t sculptMutex;
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -103,6 +124,53 @@ static Vector3 WorldToRender(const BrushWorld *w, Vector3 wp) {
 
 static float Height(const BrushWorld *w, float wx, float wz) {
   return w->cfg.heightFn ? w->cfg.heightFn(w->cfg.heightUser, wx, wz) : 0.0f;
+}
+
+// ---- sculpt overlay (tile store; callers hold sculptMutex) -----------------
+
+static long FloorDivL(long a, long b) { // negative-safe floor division
+  long q = a / b, r = a % b;
+  return (r != 0 && ((r < 0) != (b < 0))) ? q - 1 : q;
+}
+
+static SculptTile *SculptFindTile(BrushWorld *w, int tx, int tz) {
+  for (int i = 0; i < w->tileCount; i++)
+    if (w->tiles[i].tx == tx && w->tiles[i].tz == tz) return &w->tiles[i];
+  return NULL;
+}
+
+static SculptTile *SculptGetTile(BrushWorld *w, int tx, int tz, bool create) {
+  SculptTile *t = SculptFindTile(w, tx, tz);
+  if (t != NULL || !create) return t;
+  if (w->tileCount == w->tileCap) {
+    w->tileCap = (w->tileCap == 0) ? 16 : w->tileCap * 2;
+    w->tiles = (SculptTile *)MemRealloc(w->tiles,
+                                        sizeof(SculptTile) * w->tileCap);
+  }
+  t = &w->tiles[w->tileCount++];
+  t->tx = tx;
+  t->tz = tz;
+  int n = w->tileRes * w->tileRes;
+  t->d = (float *)MemAlloc(sizeof(float) * n); // MemAlloc zeroes
+  return t;
+}
+
+// Delta at a global grid index (0 where no tile exists).
+static float SculptDeltaAt(BrushWorld *w, long gx, long gz) {
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  SculptTile *t = SculptFindTile(w, tx, tz);
+  if (t == NULL) return 0.0f;
+  int lx = (int)(gx - (long)tx * w->tileRes);
+  int lz = (int)(gz - (long)tz * w->tileRes);
+  return t->d[lz * w->tileRes + lx];
+}
+
+static float *SculptSampleRW(BrushWorld *w, long gx, long gz) {
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  SculptTile *t = SculptGetTile(w, tx, tz, true);
+  int lx = (int)(gx - (long)tx * w->tileRes);
+  int lz = (int)(gz - (long)tz * w->tileRes);
+  return &t->d[lz * w->tileRes + lx];
 }
 
 // ---- terrain build (worker thread; no GL) ---------------------------------
@@ -256,6 +324,21 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
       chunk->heightmap[z * tr + x] = Height(w, wx, wz);
     }
   }
+
+  // Compose the sculpt overlay: final = heightFn + delta. Sampled on the
+  // same grid the heightmap uses, so the mesh bake, collider, and gameplay
+  // queries all pick it up from this one place.
+  pthread_mutex_lock(&w->sculptMutex);
+  if (w->tileCount > 0) {
+    long baseGx = (long)chunk->coord.x * w->tileRes;
+    long baseGz = (long)chunk->coord.z * w->tileRes;
+    for (int z = 0; z < tr; z++)
+      for (int x = 0; x < tr; x++)
+        chunk->heightmap[z * tr + x] +=
+            SculptDeltaAt(w, baseGx + (x - 1), baseGz + (z - 1));
+  }
+  pthread_mutex_unlock(&w->sculptMutex);
+
   BuildMesh(w, chunk);
 
   // Cook the Jolt collider here on the worker: the BVH build is the
@@ -393,6 +476,12 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
   }
 
   atomic_store(&chunk->state, CHUNK_ACTIVE);
+
+  // Sculpted again while this bake was in flight: go straight back around.
+  if (chunk->needsRebake) {
+    chunk->needsRebake = false;
+    QueueEnqueue(w->jobs, chunk);
+  }
   return true;
 }
 
@@ -441,6 +530,9 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
   memset(w, 0, sizeof(*w));
   w->cfg = cfg;
   w->hmTexRes = cfg.hmRes + 2;
+  w->tileRes = cfg.hmRes - 1;
+  w->gridStep = cfg.chunkSize / (float)(cfg.hmRes - 1);
+  pthread_mutex_init(&w->sculptMutex, NULL);
   w->unloadRadius = cfg.loadRadius + 1;
   w->origin = (BrushChunkCoord){0, 0};
   w->center = ChunkOf(w, spawn.x, spawn.z);
@@ -532,8 +624,11 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
 
   for (int i = 0; i < w->chunkCount; i++) {
     WorldChunk *chunk = &w->chunks[i];
-    if (atomic_load(&chunk->state) != CHUNK_ACTIVE || !chunk->meshUploaded)
-      continue;
+    // Draw ACTIVE chunks, and — during a sculpt rebake — chunks that are
+    // back in the build pipeline but still hold their previous GPU mesh
+    // (terrain must never blink out mid-stroke).
+    ChunkState st = atomic_load(&chunk->state);
+    if (st == CHUNK_EMPTY || !chunk->meshUploaded) continue;
     Vector3 o = ChunkOrigin(w, chunk->coord);
     Vector3 ro = WorldToRender(w, o);
     Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
@@ -555,8 +650,12 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
 
 float BrushWorldGroundHeight(BrushWorld *w, float wx, float wz) {
   WorldChunk *c = ChunkResident(w, ChunkOf(w, wx, wz));
-  if (!c || atomic_load(&c->state) != CHUNK_ACTIVE || !c->heightmap)
-    return 0.0f;
+  if (!c || !c->heightmap) return 0.0f;
+  // ACTIVE, or mid-rebake with a previous bake to read (meshUploaded). The
+  // worker may be rewriting the heightmap during a rebake — a query can see
+  // a transiently mixed surface for a millisecond; fine for editing flows.
+  ChunkState s = atomic_load(&c->state);
+  if (s != CHUNK_ACTIVE && !c->meshUploaded) return 0.0f;
   return SampleHeightmap(w, c, wx, wz);
 }
 
@@ -580,10 +679,215 @@ void BrushWorldDestroy(BrushWorld *w) {
     DestroyChunkBuffers(&w->chunks[i]);
   }
   if (w->chunks) MemFree(w->chunks);
+  for (int i = 0; i < w->tileCount; i++) MemFree(w->tiles[i].d);
+  if (w->tiles) MemFree(w->tiles);
+  pthread_mutex_destroy(&w->sculptMutex);
   // The material's diffuse texture is game-owned; don't unload it. Detach the
   // shared shader so UnloadMaterial doesn't free the engine's lit shader.
   w->material.shader = (Shader){0};
   w->material.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
   UnloadMaterial(w->material);
   MemFree(w);
+}
+
+// ---- terrain sculpting (see b_world.h) --------------------------------------
+
+// Mark every resident chunk whose SAMPLED area (incl. apron) intersects the
+// world AABB for rebake. ACTIVE chunks re-enter the build queue immediately;
+// chunks already mid-build get flagged and go around again after finalize.
+static void SculptMarkDirty(BrushWorld *w, float minX, float minZ, float maxX,
+                            float maxZ) {
+  float pad = w->gridStep * 2.0f; // apron reach
+  for (int i = 0; i < w->chunkCount; i++) {
+    WorldChunk *c = &w->chunks[i];
+    ChunkState s = atomic_load(&c->state);
+    if (s == CHUNK_EMPTY) continue;
+    Vector3 o = ChunkOrigin(w, c->coord);
+    if (o.x - pad > maxX || o.x + w->cfg.chunkSize + pad < minX ||
+        o.z - pad > maxZ || o.z + w->cfg.chunkSize + pad < minZ)
+      continue;
+    if (s == CHUNK_ACTIVE)
+      QueueEnqueue(w->jobs, c);
+    else
+      c->needsRebake = true;
+  }
+}
+
+void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
+                      float radius, float strength, float targetY) {
+  if (radius <= 0.0f) return;
+  float step = w->gridStep;
+  long g0x = (long)floorf((center.x - radius) / step);
+  long g1x = (long)ceilf((center.x + radius) / step);
+  long g0z = (long)floorf((center.z - radius) / step);
+  long g1z = (long)ceilf((center.z + radius) / step);
+
+  pthread_mutex_lock(&w->sculptMutex);
+  for (long gz = g0z; gz <= g1z; gz++) {
+    for (long gx = g0x; gx <= g1x; gx++) {
+      float wx = (float)gx * step, wz = (float)gz * step;
+      float dx = wx - center.x, dz = wz - center.z;
+      float dist = sqrtf(dx * dx + dz * dz);
+      if (dist >= radius) continue;
+      float t = dist / radius;
+      float fall = 1.0f - t * t * (3.0f - 2.0f * t); // smoothstep falloff
+
+      float *s = SculptSampleRW(w, gx, gz);
+      switch (op) {
+      case BRUSH_SCULPT_ADD:
+        *s += strength * fall;
+        break;
+      case BRUSH_SCULPT_SMOOTH: {
+        // Relax the TOTAL height toward its 4-neighbour average; the delta
+        // absorbs the difference (base heights come from heightFn, which is
+        // reentrant by contract).
+        float base = Height(w, wx, wz);
+        float total = base + *s;
+        float sum = 0.0f;
+        sum += Height(w, wx - step, wz) + SculptDeltaAt(w, gx - 1, gz);
+        sum += Height(w, wx + step, wz) + SculptDeltaAt(w, gx + 1, gz);
+        sum += Height(w, wx, wz - step) + SculptDeltaAt(w, gx, gz - 1);
+        sum += Height(w, wx, wz + step) + SculptDeltaAt(w, gx, gz + 1);
+        float target = (sum + total) / 5.0f;
+        float k = strength * fall;
+        if (k > 1.0f) k = 1.0f;
+        *s += (target - total) * k;
+        break;
+      }
+      case BRUSH_SCULPT_FLATTEN: {
+        float base = Height(w, wx, wz);
+        float k = strength * fall;
+        if (k > 1.0f) k = 1.0f;
+        *s += ((targetY - base) - *s) * k;
+        break;
+      }
+      }
+    }
+  }
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  SculptMarkDirty(w, center.x - radius, center.z - radius, center.x + radius,
+                  center.z + radius);
+}
+
+bool BrushWorldSculptAny(const BrushWorld *w) { return w->tileCount > 0; }
+
+// Blob layout (also the .terrain file format):
+//   u32 magic 'BSC1' | i32 tileRes | i32 count
+//   i32 rangeT0x rangeT0z rangeT1x rangeT1z   (tile range the blob covers)
+//   count x { i32 tx, i32 tz, float[tileRes^2] }
+#define SCULPT_MAGIC 0x31435342u // "BSC1"
+
+static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
+                                      int t1x, int t1z, int *outSize) {
+  int n = w->tileRes * w->tileRes;
+  int count = 0;
+  for (int i = 0; i < w->tileCount; i++) {
+    SculptTile *t = &w->tiles[i];
+    if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) count++;
+  }
+  int size = (int)(sizeof(unsigned int) + 6 * sizeof(int) +
+                   (size_t)count * (2 * sizeof(int) + n * sizeof(float)));
+  unsigned char *blob = (unsigned char *)MemAlloc((unsigned int)size);
+  unsigned char *p = blob;
+  *(unsigned int *)p = SCULPT_MAGIC; p += 4;
+  *(int *)p = w->tileRes; p += 4;
+  *(int *)p = count; p += 4;
+  *(int *)p = t0x; p += 4;
+  *(int *)p = t0z; p += 4;
+  *(int *)p = t1x; p += 4;
+  *(int *)p = t1z; p += 4;
+  for (int i = 0; i < w->tileCount; i++) {
+    SculptTile *t = &w->tiles[i];
+    if (t->tx < t0x || t->tx > t1x || t->tz < t0z || t->tz > t1z) continue;
+    *(int *)p = t->tx; p += 4;
+    *(int *)p = t->tz; p += 4;
+    memcpy(p, t->d, sizeof(float) * (size_t)n); p += sizeof(float) * (size_t)n;
+  }
+  if (outSize) *outSize = size;
+  return blob;
+}
+
+unsigned char *BrushWorldSculptSnapshot(BrushWorld *w, Vector2 minXZ,
+                                        Vector2 maxXZ, int *outSize) {
+  float tileWorld = w->gridStep * (float)w->tileRes;
+  int t0x = (int)floorf(minXZ.x / tileWorld), t1x = (int)floorf(maxXZ.x / tileWorld);
+  int t0z = (int)floorf(minXZ.y / tileWorld), t1z = (int)floorf(maxXZ.y / tileWorld);
+  pthread_mutex_lock(&w->sculptMutex);
+  unsigned char *blob = SculptSerialize(w, t0x, t0z, t1x, t1z, outSize);
+  pthread_mutex_unlock(&w->sculptMutex);
+  return blob;
+}
+
+void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
+                             int size) {
+  if (blob == NULL || size < 28) return;
+  const unsigned char *p = blob;
+  if (*(const unsigned int *)p != SCULPT_MAGIC) return;
+  p += 4;
+  int tileRes = *(const int *)p; p += 4;
+  int count = *(const int *)p; p += 4;
+  int t0x = *(const int *)p; p += 4;
+  int t0z = *(const int *)p; p += 4;
+  int t1x = *(const int *)p; p += 4;
+  int t1z = *(const int *)p; p += 4;
+  if (tileRes != w->tileRes) {
+    TraceLog(LOG_WARNING, "BRUSH sculpt: blob tileRes %d != world %d", tileRes,
+             w->tileRes);
+    return;
+  }
+  int n = w->tileRes * w->tileRes;
+
+  pthread_mutex_lock(&w->sculptMutex);
+  // Tiles created after the snapshot (inside its range) must return to zero.
+  for (int i = 0; i < w->tileCount; i++) {
+    SculptTile *t = &w->tiles[i];
+    if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z)
+      memset(t->d, 0, sizeof(float) * (size_t)n);
+  }
+  for (int i = 0; i < count; i++) {
+    int tx = *(const int *)p; p += 4;
+    int tz = *(const int *)p; p += 4;
+    SculptTile *t = SculptGetTile(w, tx, tz, true);
+    memcpy(t->d, p, sizeof(float) * (size_t)n);
+    p += sizeof(float) * (size_t)n;
+  }
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  float tileWorld = w->gridStep * (float)w->tileRes;
+  SculptMarkDirty(w, (float)t0x * tileWorld, (float)t0z * tileWorld,
+                  (float)(t1x + 1) * tileWorld, (float)(t1z + 1) * tileWorld);
+}
+
+bool BrushWorldSculptSave(BrushWorld *w, const char *path) {
+  pthread_mutex_lock(&w->sculptMutex);
+  int t0x = 0, t0z = 0, t1x = -1, t1z = -1; // empty range when no tiles
+  for (int i = 0; i < w->tileCount; i++) {
+    SculptTile *t = &w->tiles[i];
+    if (i == 0) { t0x = t1x = t->tx; t0z = t1z = t->tz; }
+    if (t->tx < t0x) t0x = t->tx;
+    if (t->tx > t1x) t1x = t->tx;
+    if (t->tz < t0z) t0z = t->tz;
+    if (t->tz > t1z) t1z = t->tz;
+  }
+  int size = 0;
+  unsigned char *blob = SculptSerialize(w, t0x, t0z, t1x, t1z, &size);
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  bool ok = SaveFileData(path, blob, size);
+  MemFree(blob);
+  if (ok)
+    TraceLog(LOG_INFO, "BRUSH sculpt: saved %s (%d tiles)", path,
+             w->tileCount);
+  return ok;
+}
+
+bool BrushWorldSculptLoad(BrushWorld *w, const char *path) {
+  int size = 0;
+  unsigned char *blob = LoadFileData(path, &size);
+  if (blob == NULL) return false;
+  BrushWorldSculptRestore(w, blob, size);
+  UnloadFileData(blob);
+  TraceLog(LOG_INFO, "BRUSH sculpt: loaded %s (%d tiles)", path, w->tileCount);
+  return true;
 }

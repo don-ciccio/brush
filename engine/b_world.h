@@ -103,6 +103,48 @@ float BrushWorldGroundHeight(BrushWorld *w, float wx, float wz);
 // Which chunk a world position falls in (floor division, negative-safe).
 BrushChunkCoord BrushWorldChunkAt(const BrushWorld *w, Vector3 worldPos);
 
+// --- Terrain sculpting (the namesake feature) --------------------------------
+// A sparse DELTA overlay on top of heightFn: final height = heightFn + delta.
+// Deltas live in tiles allocated on first touch (untouched world costs
+// nothing — Terrain3D's region idea), sampled on the heightmap grid, and
+// composed during the chunk bake — so the mesh, the Jolt collider, and
+// gameplay ground queries all update together through the normal
+// dirty-chunk rebake. Sculpting never re-calls heightFn for painted areas.
+//
+// Ops (one brush core, Terrain3D's operation model):
+//   ADD      delta += strength * falloff      (negative strength lowers)
+//   SMOOTH   total height relaxes toward its neighbourhood average;
+//            strength 0..1 = blend per application
+//   FLATTEN  total height blends toward targetY; strength 0..1
+typedef enum {
+  BRUSH_SCULPT_ADD = 0,
+  BRUSH_SCULPT_SMOOTH,
+  BRUSH_SCULPT_FLATTEN,
+} BrushSculptOp;
+
+// Apply one brush dab at `center` (world XZ; radius in metres, smoothstep
+// falloff). Touched chunks are marked for rebake automatically; they keep
+// drawing their old mesh until the worker delivers the new one.
+void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
+                      float radius, float strength, float targetY);
+
+// True if any sculpt data exists (used to decide whether to save).
+bool BrushWorldSculptAny(const BrushWorld *w);
+
+// Persist / restore the whole overlay (binary; safe to call with no data —
+// Load with a missing file returns false and leaves the overlay empty).
+bool BrushWorldSculptSave(BrushWorld *w, const char *path);
+bool BrushWorldSculptLoad(BrushWorld *w, const char *path);
+
+// Undo support: snapshot every tile intersecting the world-XZ AABB into a
+// malloc'd blob (caller frees; NULL if none). Restore overwrites those tiles
+// from the blob and marks the area dirty. Snapshot at stroke start, push on
+// an undo stack, Restore to undo.
+unsigned char *BrushWorldSculptSnapshot(BrushWorld *w, Vector2 minXZ,
+                                        Vector2 maxXZ, int *outSize);
+void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
+                             int size);
+
 #ifdef __cplusplus
 }
 #endif
