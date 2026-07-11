@@ -633,6 +633,26 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
       ApplySceneColliders(s);
       BrushSceneApplyRenderSettings(&s->scene);
     }
+    // Texture import cache: land background re-imports (edited source
+    // images) and refresh the material table's texture handles.
+    if (BrushAssetsUpdate()) BrushSceneResolveMaterials(&s->scene);
+
+    // Harness: BRUSH_TEST_REIMPORT=<texture path> edits that texture's
+    // .import sidecar mid-run — the watch must queue a background cook and
+    // the swap must land ("ASSETS: re-imported" in the log). Deterministic
+    // (no external process racing startup/shutdown).
+    static int reimportFrame = 0; // counts 30-frame polls, not frames
+    const char *tr = getenv("BRUSH_TEST_REIMPORT");
+    if (tr != NULL && ++reimportFrame == 8) {
+      char imp[512];
+      snprintf(imp, sizeof(imp), "%s.import", tr);
+      FILE *f = fopen(imp, "a");
+      if (f != NULL) {
+        fprintf(f, "# touched by BRUSH_TEST_REIMPORT\n");
+        fclose(f);
+        TraceLog(LOG_INFO, "SANDBOX: test-edited %s", imp);
+      }
+    }
   }
 
   // Day/night clock drives the frame's whole lighting rig (sun/moon light,

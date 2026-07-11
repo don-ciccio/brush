@@ -967,6 +967,12 @@ int main(int argc, char **argv) {
             BrushRenderResize(GetScreenWidth(), GetScreenHeight());
 
         // --- Scene update -------------------------------------------------
+        // Texture import cache: land background re-imports of edited
+        // source images and refresh the material table's handles.
+        if (BrushAssetsUpdate()) {
+            BrushSceneResolveMaterials(&g_scene);
+            AddEditorLog("Re-imported changed textures");
+        }
         BrushTodUpdate(&g_tod, dt);
         BrushRenderApplyTimeOfDay(&g_tod);
         BrushWorldUpdate(g_world, g_camera.cam.position);

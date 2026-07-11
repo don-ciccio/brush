@@ -220,11 +220,19 @@ right; two hardening details added (alignment, hashed lookup):
 
 | Phase | Deliverable | Unblocks |
 |---|---|---|
-| **0** | Engine/project path split (BrushEnginePath + chdir), project.def, Project Manager screen, templates (Empty, Gym), player `--project` | everything below; "brush as a product" |
-| **1** | .import sidecars, `.brush/imported/` cache, Tier-0 .ctex (mips, max_size), invalidation, worker cooking, editor re-import on change | fast loads, VRAM safety, drag-in textures |
+| **0** | ~~Engine/project path split (BrushEnginePath + chdir), project.def, Project Manager screen, templates (Empty, Gym), player `--project`~~ DONE | everything below; "brush as a product" |
+| **1** | ~~.import sidecars, `.brush/imported/` cache, Tier-0 .ctex (mips, max_size), invalidation, worker cooking, live re-import on change~~ DONE | fast loads, VRAM safety, drag-in textures |
 | **2** | stb_dxt BC1/BC3 tier, normal-map profile, import settings UI in the editor (per-texture panel) | shipping-quality VRAM budgets |
 | **3** | packager tool + pak mount + release player build | distributable games |
 
-Phase 0 is the current work item. Each phase lands usable on its own; no
-phase requires touching game-facing APIs (`BrushAssetsTexture(path)` is
-already the stable seam all of this hides behind).
+Each phase lands usable on its own; no phase requires touching game-facing
+APIs (`BrushAssetsTexture(path)` is already the stable seam all of this
+hides behind).
+
+Phase 1 implementation notes (2026-07): cooking lives entirely inside
+b_assets — first loads cook synchronously (a cache miss must return a
+texture), edits re-cook on the worker and `BrushAssetsUpdate()` lands the
+swap on the main thread; callers re-resolve their Texture2D copies when it
+returns true. `BRUSH_TEST_REIMPORT=<texture>` in the player edits that
+texture's sidecar mid-run to exercise the whole watch → cook → swap chain
+deterministically.
