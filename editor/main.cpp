@@ -687,13 +687,15 @@ int main() {
 
         // === Hierarchy =======================================================
         ImGui::Begin("Hierarchy");
-        {
+        if (ImGui::CollapsingHeader("Scene", ImGuiTreeNodeFlags_DefaultOpen)) {
             bool sel = (g_selectedType == ENTITY_SPAWN);
             if (ImGui::Selectable("  Spawn Point", sel)) {
                 g_selectedType = ENTITY_SPAWN; g_selectedIdx = 0;
             }
         }
-        ImGui::SeparatorText("Blocks");
+        char blocksHdr[32];
+        snprintf(blocksHdr, sizeof(blocksHdr), "Blocks (%d)###blocks", g_scene.blockCount);
+        if (ImGui::CollapsingHeader(blocksHdr, ImGuiTreeNodeFlags_DefaultOpen))
         for (int i = 0; i < g_scene.blockCount; i++) {
             char label[96];
             BrushSceneBlock *b = &g_scene.blocks[i];
@@ -709,7 +711,9 @@ int main() {
                 ImGui::EndPopup();
             }
         }
-        ImGui::SeparatorText("Lights");
+        char lightsHdr[32];
+        snprintf(lightsHdr, sizeof(lightsHdr), "Lights (%d)###lights", g_scene.lightCount);
+        if (ImGui::CollapsingHeader(lightsHdr, ImGuiTreeNodeFlags_DefaultOpen))
         for (int i = 0; i < g_scene.lightCount; i++) {
             char label[64];
             snprintf(label, sizeof(label), "  Light %d%s##l%d", i,
