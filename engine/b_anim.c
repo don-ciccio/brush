@@ -631,8 +631,14 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
 
   // Pelvis follows the LOWEST foot (never rises above the animation), and
   // the landing dip rides on top; the IK below keeps the feet planted, so
-  // the dip is what bends the knees.
-  float pelvis = fminf(0.0f, fminf(a->footDeltaL, a->footDeltaR));
+  // the dip is what bends the knees. At speed the follow is scaled down:
+  // chasing the trailing foot a full riser down every stride reads as
+  // bouncing, and a moving body naturally rides higher between treads —
+  // full authority is for standing/slow walking on uneven ground.
+  float pelvisAuth =
+      1.0f - 0.5f * Clamp(a->speedSmooth / a->jogSpeed, 0.0f, 1.0f);
+  float pelvis =
+      fminf(0.0f, fminf(a->footDeltaL, a->footDeltaR)) * pelvisAuth;
   pelvis = fmaxf(pelvis, -0.30f);
   a->pelvisOffset = pelvis - landDip;
 

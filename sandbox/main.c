@@ -57,6 +57,12 @@ typedef struct Sandbox {
   float mantleTimer, mantleDur; // seconds remaining / total (0 = not mantling)
   Vector3 mantleFrom, mantleTo;
 
+  // Stair-step render smoothing: Jolt teleports the capsule a full riser
+  // within one fixed step; this offset absorbs the pop and decays so the
+  // visual body glides while foot IK keeps the feet on the treads.
+  float stepSmooth, prevStepSmooth;
+  bool wasGrounded;
+
   BrushWorld *world; // chunk-streamed terrain (flat by default)
   Texture2D groundTex;
 
@@ -293,6 +299,7 @@ static void SandboxFixedUpdate(void *user, float dt) {
 
   s->prevPos = s->pos;
   s->prevYaw = s->yaw;
+  s->prevStepSmooth = s->stepSmooth;
 
   // Camera-relative move direction from the input actions.
   float inX = BrushInputAxis(BRUSH_AXIS_MOVE_X);
@@ -314,8 +321,10 @@ static void SandboxFixedUpdate(void *user, float dt) {
   if (getenv("BRUSH_POS_DBG") != NULL) {
     static int pf = 0;
     if (++pf % 30 == 0)
-      TraceLog(LOG_INFO, "POSDBG t=%.1f pos=(%+.2f %+.2f %+.2f) grounded=%d",
-               pf / 60.0f, s->pos.x, s->pos.y, s->pos.z, s->grounded);
+      TraceLog(LOG_INFO,
+               "POSDBG t=%.1f pos=(%+.2f %+.2f %+.2f) grounded=%d step=%+.3f",
+               pf / 60.0f, s->pos.x, s->pos.y, s->pos.z, s->grounded,
+               s->stepSmooth);
   }
 
   // Screenshot harness: BRUSH_AUTO_MOVE=walk|jog|sprint holds forward input
@@ -346,6 +355,7 @@ static void SandboxFixedUpdate(void *user, float dt) {
     s->grounded = true;
     s->airTime = 0.0f;
     s->ikWeight = 0.0f;
+    s->stepSmooth = 0.0f; // the scripted ride is already smooth
     s->jumpQueued = false;
     return;
   }
@@ -437,6 +447,23 @@ static void SandboxFixedUpdate(void *user, float dt) {
   if (s->grounded && s->velY < 0.0f) s->velY = 0.0f;
   s->vel.y = s->body.velocity.y;
 
+  // Stair-step smoothing: on stairs the capsule's Y is a sawtooth — Jolt's
+  // stair-walk spreads each riser over a few steps going up, and stick-to-
+  // floor drops a whole riser in ONE step going down — and following it
+  // exactly reads as bouncing. Low-pass grounded Y motion into a decaying
+  // render offset, but ONLY while the ground under the capsule is FLAT
+  // (that's the discriminator: vertical motion over flat ground = stairs;
+  // slopes/ramps report a tilted normal and must track exactly — smoothing
+  // them makes the body sink on ascents and float on descents). Landing
+  // edges are skipped (grounded->grounded only); airborne kills the offset
+  // fast — the capsule owns big air moves.
+  float stepDy = s->pos.y - s->prevPos.y;
+  if (s->grounded && s->wasGrounded && s->body.groundNormal.y > 0.98f)
+    s->stepSmooth -= stepDy;
+  s->stepSmooth = fminf(fmaxf(s->stepSmooth, -0.30f), 0.30f);
+  s->stepSmooth *= expf((s->grounded ? -8.0f : -30.0f) * dt);
+  s->wasGrounded = s->grounded;
+
   // Debounced airborne: Jolt's ground state flickers for a few frames while
   // a landing resolves; raw flag -> animator re-triggers jump each flicker.
   s->airTime = s->grounded ? 0.0f : s->airTime + dt;
@@ -499,7 +526,12 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   }
 
   // Interpolate sim state for rendering (fixed-step stutter stays invisible).
+  // stepSmooth rides on Y: everything downstream (draw transform, camera
+  // focus, foot-IK probe origin) sees the glided body, so the feet re-plant
+  // on the real treads via IK while the body eases between them.
   s->renderPos = Vector3Lerp(s->prevPos, s->pos, alpha);
+  s->renderPos.y +=
+      s->prevStepSmooth + (s->stepSmooth - s->prevStepSmooth) * alpha;
   float yawDiff = s->yaw - s->prevYaw;
   while (yawDiff > PI) yawDiff -= 2.0f * PI;
   while (yawDiff < -PI) yawDiff += 2.0f * PI;
