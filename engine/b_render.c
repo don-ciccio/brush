@@ -26,6 +26,7 @@ typedef struct BrushDrawCmd {
 } BrushDrawCmd;
 
 typedef struct BrushRenderState {
+  float renderScale; // kept for window-resize re-init
   Shader lit;
   int locSunDir;
   int locSunColor;
@@ -106,6 +107,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.layerView = BRUSH_VIEW_FINAL;
   BrushSkyInit();
 
+  g_r.renderScale = renderScale;
   BrushPostInit(&g_r.post, width, height, renderScale);
   g_r.postEnabled = (getenv("BRUSH_NO_POST") == NULL);
 
@@ -406,6 +408,15 @@ struct BrushPost *BrushRenderGetPost(void) {
 
 void BrushRenderSetEditorMode(bool enabled) {
   g_r.editorMode = enabled;
+}
+
+void BrushRenderResize(int width, int height) {
+  if (width <= 0 || height <= 0) return;
+  if (width == g_r.post.outW && height == g_r.post.outH) return;
+  // The post pipeline owns every screen-sized target; rebuild it wholesale.
+  // Cheap enough for interactive window resizing (a few FBOs).
+  BrushPostUnload(&g_r.post);
+  BrushPostInit(&g_r.post, width, height, g_r.renderScale);
 }
 
 void BrushRenderCycleLayerView(void) {

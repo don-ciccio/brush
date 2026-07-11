@@ -79,6 +79,10 @@ struct BrushPost *BrushRenderGetPost(void);
 // Set whether the renderer is in editor mode (disables final screen presentation in post-processing).
 void BrushRenderSetEditorMode(bool enabled);
 
+// Recreate the post pipeline's targets for a new output size (call when the
+// window resizes; keeps the render scale chosen at init).
+void BrushRenderResize(int width, int height);
+
 // The engine's forward lit shader. Assign it to your models' materials:
 //   model.materials[i].shader = BrushGetLitShader();
 Shader BrushGetLitShader(void);

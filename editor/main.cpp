@@ -162,8 +162,6 @@ static bool g_surfaceSnap = true;
 static bool g_quit = false;
 static char g_scenePath[512] = "assets/gym.def";
 
-static const int kRenderW = 1600, kRenderH = 900;
-
 // --- In-editor log ----------------------------------------------------------
 #define MAX_LOG_LINES 128
 static char g_logLines[MAX_LOG_LINES][256];
@@ -335,6 +333,11 @@ static Color Float3ToColor(const float v[3]) {
 // ---------------------------------------------------------------------------
 static void ApplyEditorStyle() {
     ImGuiIO &io = ImGui::GetIO();
+    // UI font at 17 logical points, rasterized at the monitor's DPI scale so
+    // it stays crisp on retina. FontGlobalScale brings the oversized atlas
+    // back to logical size. (Fonts only take effect because this runs before
+    // rlImGuiEndInitImGui, which bakes the atlas.)
+    float dpi = fmaxf(GetWindowScaleDPI().y, 1.0f);
     const char *fontCandidates[] = {
         "/System/Library/Fonts/Supplemental/Verdana.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -342,12 +345,13 @@ static void ApplyEditorStyle() {
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     };
     for (const char *path : fontCandidates) {
-        if (FileExists(path)) {
-            // Build at 2x and draw at 0.5 scale: crisp on retina backbuffers.
-            ImFont *f = io.Fonts->AddFontFromFileTTF(path, 30.0f);
-            if (f) { io.FontGlobalScale = 0.5f; }
-            break;
+        if (!FileExists(path)) continue;
+        ImFont *f = io.Fonts->AddFontFromFileTTF(path, 17.0f * dpi);
+        if (f) {
+            io.FontDefault = f;
+            io.FontGlobalScale = 1.0f / dpi;
         }
+        break;
     }
 
     ImGuiStyle &s = ImGui::GetStyle();
@@ -436,12 +440,13 @@ static bool ToolButton(const char *label, bool active) {
 // ---------------------------------------------------------------------------
 int main() {
     BrushConsoleInit();
-    SetConfigFlags(FLAG_VSYNC_HINT);
-    InitWindow(kRenderW, kRenderH, "brush editor");
+    SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI);
+    InitWindow(1600, 900, "brush editor");
+    SetWindowState(FLAG_WINDOW_MAXIMIZED); // fill whatever screen this is
     SetTargetFPS(60);
     SetExitKey(KEY_NULL); // ESC deselects, never quits
 
-    BrushRenderInit(kRenderW, kRenderH, 1.0f);
+    BrushRenderInit(GetScreenWidth(), GetScreenHeight(), 1.0f);
     BrushRenderSetEditorMode(true);
     BrushPhysicsInit(&g_phys);
 
@@ -481,16 +486,22 @@ int main() {
     RebuildAllColliders();
     g_camera.Init();
 
-    rlImGuiSetup(true);
+    rlImGuiBeginInitImGui();
+    ImGui::StyleColorsDark();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     // Own layout file (imgui.ini may hold layouts from older window names).
     ImGui::GetIO().IniFilename = "editor_layout.ini";
-    ApplyEditorStyle();
+    ApplyEditorStyle(); // loads the UI font — must run before EndInitImGui
+    rlImGuiEndInitImGui(); // bakes the font atlas
+
 
     bool viewportHovered = false;
 
     while (!g_quit && !WindowShouldClose()) {
         float dt = GetFrameTime();
+
+        if (IsWindowResized())
+            BrushRenderResize(GetScreenWidth(), GetScreenHeight());
 
         // --- Scene update -------------------------------------------------
         BrushTodUpdate(&g_tod, dt);
@@ -530,7 +541,7 @@ int main() {
             BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &g_unitCube, mk, (Color){255, 190, 90, 255});
         }
 
-        Matrix spawnXf = MatrixTranslate(g_scene.spawn.x, g_scene.spawn.y + 0.9f, g_scene.spawn.z);
+        Matrix spawnXf = MatrixTranslate(g_scene.spawn.x, g_scene.spawn.y, g_scene.spawn.z);
         BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &g_spawnMarker, spawnXf, (Color){0, 255, 120, 255});
 
         // --- Render -------------------------------------------------------
@@ -629,9 +640,13 @@ int main() {
                 ImGui::EndMenu();
             }
 
-            // Right side: play control + dirty state.
-            float rightEdge = ImGui::GetWindowWidth();
-            ImGui::SetCursorPosX(rightEdge - 240);
+            // Right side: play control + dirty state (measured, not guessed —
+            // hardcoded offsets clip when the font scale changes).
+            float clusterW = ImGui::CalcTextSize("  Stop  ").x +
+                             ImGui::CalcTextSize("* unsaved").x +
+                             ImGui::GetStyle().ItemSpacing.x * 3 +
+                             ImGui::GetStyle().FramePadding.x * 4;
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - clusterW - 8);
             bool running = GameRunning();
             if (running) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 1.0f));
@@ -792,7 +807,7 @@ int main() {
             // panel WITHOUT stretching so the gizmo, picking rays, and image
             // all share one geometry. (A stretched image can never align with
             // a gizmo drawn at a different aspect.)
-            float renderAspect = (float)kRenderW / (float)kRenderH;
+            float renderAspect = (float)pp->outW / (float)pp->outH;
             ImVec2 imgSize = panelSize;
             if (panelSize.x / panelSize.y > renderAspect)
                 imgSize.x = panelSize.y * renderAspect;
