@@ -22,6 +22,7 @@ extern "C" {
 
 #include "b_anim.h"
 #include "b_app.h"
+#include "b_assets.h"
 #include "b_camera.h"
 #include "b_character.h"
 #include "b_console.h"

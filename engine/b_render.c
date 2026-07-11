@@ -23,6 +23,8 @@ typedef struct BrushDrawCmd {
   Matrix transform;
   Color tint;
   float sortKey; // camera distance, used for transparent back-to-front
+  BrushMaterialProps props; // per-draw material overrides (hasProps gates)
+  bool hasProps;
 } BrushDrawCmd;
 
 typedef struct BrushRenderState {
@@ -34,6 +36,8 @@ typedef struct BrushRenderState {
   int locLayerView;
   int locSpecStrength;
   int locLinearize;
+  int locTriplanar, locTexScale, locHasNormalMap, locNormalDepth;
+  float specDefault; // uSpecStrength for draws without material props
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
   int locShadowMap[BRUSH_SHADOW_CASCADES];
@@ -78,6 +82,13 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerView = GetShaderLocation(g_r.lit, "uLayerView");
   g_r.locSpecStrength = GetShaderLocation(g_r.lit, "uSpecStrength");
   g_r.locLinearize = GetShaderLocation(g_r.lit, "uLinearize");
+  g_r.locTriplanar = GetShaderLocation(g_r.lit, "uTriplanar");
+  g_r.locTexScale = GetShaderLocation(g_r.lit, "uTexScale");
+  g_r.locHasNormalMap = GetShaderLocation(g_r.lit, "uHasNormalMap");
+  g_r.locNormalDepth = GetShaderLocation(g_r.lit, "uNormalDepth");
+  // raylib binds MATERIAL_MAP_NORMAL to whatever loc this maps to; without
+  // it, per-draw normal maps would never reach the shader.
+  g_r.lit.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(g_r.lit, "texture2");
   g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
   g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
   g_r.locPointRadius = GetShaderLocation(g_r.lit, "uPointRadius");
@@ -100,8 +111,9 @@ void BrushRenderInit(int width, int height, float renderScale) {
               (Vector3){0.36f, 0.38f, 0.42f});
   g_r.moonDir = (Vector3){0.0f, -1.0f, 0.0f};
 
-  float spec = 0.35f;
-  SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
+  g_r.specDefault = 0.35f;
+  SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.specDefault,
+                 SHADER_UNIFORM_FLOAT);
 
   g_r.skyEnabled = true;
   g_r.layerView = BRUSH_VIEW_FINAL;
@@ -165,11 +177,20 @@ void BrushSetSkyEnabled(bool enabled) { g_r.skyEnabled = enabled; }
 
 void BrushRenderSubmit(BrushLayer layer, Model *model, Matrix transform,
                        Color tint) {
+  BrushRenderSubmitEx(layer, model, transform, tint, NULL);
+}
+
+void BrushRenderSubmitEx(BrushLayer layer, Model *model, Matrix transform,
+                         Color tint, const BrushMaterialProps *props) {
   if (layer < 0 || layer >= BRUSH_LAYER_COUNT) return;
   int *count = &g_r.cmdCount[layer];
   if (*count >= BRUSH_MAX_DRAWS_PER_LAYER) return;
-  g_r.cmds[layer][*count] =
-      (BrushDrawCmd){.model = model, .transform = transform, .tint = tint};
+  BrushDrawCmd *cmd = &g_r.cmds[layer][*count];
+  *cmd = (BrushDrawCmd){.model = model, .transform = transform, .tint = tint};
+  if (props != NULL) {
+    cmd->props = *props;
+    cmd->hasProps = true;
+  }
   (*count)++;
 }
 
@@ -231,18 +252,50 @@ void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
   (*count)++;
 }
 
+// Per-draw material uniforms. Every lit draw passes through here so a
+// textured block never leaks its triplanar/normal-map state into the plain
+// draw that follows it.
+static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
+  const BrushMaterialProps *p = cmd->hasProps ? &cmd->props : NULL;
+  float triplanar = (p && p->triplanar) ? 1.0f : 0.0f;
+  float texScale = (p && p->texScale > 0.001f) ? p->texScale : 1.0f;
+  float hasNormal = (p && p->normal.id != 0) ? 1.0f : 0.0f;
+  float normalDepth = p ? p->normalDepth : 1.0f;
+  float spec = (p && p->specStrength >= 0.0f) ? p->specStrength
+                                              : g_r.specDefault;
+  SetShaderValue(g_r.lit, g_r.locTriplanar, &triplanar, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locTexScale, &texScale, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNormal,
+                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locNormalDepth, &normalDepth,
+                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
+}
+
 // Draw a submitted command: the submitted matrix becomes the model transform
 // for exactly this draw (the model's own transform is saved/restored). Mesh
-// commands (model == NULL) draw a raw mesh+material directly.
+// commands (model == NULL) draw a raw mesh+material directly. Material props
+// temporarily retarget the model's texture maps (shared unit-cube pattern).
 static void DrawCmd(const BrushDrawCmd *cmd) {
+  ApplyMaterialProps(cmd);
   if (cmd->model == NULL) {
     DrawMesh(cmd->mesh, *cmd->material, cmd->transform);
     return;
+  }
+  Material *mat = &cmd->model->materials[0];
+  Texture2D savedAlbedo = mat->maps[MATERIAL_MAP_DIFFUSE].texture;
+  Texture2D savedNormal = mat->maps[MATERIAL_MAP_NORMAL].texture;
+  if (cmd->hasProps) {
+    if (cmd->props.albedo.id != 0)
+      mat->maps[MATERIAL_MAP_DIFFUSE].texture = cmd->props.albedo;
+    mat->maps[MATERIAL_MAP_NORMAL].texture = cmd->props.normal;
   }
   Matrix saved = cmd->model->transform;
   cmd->model->transform = cmd->transform;
   DrawModel(*cmd->model, (Vector3){0, 0, 0}, 1.0f, cmd->tint);
   cmd->model->transform = saved;
+  mat->maps[MATERIAL_MAP_DIFFUSE].texture = savedAlbedo;
+  mat->maps[MATERIAL_MAP_NORMAL].texture = savedNormal;
 }
 
 static int CompareFarToNear(const void *a, const void *b) {
@@ -404,6 +457,10 @@ bool BrushRenderShadowsEnabled(void) {
 
 struct BrushPost *BrushRenderGetPost(void) {
   return g_r.post.ready ? &g_r.post : NULL;
+}
+
+struct BrushShadow *BrushRenderGetShadow(void) {
+  return g_r.shadow.ready ? &g_r.shadow : NULL;
 }
 
 void BrushRenderSetEditorMode(bool enabled) {

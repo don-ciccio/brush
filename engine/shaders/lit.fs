@@ -11,9 +11,21 @@ in vec3 fragPosition;
 in vec2 fragTexCoord;
 in vec3 fragNormal;
 in vec4 fragColor;
+in vec4 fragTangent;
 
-uniform sampler2D texture0;
+uniform sampler2D texture0; // MATERIAL_MAP_DIFFUSE (albedo)
+uniform sampler2D texture2; // MATERIAL_MAP_NORMAL (raylib binds normals here)
 uniform vec4 colDiffuse;
+
+// --- Per-draw material (set by the renderer from BrushMaterialProps) ---
+// uTriplanar: sample albedo/normal by world position projected on the three
+// axes, blended by the normal — scaled/rotated blockout geometry tiles in
+// world space with no UV or tangent requirements. uTexScale is world metres
+// per texture repeat. The UV path (models) uses the mesh tangents instead.
+uniform float uTriplanar;
+uniform float uTexScale;
+uniform float uHasNormalMap;
+uniform float uNormalDepth; // normal map intensity (1 = authored)
 
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
@@ -102,13 +114,58 @@ float ShadowFactor(vec3 fragPos, float ndotl) {
 
 out vec4 finalColor;
 
+// Blend weights for triplanar projection: dominant axes of the surface
+// normal, sharpened so faces don't smear across each other.
+vec3 TriplanarWeights(vec3 n) {
+    vec3 w = pow(abs(n), vec3(4.0));
+    return w / (w.x + w.y + w.z);
+}
+
 void main()
 {
-    vec4 tex = texture(texture0, fragTexCoord);
+    vec3 geoN = normalize(fragNormal);
+    vec3 triW = TriplanarWeights(geoN);
+    float ts = max(uTexScale, 0.001);
+    vec2 uvX = fragPosition.zy / ts; // project along X
+    vec2 uvY = fragPosition.xz / ts; // project along Y
+    vec2 uvZ = fragPosition.xy / ts; // project along Z
+
+    vec4 tex;
+    if (uTriplanar > 0.5) {
+        tex = texture(texture0, uvX) * triW.x +
+              texture(texture0, uvY) * triW.y +
+              texture(texture0, uvZ) * triW.z;
+    } else {
+        tex = texture(texture0, fragTexCoord);
+    }
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb;
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 
-    vec3 N = normalize(fragNormal);
+    vec3 N = geoN;
+    if (uHasNormalMap > 0.5) {
+        if (uTriplanar > 0.5) {
+            // UDN blend: each projection's tangent-space bump is swizzled
+            // onto its axis plane and added to the geometric normal.
+            vec3 tnX = texture(texture2, uvX).xyz * 2.0 - 1.0;
+            vec3 tnY = texture(texture2, uvY).xyz * 2.0 - 1.0;
+            vec3 tnZ = texture(texture2, uvZ).xyz * 2.0 - 1.0;
+            vec3 bump = vec3(0.0, tnX.y, tnX.x) * triW.x +
+                        vec3(tnY.x, 0.0, tnY.y) * triW.y +
+                        vec3(tnZ.x, tnZ.y, 0.0) * triW.z;
+            N = normalize(geoN + bump * uNormalDepth);
+        } else {
+            // Standard tangent-space path for models with authored UVs.
+            float tangentLen = length(fragTangent.xyz);
+            if (tangentLen > 0.1) {
+                vec3 T = fragTangent.xyz / tangentLen;
+                T = normalize(T - dot(T, geoN) * geoN);
+                vec3 B = cross(geoN, T) * fragTangent.w;
+                vec3 tn = texture(texture2, fragTexCoord).xyz * 2.0 - 1.0;
+                tn.xy *= uNormalDepth;
+                N = normalize(mat3(T, B, geoN) * tn);
+            }
+        }
+    }
     vec3 L = normalize(uSunDir);
     float diff = max(dot(N, L), 0.0);
 

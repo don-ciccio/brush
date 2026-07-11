@@ -305,6 +305,7 @@ static void SandboxInit(void *user) {
     BrushSceneSave(&s->scene, "assets/gym.def");
   }
   ApplySceneColliders(s);
+  BrushSceneApplyRenderSettings(&s->scene); // scene carries its look
 
 
   // Harness: BRUSH_TEST_TRIGGER drops a big sensor volume across the
@@ -613,7 +614,10 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   static int reloadPoll = 0;
   if (++reloadPoll >= 30) {
     reloadPoll = 0;
-    if (BrushSceneHotReload(&s->scene)) ApplySceneColliders(s);
+    if (BrushSceneHotReload(&s->scene)) {
+      ApplySceneColliders(s);
+      BrushSceneApplyRenderSettings(&s->scene);
+    }
   }
 
   // Day/night clock drives the frame's whole lighting rig (sun/moon light,
@@ -656,10 +660,14 @@ static void SandboxDraw(void *user) {
   BrushWorldSubmit(s->world, s->camera.cam);
 
   // Scene blocks (world.def data): one shared unit cube, scaled per block.
+  // Materials ride as per-draw props (triplanar, so scaling doesn't stretch).
   for (int i = 0; i < s->scene.blockCount; i++) {
     BrushSceneBlock *k = &s->scene.blocks[i];
     Matrix xf = BrushBlockGetModelMatrix(k);
-    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, k->color);
+    BrushMaterialProps props;
+    bool hasMat = BrushSceneBlockProps(&s->scene, k, &props);
+    BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, k->color,
+                        hasMat ? &props : NULL);
     BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, k->color);
   }
 
@@ -754,6 +762,8 @@ static void SandboxShutdown(void *user) {
   UnloadModel(s->unitCube);
 
   UnloadModel(s->mannequin);
+  BrushSceneUnloadMaterials(&s->scene);
+  BrushAssetsShutdown();
 }
 
 int main(void) {

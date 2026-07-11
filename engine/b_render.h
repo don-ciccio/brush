@@ -76,6 +76,9 @@ bool BrushRenderShadowsEnabled(void);
 // sharpen). Returns NULL if the HDR target could not be created.
 struct BrushPost *BrushRenderGetPost(void);
 
+// Access the sun-shadow state (softness is the editor-facing tunable).
+struct BrushShadow *BrushRenderGetShadow(void);
+
 // Set whether the renderer is in editor mode (disables final screen presentation in post-processing).
 void BrushRenderSetEditorMode(bool enabled);
 
@@ -123,6 +126,26 @@ void BrushSetSkyEnabled(bool enabled);
 // world matrix; the model's own transform is ignored for this draw.
 void BrushRenderSubmit(BrushLayer layer, Model *model, Matrix transform,
                        Color tint);
+
+// --- Per-draw material overrides -------------------------------------------
+// Textured surfaces without authored UVs (scene blocks, blockout geometry):
+// with `triplanar` set, the lit shader samples by world position on the
+// three axes — scaled/rotated boxes tile seamlessly at `texScale` world
+// metres per repeat, no tangents needed. Models with real UVs skip triplanar
+// and get tangent-space normal mapping when `normal` is set.
+typedef struct BrushMaterialProps {
+  Texture2D albedo;   // id 0 = keep the model's own diffuse map
+  Texture2D normal;   // id 0 = no normal mapping
+  bool triplanar;     // world-space projection instead of mesh UVs
+  float texScale;     // world metres per texture repeat (triplanar)
+  float specStrength; // <0 = engine default
+  float normalDepth;  // normal map intensity (1 = authored)
+} BrushMaterialProps;
+
+// BrushRenderSubmit with material overrides applied for exactly this draw.
+// NULL props = plain submit.
+void BrushRenderSubmitEx(BrushLayer layer, Model *model, Matrix transform,
+                         Color tint, const BrushMaterialProps *props);
 
 // Submit a raw mesh + material (e.g. streamed terrain chunks). The material's
 // shader should be BrushGetLitShader() to receive lighting/shadows. `material`
