@@ -222,7 +222,7 @@ right; two hardening details added (alignment, hashed lookup):
 |---|---|---|
 | **0** | ~~Engine/project path split (BrushEnginePath + chdir), project.def, Project Manager screen, templates (Empty, Gym), player `--project`~~ DONE | everything below; "brush as a product" |
 | **1** | ~~.import sidecars, `.brush/imported/` cache, Tier-0 .ctex (mips, max_size), invalidation, worker cooking, live re-import on change~~ DONE | fast loads, VRAM safety, drag-in textures |
-| **2** | stb_dxt BC1/BC3 tier, normal-map profile, import settings UI in the editor (per-texture panel) | shipping-quality VRAM budgets |
+| **2** | ~~stb_dxt BC1/BC3 tier, normal-map profile, import settings UI in the editor (per-texture panel)~~ DONE | shipping-quality VRAM budgets |
 | **3** | packager tool + pak mount + release player build | distributable games |
 
 Each phase lands usable on its own; no phase requires touching game-facing
@@ -236,3 +236,13 @@ swap on the main thread; callers re-resolve their Texture2D copies when it
 returns true. `BRUSH_TEST_REIMPORT=<texture>` in the player edits that
 texture's sidecar mid-run to exercise the whole watch → cook → swap chain
 deterministically.
+
+Phase 2 implementation notes (2026-07): BC chains must reach 1x1 — raylib
+never clamps GL_TEXTURE_MAX_LEVEL, so a chain stopped at 4x4 is incomplete
+under trilinear and samples black. Sub-block tail levels (2x2/1x1) encode
+as one edge-clamped padded block, which matches raylib's mip-size walk
+(w*h*bpp/8, clamped to a single block only when BOTH dims < 4) exactly;
+chains with a non-4-aligned level (512x256 hits 4x2) cook uncompressed
+with a warning. DXT5nm state persists in the .ctex header (reserved bit0)
+and reaches the shader via BrushAssetsIsSwizzledNormal -> material props
+-> uNormalSwizzled.
