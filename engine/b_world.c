@@ -484,6 +484,13 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
     if (atomic_load(&chunk->state) != CHUNK_ACTIVE || !chunk->meshUploaded)
       continue;
     Vector3 o = ChunkOrigin(w, chunk->coord);
+    Vector3 ro = WorldToRender(w, o);
+    Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
+    // Shadows are submitted UNCONDITIONALLY: the camera cull below is about
+    // the VIEW — terrain behind the camera still casts shadows into it when
+    // the sun is low behind you. The depth pass is cheap; missing casters pop.
+    BrushRenderSubmitMesh(BRUSH_LAYER_SHADOW, chunk->mesh, &w->material, xf);
+
     float ccx = o.x + half - camera.position.x;
     float ccz = o.z + half - camera.position.z;
     float cd = sqrtf(ccx * ccx + ccz * ccz);
@@ -491,10 +498,7 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
       float dot = (ccx * fx + ccz * fz) / cd;
       if (dot < -0.15f) continue; // clearly behind the camera
     }
-    Vector3 ro = WorldToRender(w, o);
-    Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
     BrushRenderSubmitMesh(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material, xf);
-    BrushRenderSubmitMesh(BRUSH_LAYER_SHADOW, chunk->mesh, &w->material, xf);
   }
 }
 

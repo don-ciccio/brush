@@ -86,8 +86,10 @@ void main()
     vec3 L = normalize(uSunDir);
     float diff = max(dot(N, L), 0.0);
 
-    // Sun visibility from the shadow map scales both direct terms.
-    float sunVis = 1.0 - ShadowFactor(fragPosition, diff);
+    // Sun visibility from the shadow map scales both direct terms. Fragments
+    // facing away from the sun get no direct light at all — skip the 32-tap
+    // PCSS entirely there (roughly half the pixels in a typical view).
+    float sunVis = (diff > 0.0) ? 1.0 - ShadowFactor(fragPosition, diff) : 0.0;
     diff *= sunVis;
 
     vec3 V = normalize(viewPos - fragPosition);

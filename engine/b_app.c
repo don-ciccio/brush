@@ -27,7 +27,9 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
 
   bool perfMode = (getenv("BRUSH_PERF") != NULL) || cfg.noVsync;
   if (!perfMode) SetConfigFlags(FLAG_VSYNC_HINT);
-  SetConfigFlags(FLAG_MSAA_4X_HINT);
+  // NO MSAA hint: the scene renders into the engine's own HDR FBO (SMAA is
+  // the AA); a multisampled backbuffer would only pay memory + a resolve
+  // every frame for the HUD text.
 
   InitWindow(cfg.width, cfg.height, cfg.title);
   SetTargetFPS(perfMode ? 0 : cfg.targetFPS);
