@@ -186,6 +186,10 @@ float BrushAnimatorPlayOneShot(BrushAnimator *a, const char *clipName,
 
 BrushAnimState BrushAnimatorState(const BrushAnimator *a);
 
+// Current clip/gait phase [0,1) — lets gameplay pace itself to a clip
+// (e.g. the roll's movement burst tapering with the animation).
+float BrushAnimatorPhase(const BrushAnimator *a);
+
 void BrushAnimatorUnload(BrushAnimator *a);
 
 #ifdef __cplusplus

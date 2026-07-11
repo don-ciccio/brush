@@ -50,7 +50,6 @@ typedef struct Sandbox {
   float airTime;       // continuous seconds off the ground (debounced flag)
   float ikWeight;      // shared slope-IK ramp: 0 airborne -> 1 grounded
   bool crouched;
-  float rollTimer;     // seconds of roll movement burst remaining
 
   // Mantle: jump at a waist-to-chest-high ledge -> ClimbUp_1m one-shot while
   // the capsule is scripted from mantleFrom onto mantleTo.
@@ -360,6 +359,21 @@ static void SandboxFixedUpdate(void *user, float dt) {
              (int)BrushAnimatorState(&s->animator));
   }
 
+  // Roll harness: BRUSH_AUTO_ROLL triggers a roll every 2.5 s and logs the
+  // anim state + capsule speed around it (moonwalk = high speed in ROLL).
+  if (getenv("BRUSH_AUTO_ROLL") != NULL) {
+    static int rollF = 0;
+    if (++rollF % 150 == 0 && s->grounded &&
+        BrushAnimatorState(&s->animator) != BRUSH_ANIM_ROLL)
+      BrushAnimatorTriggerRoll(&s->animator);
+    if (rollF % 6 == 0) {
+      float sp = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
+      TraceLog(LOG_INFO, "ROLLDBG t=%.2f state=%d phase=%.2f speed=%.2f",
+               rollF / 60.0f, (int)BrushAnimatorState(&s->animator),
+               BrushAnimatorPhase(&s->animator), sp);
+    }
+  }
+
   // Traversal harness: BRUSH_POS_DBG logs the capsule position twice a
   // second — pair with BRUSH_SPAWN + BRUSH_AUTO_MOVE to verify stairs,
   // ramps, and ledges without eyeballing screenshots.
@@ -423,11 +437,18 @@ static void SandboxFixedUpdate(void *user, float dt) {
   if (s->crouched) maxSpeed = 1.6f; // crouch-walk pace
   Vector3 wishVel = Vector3Scale(wishDir, maxSpeed * fminf(wishLen, 1.0f));
 
-  // Roll burst: while the roll plays, drive forward along the facing.
-  if (s->rollTimer > 0.0f) {
-    s->rollTimer -= dt;
+  // Roll burst: while the animator owns the pose, the CAPSULE follows the
+  // clip's pacing — full speed through the tumble, tapering into the
+  // stand-up. Input never drives the capsule mid-roll (a timer-based burst
+  // left a half-second gap where held input ran at sprint speed under a
+  // rolling pose — the classic moonwalk). Holding a direction keeps enough
+  // speed for the animator's movement-cancel to fire at its earliest phase.
+  if (BrushAnimatorState(&s->animator) == BRUSH_ANIM_ROLL) {
+    float ph = BrushAnimatorPhase(&s->animator);
+    float burst = 4.2f * fminf(fmaxf((0.78f - ph) / 0.30f, 0.0f), 1.0f);
+    if (wishLen > 0.1f && burst < 2.2f) burst = 2.2f; // arm the run-cancel
     Vector3 fwd = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
-    wishVel = Vector3Scale(fwd, 4.2f);
+    wishVel = Vector3Scale(fwd, burst);
   }
 
   // Horizontal acceleration toward the wish velocity.
@@ -572,10 +593,8 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
 
   // Roll: one-shot anim + a short forward movement burst.
   if (BrushInputPressed(BRUSH_BTN_ROLL) && s->grounded &&
-      BrushAnimatorState(&s->animator) != BRUSH_ANIM_ROLL) {
+      BrushAnimatorState(&s->animator) != BRUSH_ANIM_ROLL)
     BrushAnimatorTriggerRoll(&s->animator);
-    s->rollTimer = 0.55f;
-  }
 
   // Interpolate sim state for rendering (fixed-step stutter stays invisible).
   // stepSmooth rides on Y: everything downstream (draw transform, camera

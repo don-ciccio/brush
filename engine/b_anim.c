@@ -357,6 +357,8 @@ float BrushAnimatorPlayOneShot(BrushAnimator *a, const char *clipName,
 
 BrushAnimState BrushAnimatorState(const BrushAnimator *a) { return a->state; }
 
+float BrushAnimatorPhase(const BrushAnimator *a) { return a->phase; }
+
 void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   if (a->blendPose == NULL) return;
 
