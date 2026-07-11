@@ -591,21 +591,7 @@ static void LoadRecents() {
     snprintf(path, sizeof(path), "%s/projects", BrushUserDir());
     g_recentCount = 0;
     FILE *f = fopen(path, "r");
-    if (!f) {
-        // First run: the engine repo is itself a project (the sandbox gym) —
-        // seed the list so the manager never starts empty.
-        char probe[600];
-        snprintf(probe, sizeof(probe), "%s", BrushEnginePath("project.def"));
-        if (FileExists(probe)) {
-            snprintf(probe, sizeof(probe), "%s", BrushEnginePath(""));
-            char *end = probe + strlen(probe);
-            while (end > probe && (end[-1] == '/' || end[-1] == '.')) *--end = '\0';
-            if (probe[0])
-                snprintf(g_recent[g_recentCount++], sizeof(g_recent[0]), "%s",
-                         probe);
-        }
-        return;
-    }
+    if (!f) return; // clean slate: the first project is created, not seeded
     char line[512];
     while (fgets(line, sizeof(line), f) && g_recentCount < MAX_RECENT_PROJECTS) {
         char *nl = strchr(line, '\n');
@@ -731,13 +717,25 @@ static bool OpenProjectAt(const char *dir) {
         AddEditorLog("ERROR: cannot enter %s", dir);
         return false;
     }
+    bool engineDev = false;
     if (!BrushProjectLoad(&g_project, ".")) {
-        // Opening a bare folder (CLI): adopt it with defaults so the next
-        // save makes it a real project.
-        const char *base = GetFileName(GetWorkingDirectory());
-        if (base && base[0]) snprintf(g_project.name, sizeof(g_project.name), "%s", base);
-        BrushProjectSave(&g_project, ".");
-        AddEditorLog("Created project.def in %s", dir);
+        if (FileExists("engine/shaders/lit.fs")) {
+            // The ENGINE repo itself (harnesses, engine development): run
+            // the gym in place, but never write a project.def into the
+            // engine tree or list it as a project — the gym is engine-dev
+            // fixture + template payload, not a user project.
+            engineDev = true;
+            snprintf(g_project.name, sizeof(g_project.name), "Engine Dev");
+            snprintf(g_project.scene, sizeof(g_project.scene),
+                     "assets/gym.def");
+        } else {
+            // Opening a bare folder (CLI): adopt it with defaults so the
+            // next save makes it a real project.
+            const char *base = GetFileName(GetWorkingDirectory());
+            if (base && base[0]) snprintf(g_project.name, sizeof(g_project.name), "%s", base);
+            BrushProjectSave(&g_project, ".");
+            AddEditorLog("Created project.def in %s", dir);
+        }
     }
     snprintf(g_scenePath, sizeof(g_scenePath), "%s", g_project.scene);
     snprintf(g_terrainPath, sizeof(g_terrainPath), "%s", g_scenePath);
@@ -789,7 +787,7 @@ static bool OpenProjectAt(const char *dir) {
     RescanTextureDir(); // material path pickers browse assets/textures
 
     SetWindowTitle(g_project.name);
-    AddRecent(dir);
+    if (!engineDev) AddRecent(dir);
     g_projectOpen = true;
     return true;
 }
@@ -869,7 +867,13 @@ int main(int argc, char **argv) {
     static int newTemplate = TEMPLATE_GYM;
     int selRecent = -1;
 
-    while (!g_projectOpen && !WindowShouldClose()) {
+    bool pmQuit = false;
+    while (!g_projectOpen && !pmQuit && !WindowShouldClose()) {
+#if defined(__APPLE__)
+        // The native menu posts action tags; without polling here Cmd+Q
+        // (tag 3) does nothing on the manager screen.
+        if (EditorMacPollMenuAction() == 3) pmQuit = true;
+#endif
         BeginDrawing();
         ClearBackground((Color){ 22, 23, 27, 255 });
         rlImGuiBegin();

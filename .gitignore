@@ -10,3 +10,6 @@ editor_layout.ini
 
 # Per-project import cache (docs/asset-pipeline.md)
 .brush/
+
+# The engine repo is not a user project (engine-dev mode runs the gym in place)
+/project.def

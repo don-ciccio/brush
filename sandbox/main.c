@@ -787,6 +787,10 @@ int main(int argc, char **argv) {
   // Enter the project (--project <dir> / BRUSH_PROJECT env / cwd) before
   // anything opens files: from here on the cwd IS the project root.
   s.projectLoaded = BrushProjectBoot(&s.project, argc, argv);
+  // No project.def = engine-dev run from the repo: keep the gym fixture
+  // (and its BuildGymScene bootstrap) exactly as before projects existed.
+  if (!s.projectLoaded)
+    snprintf(s.project.scene, sizeof(s.project.scene), "assets/gym.def");
   snprintf(s.scenePath, sizeof(s.scenePath), "%s", s.project.scene);
   // Terrain sculpt overlay lives beside the scene: <scene>.terrain.
   snprintf(s.terrainPath, sizeof(s.terrainPath), "%s", s.scenePath);
