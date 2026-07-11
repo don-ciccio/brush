@@ -35,6 +35,8 @@
 // titlebar, traffic lights floating over the menu bar row).
 extern "C" void EditorMacSeamlessTitlebar(void *nsWindow);
 extern "C" void EditorMacDragWindow(void *nsWindow);
+extern "C" void EditorMacInstallMenu(void);
+extern "C" int EditorMacPollMenuAction(void);
 #endif
 
 // ---------------------------------------------------------------------------
@@ -292,6 +294,18 @@ static void RebuildAllColliders() {
     }
 }
 
+static void ReloadScene() {
+    if (BrushSceneLoad(&g_scene, g_scenePath)) {
+        g_dirty = false;
+        g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
+        RebuildAllColliders();
+        g_selectedType = ENTITY_NONE;
+        g_selectedIdx = -1;
+        AddEditorLog("Reloaded %s", g_scenePath);
+    }
+}
+
+
 static Vector3 SpawnPointInFront() {
     return Vector3Add(g_camera.cam.position,
                       Vector3Scale(g_camera.Forward(), fminf(g_camera.dist, 8.0f)));
@@ -500,6 +514,7 @@ int main() {
     InitWindow(1600, 900, "brush editor");
 #if defined(__APPLE__)
     EditorMacSeamlessTitlebar(GetWindowHandle());
+    EditorMacInstallMenu(); // File/Edit/View live in the macOS top bar
 #endif
     SetWindowState(FLAG_WINDOW_MAXIMIZED); // fill whatever screen this is
     SetTargetFPS(60);
@@ -704,36 +719,45 @@ int main() {
         }
 
         // === Menu bar ========================================================
-        if (ImGui::BeginMainMenuBar()) {
 #if defined(__APPLE__)
-            // The menu bar row doubles as the titlebar: clear the floating
-            // traffic lights, and drag empty space to move the window.
-            ImGui::SetCursorPosX(76.0f);
-            if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
-                ImGui::IsMouseClicked(ImGuiMouseButton_Left))
-                EditorMacDragWindow(GetWindowHandle());
-#endif
+        // The menus live in the NATIVE macOS top bar (installed at startup);
+        // poll and dispatch their actions here.
+        switch (EditorMacPollMenuAction()) {
+        case 1: SaveScene(); break;
+        case 2: ReloadScene(); break;
+        case 3: g_quit = true; break;
+        case 4: AddBlockEntity(); break;
+        case 5: AddLightEntity(); break;
+        case 6: DuplicateSelected(); break;
+        case 7: DeleteSelected(); break;
+        case 8: FrameSelected(); break;
+        case 9: g_selectedType = ENTITY_NONE; g_selectedIdx = -1; FrameSelected(); break;
+        case 10: GameRunning() ? StopGame() : PlayGame(); break;
+        case 11: PopSculptUndo(); break;
+        case 100: AddEditorLog("brush editor — github.com/don-ciccio/brush"); break;
+        default: break;
+        }
+
+        // Drag the window from the (otherwise empty) top strip, like a
+        // titlebar — the dock tab row sits under the traffic lights.
+        if (GetMousePosition().y < 30.0f &&
+            IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive())
+            EditorMacDragWindow(GetWindowHandle());
+#else
+        if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("Save", "Cmd+S")) SaveScene();
-                if (ImGui::MenuItem("Reload from Disk")) {
-                    if (BrushSceneLoad(&g_scene, g_scenePath)) {
-                        g_dirty = false;
-                        g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
-                        RebuildAllColliders();
-                        g_selectedType = ENTITY_NONE;
-                        g_selectedIdx = -1;
-                        AddEditorLog("Reloaded %s", g_scenePath);
-                    }
-                }
+                if (ImGui::MenuItem("Save", "Ctrl+S")) SaveScene();
+                if (ImGui::MenuItem("Reload from Disk")) ReloadScene();
                 ImGui::Separator();
-                if (ImGui::MenuItem("Quit Editor", "Cmd+Q")) g_quit = true;
+                if (ImGui::MenuItem("Quit Editor", "Ctrl+Q")) g_quit = true;
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Edit")) {
                 if (ImGui::MenuItem("Add Block", "B")) AddBlockEntity();
                 if (ImGui::MenuItem("Add Light", "L")) AddLightEntity();
                 ImGui::Separator();
-                if (ImGui::MenuItem("Duplicate", "Cmd+D", false, g_selectedType != ENTITY_NONE))
+                if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, g_selectedType != ENTITY_NONE))
                     DuplicateSelected();
                 if (ImGui::MenuItem("Delete", "Backspace", false, g_selectedType != ENTITY_NONE))
                     DeleteSelected();
@@ -746,29 +770,9 @@ int main() {
                 }
                 ImGui::EndMenu();
             }
-
-            // Right side: play control + dirty state (measured, not guessed —
-            // hardcoded offsets clip when the font scale changes).
-            float clusterW = ImGui::CalcTextSize("  Stop  ").x +
-                             ImGui::CalcTextSize("* unsaved").x +
-                             ImGui::GetStyle().ItemSpacing.x * 3 +
-                             ImGui::GetStyle().FramePadding.x * 4;
-            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - clusterW - 8);
-            bool running = GameRunning();
-            if (running) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 1.0f));
-                if (ImGui::Button("  Stop  ")) StopGame();
-                ImGui::PopStyleColor();
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
-                if (ImGui::Button("  Play  ")) PlayGame();
-                ImGui::PopStyleColor();
-            }
-            ImGui::SameLine();
-            if (g_dirty) ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1), "● unsaved");
-            else ImGui::TextDisabled("saved");
             ImGui::EndMainMenuBar();
         }
+#endif
 
         // === Hierarchy =======================================================
         ImGui::Begin("Hierarchy");
@@ -1157,6 +1161,33 @@ int main() {
                 ImGui::SliderFloat("Strength", &g_brushStrength, 0.1f, 4.0f, "%.1f");
             }
             ImGui::EndGroup();
+
+            // Play/Stop + save state, top-right of the viewport.
+            {
+                float clusterW = ImGui::CalcTextSize("  Stop  ").x +
+                                 ImGui::CalcTextSize("* unsaved").x +
+                                 ImGui::GetStyle().ItemSpacing.x * 2 +
+                                 ImGui::GetStyle().FramePadding.x * 4;
+                ImGui::SetCursorScreenPos(
+                    ImVec2(imgPos.x + imgSize.x - clusterW - 10, imgPos.y + 10));
+                ImGui::BeginGroup();
+                bool running = GameRunning();
+                if (running) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.25f, 0.25f, 1.0f));
+                    if (ImGui::Button("  Stop  ")) StopGame();
+                    ImGui::PopStyleColor();
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.30f, 1.0f));
+                    if (ImGui::Button("  Play  ")) PlayGame();
+                    ImGui::PopStyleColor();
+                }
+                ImGui::SameLine();
+                if (g_dirty)
+                    ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1), "* unsaved");
+                else
+                    ImGui::TextDisabled("saved");
+                ImGui::EndGroup();
+            }
 
             // --- Nav hint bar (bottom of the image) ----------------------------
             const char *hints =
