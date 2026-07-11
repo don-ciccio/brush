@@ -33,7 +33,10 @@ typedef struct BrushRenderState {
   int locLayerView;
   int locSpecStrength;
   int locLinearize;
-  int locLightVP, locShadowMap, locShadowEnabled;
+  int locLightVP[BRUSH_SHADOW_CASCADES];
+  int locShadowMap[BRUSH_SHADOW_CASCADES];
+  int locCascadeFar;
+  int locShadowEnabled;
   int locShadowSoftness, locShadowTexel, locShadowStrength;
 
   Vector3 sunDir;   // the directional LIGHT (sun by day, moon at night)
@@ -67,8 +70,13 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerView = GetShaderLocation(g_r.lit, "uLayerView");
   g_r.locSpecStrength = GetShaderLocation(g_r.lit, "uSpecStrength");
   g_r.locLinearize = GetShaderLocation(g_r.lit, "uLinearize");
-  g_r.locLightVP = GetShaderLocation(g_r.lit, "lightVP");
-  g_r.locShadowMap = GetShaderLocation(g_r.lit, "shadowMap");
+  g_r.locLightVP[0] = GetShaderLocation(g_r.lit, "lightVP0");
+  g_r.locLightVP[1] = GetShaderLocation(g_r.lit, "lightVP1");
+  g_r.locLightVP[2] = GetShaderLocation(g_r.lit, "lightVP2");
+  g_r.locShadowMap[0] = GetShaderLocation(g_r.lit, "shadowMap0");
+  g_r.locShadowMap[1] = GetShaderLocation(g_r.lit, "shadowMap1");
+  g_r.locShadowMap[2] = GetShaderLocation(g_r.lit, "shadowMap2");
+  g_r.locCascadeFar = GetShaderLocation(g_r.lit, "uCascadeFar");
   g_r.locShadowEnabled = GetShaderLocation(g_r.lit, "uShadowEnabled");
   g_r.locShadowSoftness = GetShaderLocation(g_r.lit, "uShadowSoftness");
   g_r.locShadowTexel = GetShaderLocation(g_r.lit, "uShadowTexel");
@@ -211,27 +219,36 @@ void BrushRenderExecute(Camera3D camera) {
   float shOff = 0.0f;
   SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOff, SHADER_UNIFORM_FLOAT);
   if (shadowsOn) {
-    // uShadowEnabled stays 0 during the depth pass (casters draw with the lit
-    // shader; only depth is kept, so skip the PCSS cost while rendering it).
-    BrushShadowBegin(&g_r.shadow, g_r.sunDir, camera.target);
-    for (int i = 0; i < shadowCount; i++)
-      DrawCmd(&g_r.cmds[BRUSH_LAYER_SHADOW][i]);
-    BrushShadowEnd(&g_r.shadow);
+    // uShadowEnabled stays 0 during the depth passes (casters draw with the
+    // lit shader; only depth is kept, so skip the PCSS cost while rendering).
+    // One depth pass per cascade over the same caster list.
+    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++) {
+      BrushShadowBeginCascade(&g_r.shadow, c, g_r.sunDir, camera);
+      for (int i = 0; i < shadowCount; i++)
+        DrawCmd(&g_r.cmds[BRUSH_LAYER_SHADOW][i]);
+      BrushShadowEnd(&g_r.shadow);
+    }
 
     float shOn = 1.0f;
     SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOn,
                    SHADER_UNIFORM_FLOAT);
-    SetShaderValueMatrix(g_r.lit, g_r.locLightVP, g_r.shadow.lightVP);
+    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++) {
+      SetShaderValueMatrix(g_r.lit, g_r.locLightVP[c],
+                           g_r.shadow.lightVP[c]);
+      int slot = g_r.shadow.slot + c;
+      SetShaderValue(g_r.lit, g_r.locShadowMap[c], &slot,
+                     SHADER_UNIFORM_INT);
+    }
+    SetShaderValue(g_r.lit, g_r.locCascadeFar, g_r.shadow.splitFar,
+                   SHADER_UNIFORM_VEC3);
     SetShaderValue(g_r.lit, g_r.locShadowSoftness, &g_r.shadow.softness,
                    SHADER_UNIFORM_FLOAT);
     float shadowTexel = 1.0f / (float)g_r.shadow.resolution;
     SetShaderValue(g_r.lit, g_r.locShadowTexel, &shadowTexel,
                    SHADER_UNIFORM_FLOAT);
-    SetShaderValue(g_r.lit, g_r.locShadowMap, &g_r.shadow.slot,
-                   SHADER_UNIFORM_INT);
     SetShaderValue(g_r.lit, g_r.locShadowStrength, &shadowStrength,
                    SHADER_UNIFORM_FLOAT);
-    BrushShadowBindMap(&g_r.shadow);
+    BrushShadowBindMaps(&g_r.shadow);
   }
 
   // With post on, the layer stack renders into the linear HDR target and
@@ -292,9 +309,11 @@ void BrushRenderExecute(Camera3D camera) {
     g_r.post.sunDir = g_r.sunDir;
     g_r.post.sunColor = g_r.sunColor;
     g_r.post.ambientColor = g_r.ambient;
-    g_r.post.lightVP = g_r.shadow.lightVP;
+    // God rays march up to ~100 m — the FAR cascade covers that range.
+    g_r.post.lightVP = g_r.shadow.lightVP[BRUSH_SHADOW_CASCADES - 1];
     g_r.post.shadowMap =
-        shadowsOn ? g_r.shadow.map.depth : (Texture2D){0};
+        shadowsOn ? g_r.shadow.map[BRUSH_SHADOW_CASCADES - 1].depth
+                  : (Texture2D){0};
     BrushPostRun(&g_r.post, (float)GetTime());
   }
 

@@ -1,15 +1,17 @@
 /*******************************************************************************************
- *   b_shadow.h - Directional sun shadow mapping
+ *   b_shadow.h - Cascaded directional sun shadow mapping (CSM)
  *
- *   A single depth-only pass from an orthographic camera up the sun
- *   direction. The renderer draws every BRUSH_LAYER_SHADOW submission into
- *   the map, then the lit shader tests fragments against it with PCSS
- *   (blocker search -> penumbra-widening PCF), so shadows are sharp at
- *   contact and soften with distance from the caster.
+ *   Three depth-only passes from an orthographic camera up the sun
+ *   direction, each fitted around a slice of the VIEW frustum: a tight box
+ *   near the camera (crisp contact shadows), wider boxes further out (the
+ *   whole visible range casts). The lit shader picks the cascade by the
+ *   fragment's distance from the camera and runs the same PCSS test
+ *   (blocker search -> penumbra-widening PCF) against that cascade's map.
  *
- *   The ortho box FOLLOWS the view target and is snapped to shadow-map
- *   texels in light space: without snapping, a moving camera re-rasterizes
- *   the same edges into different texels every frame and shadow edges crawl.
+ *   Stability: each cascade fits the BOUNDING SPHERE of its frustum slice
+ *   (so the box size doesn't change as the camera rotates) and the box
+ *   centre is snapped to shadow-map texels in light space (so a moving
+ *   camera re-rasterizes static edges into the same texels — no crawl).
  *
  *   LICENSE: zlib/libpng
  ********************************************************************************************/
@@ -20,13 +22,16 @@
 #include <raylib.h>
 #include <stdbool.h>
 
+#define BRUSH_SHADOW_CASCADES 3
+
 typedef struct BrushShadow {
-  RenderTexture2D map; // depth-only render target
-  Camera3D lightCam;   // orthographic camera from the sun direction
-  Matrix lightVP;      // light view-projection captured during the depth pass
-  int resolution;      // shadow map size (square)
-  int slot;            // texture unit the map binds to (above material maps)
-  float orthoSize;     // world-space coverage of the box (metres, square)
+  RenderTexture2D map[BRUSH_SHADOW_CASCADES]; // depth-only render targets
+  Camera3D lightCam;   // orthographic camera reused per cascade pass
+  Matrix lightVP[BRUSH_SHADOW_CASCADES]; // captured during each depth pass
+  float splitFar[BRUSH_SHADOW_CASCADES]; // cascade far distances from the
+                                         // view camera (m); ascending
+  int resolution;      // per-cascade shadow map size (square)
+  int slot;            // first texture unit; cascade i binds slot + i
   float softness;      // PCSS light size (texels); higher = softer penumbra
   bool ready;
 } BrushShadow;
@@ -34,14 +39,16 @@ typedef struct BrushShadow {
 void BrushShadowInit(BrushShadow *sh, int resolution);
 void BrushShadowUnload(BrushShadow *sh);
 
-// Begin the depth pass: aim the ortho camera down `sunDir` (points toward the
-// sun) at `focus` (texel-snapped), open the depth target and capture lightVP.
-// Draw the casters between Begin and End with their normal draw calls — only
-// depth is kept.
-void BrushShadowBegin(BrushShadow *sh, Vector3 sunDir, Vector3 focus);
+// Begin cascade `i`'s depth pass: fit the ortho box around the view camera's
+// [splitFar[i-1], splitFar[i]] frustum slice (sphere fit, texel-snapped),
+// open the depth target and capture lightVP[i]. Draw the casters between
+// Begin and End with their normal draw calls — only depth is kept.
+void BrushShadowBeginCascade(BrushShadow *sh, int i, Vector3 sunDir,
+                             Camera3D viewCam);
 void BrushShadowEnd(BrushShadow *sh);
 
-// Bind the depth texture on its reserved slot (call before drawing receivers).
-void BrushShadowBindMap(BrushShadow *sh);
+// Bind every cascade's depth texture on its reserved slot (call before
+// drawing receivers).
+void BrushShadowBindMaps(BrushShadow *sh);
 
 #endif // B_SHADOW_H

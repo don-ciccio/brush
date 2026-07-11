@@ -27,17 +27,23 @@ uniform int uLayerView;
 // output stays in the authored space.
 uniform float uLinearize;
 
-// --- Sun shadow mapping (PCSS: blocker search -> penumbra-widening PCF) ---
-uniform mat4 lightVP;        // sun light view-projection
-uniform sampler2D shadowMap; // sun depth map (depth-only FBO)
+// --- Cascaded sun shadows (PCSS: blocker search -> penumbra-widening PCF).
+// Three ortho maps fitted around view-frustum slices; the fragment's camera
+// distance picks the cascade. Same PCSS everywhere: one cascade is sampled
+// per fragment, so the cost matches the old single-map path.
+uniform mat4 lightVP0, lightVP1, lightVP2;
+uniform sampler2D shadowMap0;
+uniform sampler2D shadowMap1;
+uniform sampler2D shadowMap2;
+uniform vec3 uCascadeFar;      // cascade far distances from the camera (m)
 uniform float uShadowEnabled;
 uniform float uShadowSoftness; // light size in shadow texels
 uniform float uShadowTexel;    // 1.0 / shadow map resolution
 uniform float uShadowStrength; // horizon fade: 1 = full shadows, 0 = none
 
-// Returns 0 = fully lit, 1 = fully shadowed.
-float ShadowFactor(vec3 fragPos, float ndotl) {
-    if (uShadowEnabled < 0.5) return 0.0;
+// PCSS test against one cascade. Returns 0 = fully lit, 1 = fully shadowed.
+float ShadowSample(sampler2D shadowMap, mat4 lightVP, vec3 fragPos,
+                   float ndotl) {
     vec4 p = lightVP * vec4(fragPos, 1.0);
     vec3 proj = p.xyz / p.w;
     proj = proj * 0.5 + 0.5;
@@ -72,6 +78,19 @@ float ShadowFactor(vec3 fragPos, float ndotl) {
             texture(shadowMap, proj.xy + (vec2(x, y) - 1.5) * radius).r)
             sh += 1.0;
     return (sh / 16.0) * uShadowStrength;
+}
+
+// Cascade pick by radial camera distance (matches the sphere-fitted boxes).
+float ShadowFactor(vec3 fragPos, float ndotl) {
+    if (uShadowEnabled < 0.5) return 0.0;
+    float d = length(fragPos - viewPos);
+    if (d < uCascadeFar.x)
+        return ShadowSample(shadowMap0, lightVP0, fragPos, ndotl);
+    if (d < uCascadeFar.y)
+        return ShadowSample(shadowMap1, lightVP1, fragPos, ndotl);
+    if (d < uCascadeFar.z)
+        return ShadowSample(shadowMap2, lightVP2, fragPos, ndotl);
+    return 0.0; // beyond the last cascade: unshadowed
 }
 
 out vec4 finalColor;
