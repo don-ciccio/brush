@@ -983,13 +983,20 @@ int main(int argc, char **argv) {
         // --- Submit scene to the layered renderer --------------------------
         BrushWorldSubmit(g_world, g_camera.cam);
 
+        // Untextured blocks wear the terrain's checker (world-tiled) — the
+        // blockout grid look; the block color tints it.
+        BrushMaterialProps checker = {};
+        checker.albedo = g_groundTex;
+        checker.triplanar = true;
+        checker.texScale = 64.0f; // = terrain texMetresPerTile
+        checker.specStrength = -1.0f;
         for (int i = 0; i < g_scene.blockCount; i++) {
             BrushSceneBlock *k = &g_scene.blocks[i];
             Matrix xf = BrushBlockGetModelMatrix(k); // includes rotation
             BrushMaterialProps props;
             bool hasMat = BrushSceneBlockProps(&g_scene, k, &props);
             BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &g_unitCube, xf, k->color,
-                                hasMat ? &props : NULL);
+                                hasMat ? &props : &checker);
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &g_unitCube, xf, k->color);
         }
 

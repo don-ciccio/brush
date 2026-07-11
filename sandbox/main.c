@@ -675,14 +675,20 @@ static void SandboxDraw(void *user) {
   BrushWorldSubmit(s->world, s->camera.cam);
 
   // Scene blocks (world.def data): one shared unit cube, scaled per block.
-  // Materials ride as per-draw props (triplanar, so scaling doesn't stretch).
+  // Materials ride as per-draw props (triplanar, so scaling doesn't
+  // stretch). Blocks WITHOUT a material get the terrain's checker at the
+  // terrain's world tiling — the classic blockout grid, tinted per block.
+  BrushMaterialProps checker = {.albedo = s->groundTex,
+                                .triplanar = true,
+                                .texScale = 64.0f, // = terrain texMetresPerTile
+                                .specStrength = -1.0f};
   for (int i = 0; i < s->scene.blockCount; i++) {
     BrushSceneBlock *k = &s->scene.blocks[i];
     Matrix xf = BrushBlockGetModelMatrix(k);
     BrushMaterialProps props;
     bool hasMat = BrushSceneBlockProps(&s->scene, k, &props);
     BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, k->color,
-                        hasMat ? &props : NULL);
+                        hasMat ? &props : &checker);
     BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, k->color);
   }
 
