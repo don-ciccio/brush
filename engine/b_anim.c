@@ -625,16 +625,13 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     }
   }
   // Smooth the terrain deltas so steps/edges ease instead of popping.
-  // Asymmetric: reaching DOWN to lower ground is fast (a slow foot hangs in
-  // the air over the edge), but releasing back UP is gentle — on stairs the
-  // trailing foot's release would otherwise pop the pelvis up a full riser
-  // in a tenth of a second every stride.
-  float blendDn = 1.0f - expf(-15.0f * dt);
-  float blendUp = 1.0f - expf(-7.0f * dt);
-  a->footDeltaL += (targetDL - a->footDeltaL) *
-                   (targetDL < a->footDeltaL ? blendDn : blendUp);
-  a->footDeltaR += (targetDR - a->footDeltaR) *
-                   (targetDR < a->footDeltaR ? blendDn : blendUp);
+  // Feet track FAST in both directions: lagging upward buries the foot in
+  // rising ground, lagging downward hangs it in the air. The slow easing
+  // that keeps the body from bobbing lives on the pelvis filter below, not
+  // on the feet.
+  float ikBlend = 1.0f - expf(-15.0f * dt);
+  a->footDeltaL += (targetDL - a->footDeltaL) * ikBlend;
+  a->footDeltaR += (targetDR - a->footDeltaR) * ikBlend;
 
   // Pelvis follows the LOWEST foot (never rises above the animation), and
   // the landing dip rides on top; the IK below keeps the feet planted, so
