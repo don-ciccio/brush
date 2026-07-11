@@ -181,7 +181,7 @@ JPH_BodyID BrushPhysicsAddStaticBox(BrushPhysics *pw, Vector3 position, Vector3 
     if (bodyID == BRUSH_BODY_INVALID) {
         TraceLog(LOG_WARNING, "JoltC: Failed to create static box collider '%s'", tag ? tag : "unnamed");
     } else {
-        TraceLog(LOG_INFO, "JoltC: Registered static box '%s' (BodyID: %u) at (%.1f, %.1f, %.1f)", 
+        TraceLog(LOG_DEBUG, "JoltC: Registered static box '%s' (BodyID: %u) at (%.1f, %.1f, %.1f)", 
                  tag ? tag : "unnamed", bodyID, position.x, position.y, position.z);
     }
 
@@ -262,7 +262,7 @@ JPH_BodyID BrushPhysicsAddStaticShape(BrushPhysics *pw, JPH_Shape *shape, int us
     if (bodyID == BRUSH_BODY_INVALID) {
         TraceLog(LOG_WARNING, "JoltC: Failed to create static shape body '%s'", tag ? tag : "unnamed");
     } else {
-        TraceLog(LOG_INFO, "JoltC: Registered static shape '%s' (BodyID: %u)",
+        TraceLog(LOG_DEBUG, "JoltC: Registered static shape '%s' (BodyID: %u)",
                  tag ? tag : "unnamed", bodyID);
     }
 
@@ -305,7 +305,7 @@ JPH_BodyID BrushPhysicsAddTriggerBox(BrushPhysics *pw, Vector3 position, Vector3
     if (bodyID == BRUSH_BODY_INVALID) {
         TraceLog(LOG_WARNING, "JoltC: Failed to create trigger box '%s'", tag ? tag : "unnamed");
     } else {
-        TraceLog(LOG_INFO, "JoltC: Registered trigger box '%s' (BodyID: %u) at (%.1f, %.1f, %.1f)", 
+        TraceLog(LOG_DEBUG, "JoltC: Registered trigger box '%s' (BodyID: %u) at (%.1f, %.1f, %.1f)", 
                  tag ? tag : "unnamed", bodyID, position.x, position.y, position.z);
     }
 
@@ -317,7 +317,7 @@ void BrushPhysicsRemoveBody(BrushPhysics *pw, JPH_BodyID bodyID) {
     
     if (JPH_BodyInterface_IsAdded(pw->bodyInterface, bodyID)) {
         JPH_BodyInterface_RemoveAndDestroyBody(pw->bodyInterface, bodyID);
-        TraceLog(LOG_INFO, "JoltC: Removed and destroyed BodyID: %u", bodyID);
+        TraceLog(LOG_DEBUG, "JoltC: Removed and destroyed BodyID: %u", bodyID);
     }
 }
 

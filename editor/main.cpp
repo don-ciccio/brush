@@ -346,7 +346,7 @@ static void ApplyEditorStyle() {
     };
     for (const char *path : fontCandidates) {
         if (!FileExists(path)) continue;
-        ImFont *f = io.Fonts->AddFontFromFileTTF(path, 17.0f * dpi);
+        ImFont *f = io.Fonts->AddFontFromFileTTF(path, 15.0f * dpi);
         if (f) {
             io.FontDefault = f;
             io.FontGlobalScale = 1.0f / dpi;
@@ -507,6 +507,10 @@ int main() {
         BrushTodUpdate(&g_tod, dt);
         BrushRenderApplyTimeOfDay(&g_tod);
         BrushWorldUpdate(g_world, g_camera.cam.position);
+        // Nothing is dynamic here, but Jolt's broadphase does its node
+        // maintenance inside Update — without stepping, editing churn
+        // eventually aborts with "QuadTree: Out of nodes!".
+        BrushPhysicsStep(&g_phys, dt);
 
         static bool isFlying = false;
         if (viewportHovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) isFlying = true;
@@ -742,7 +746,14 @@ int main() {
             if (ImGui::DragFloat3("Size", size, 0.1f, 0.1f, 200.0f)) {
                 b->size = (Vector3){ size[0], size[1], size[2] }; changed = true;
             }
-            if (changed) { g_dirty = true; RebuildAllColliders(); }
+            // Rebuild colliders when the edit ENDS (slider released / typing
+            // done), not per drag tick — per-tick churn floods Jolt.
+            static bool inspectorStale = false;
+            if (changed) { g_dirty = true; inspectorStale = true; }
+            if (inspectorStale && !ImGui::IsAnyItemActive()) {
+                RebuildAllColliders();
+                inspectorStale = false;
+            }
             if (ImGui::ColorEdit3("Color", col)) {
                 b->color = Float3ToColor(col); g_dirty = true;
             }
@@ -859,7 +870,21 @@ int main() {
                                                                     : ImGuizmo::TRANSLATE,
                                      ImGuizmo::WORLD, (float *)&modelT);
 
-                if (ImGuizmo::IsUsing()) {
+                // Collider policy during drags: the selected block's body is
+                // removed ONCE at drag start (so snap rays see through it) and
+                // everything rebuilds ONCE at drag end. Rebuilding per frame
+                // churned hundreds of Jolt bodies per second.
+                static bool wasUsingGizmo = false;
+                bool usingGizmo = ImGuizmo::IsUsing();
+                if (usingGizmo && !wasUsingGizmo && g_selectedType == ENTITY_BLOCK &&
+                    g_blockBodies[g_selectedIdx] != BRUSH_BODY_INVALID) {
+                    BrushPhysicsRemoveBody(&g_phys, g_blockBodies[g_selectedIdx]);
+                    g_blockBodies[g_selectedIdx] = BRUSH_BODY_INVALID;
+                }
+                if (!usingGizmo && wasUsingGizmo) RebuildAllColliders();
+                wasUsingGizmo = usingGizmo;
+
+                if (usingGizmo) {
                     float trs[3], rot[3], scl[3];
                     ImGuizmo::DecomposeMatrixToComponents((float *)&modelT, trs, rot, scl);
                     Vector3 newPos = { trs[0], trs[1], trs[2] };
@@ -867,31 +892,23 @@ int main() {
                     Vector3 newScale = { scl[0], scl[1], scl[2] };
 
                     // Surface snap: translate mode drops the entity onto the
-                    // surface under the cursor.
+                    // surface under the cursor (selected body already removed).
                     if (g_surfaceSnap && g_gizmoOp == ImGuizmo::TRANSLATE) {
                         Ray ray;
-                        if (mouseToRay(GetMousePosition(), &ray)) {
-                            JPH_BodyID tempRemoved = BRUSH_BODY_INVALID;
+                        Vector3 hitPt, hitNorm;
+                        if (mouseToRay(GetMousePosition(), &ray) &&
+                            BrushPhysicsRaycastEx(&g_phys, ray.position, ray.direction,
+                                                  1000.0f, &hitPt, &hitNorm, NULL)) {
                             if (g_selectedType == ENTITY_BLOCK) {
-                                tempRemoved = g_blockBodies[g_selectedIdx];
-                                if (tempRemoved != BRUSH_BODY_INVALID)
-                                    BrushPhysicsRemoveBody(&g_phys, tempRemoved);
-                                g_blockBodies[g_selectedIdx] = BRUSH_BODY_INVALID;
-                            }
-                            Vector3 hitPt, hitNorm;
-                            if (BrushPhysicsRaycastEx(&g_phys, ray.position, ray.direction,
-                                                      1000.0f, &hitPt, &hitNorm, NULL)) {
-                                if (g_selectedType == ENTITY_BLOCK) {
-                                    BrushSceneBlock *b = &g_scene.blocks[g_selectedIdx];
-                                    float half = (fabsf(hitNorm.x) * b->size.x +
-                                                  fabsf(hitNorm.y) * b->size.y +
-                                                  fabsf(hitNorm.z) * b->size.z) * 0.5f;
-                                    newPos = Vector3Add(hitPt, Vector3Scale(hitNorm, half));
-                                } else if (g_selectedType == ENTITY_LIGHT) {
-                                    newPos = Vector3Add(hitPt, Vector3Scale(hitNorm, 0.2f));
-                                } else {
-                                    newPos = hitPt;
-                                }
+                                BrushSceneBlock *b = &g_scene.blocks[g_selectedIdx];
+                                float half = (fabsf(hitNorm.x) * b->size.x +
+                                              fabsf(hitNorm.y) * b->size.y +
+                                              fabsf(hitNorm.z) * b->size.z) * 0.5f;
+                                newPos = Vector3Add(hitPt, Vector3Scale(hitNorm, half));
+                            } else if (g_selectedType == ENTITY_LIGHT) {
+                                newPos = Vector3Add(hitPt, Vector3Scale(hitNorm, 0.2f));
+                            } else {
+                                newPos = hitPt;
                             }
                         }
                     }
@@ -901,7 +918,6 @@ int main() {
                         b->pos = newPos;
                         if (g_gizmoOp == ImGuizmo::ROTATE) b->rot = newRot;
                         if (g_gizmoOp == ImGuizmo::SCALE) b->size = newScale;
-                        RebuildAllColliders();
                     } else if (g_selectedType == ENTITY_LIGHT) {
                         g_scene.lights[g_selectedIdx].light.position = newPos;
                     } else if (g_selectedType == ENTITY_SPAWN) {
