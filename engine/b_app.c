@@ -68,6 +68,29 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
         TraceLog(LOG_INFO, "BRUSH: SMAA %s", post->smaaEnabled ? "ON" : "OFF");
       }
     }
+    if (IsKeyPressed(KEY_F7)) {
+      struct BrushPost *post = BrushRenderGetPost();
+      if (post) {
+        post->dofEnabled = !post->dofEnabled;
+        TraceLog(LOG_INFO, "BRUSH: DOF %s", post->dofEnabled ? "ON" : "OFF");
+      }
+    }
+    if (IsKeyPressed(KEY_F8)) {
+      struct BrushPost *post = BrushRenderGetPost();
+      if (post) {
+        post->godRaysEnabled = !post->godRaysEnabled;
+        TraceLog(LOG_INFO, "BRUSH: god rays %s",
+                 post->godRaysEnabled ? "ON" : "OFF");
+      }
+    }
+    if (IsKeyPressed(KEY_F9)) {
+      struct BrushPost *post = BrushRenderGetPost();
+      if (post) {
+        post->volFogEnabled = !post->volFogEnabled;
+        TraceLog(LOG_INFO, "BRUSH: volumetric fog %s",
+                 post->volFogEnabled ? "ON" : "OFF");
+      }
+    }
 
     // Fixed-timestep simulation with a substep cap: movement feel is
     // identical at any render rate, and a long hitch can't spiral.

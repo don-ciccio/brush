@@ -46,6 +46,8 @@ typedef struct BrushPost {
   RenderTexture2D aoRaw;   // half-render-res SSAO (R), 8-bit
   RenderTexture2D aoBlur;  // 4x4 box-blurred SSAO
   RenderTexture2D smaaEdgesTex, smaaBlendTex, presentAA; // SMAA pass targets
+  RenderTexture2D godRayA, godRayB; // quarter-render-res HDR shaft targets
+  RenderTexture2D volFogTex;        // half-render-res HDR fog (straight alpha)
 
   Shader bright;
   Shader blur;
@@ -53,6 +55,8 @@ typedef struct BrushPost {
   Shader sharpen;
   Shader ssao, ssaoBlur;
   Shader smaaEdges, smaaWeights, smaaBlend;
+  Shader godrays; // quarter-res shadow-map raymarch (godrays.fs)
+  Shader volFog;  // half-res height-fog raymarch (volfog.fs)
   Texture2D noise;               // 4x4 SSAO rotation vectors
   Texture2D smaaArea, smaaSearch; // SMAA precomputed lookups (assets/smaa)
 
@@ -68,6 +72,15 @@ typedef struct BrushPost {
   int locEdgesMetrics, locEdgesThreshold;
   int locWeightsMetrics, locWeightsArea, locWeightsSearch;
   int locBlendMetrics, locBlendWeights;
+  int locDofDepth, locDofNear, locDofFar, locDofFocus, locDofRange;
+  int locDofStrength, locDofEnabled;
+  int locGodRayTex, locGodRaysOn; // composite-side god-ray samplers
+  int locGRDepth, locGRShadowMap, locGRInvVP, locGRMatLight, locGRCamPos;
+  int locGRSunDir, locGRSunCol, locGRRes, locGRTime;
+  int locGRDecay, locGRDensity, locGRWeight, locGRExposure;
+  int locVFDepth, locVFInvVP, locVFCamPos, locVFSunDir, locVFSunCol;
+  int locVFSkyCol, locVFTime, locVFWind;
+  int locVFDensity, locVFGroundY, locVFTopY, locVFCoverage;
 
   // tunables (env-overridable, see b_post.c)
   float bloomThreshold; // luminance above which pixels bloom
@@ -93,6 +106,41 @@ typedef struct BrushPost {
   // so this is the engine's edge anti-aliasing.
   bool smaaEnabled;
   float smaaThreshold; // edge threshold (0.05..0.1)
+
+  // Depth of field (far-only bokeh in the composite): keeps subject and
+  // foreground crisp, softens only the distance — an atmospheric hint, not
+  // a lens sim.
+  bool dofEnabled;
+  float dofRange;    // metres from the focus plane to full blur
+  float dofStrength; // max sharp->blur blend (0..1)
+
+  // God rays: quarter-res raymarch of the sun shadow map, blurred, added
+  // over the scene in the composite. Needs the shadow pass to have run.
+  bool godRaysEnabled;
+  float godRaysDecay;    // max ray length (1.0 = 100 m)
+  float godRaysDensity;  // scattering density multiplier
+  float godRaysWeight;   // Henyey-Greenstein anisotropy g
+  float godRaysExposure; // overall shaft brightness
+
+  // Volumetric ground fog (half-res raymarch, alpha over the scene BEFORE
+  // bloom/god rays). OFF by default — enable with BRUSH_VOLFOG=1 or the F9
+  // toggle; it's a scene-mood feature, not a pipeline default.
+  bool volFogEnabled;
+  float volFogDensity;  // base extinction per metre
+  float volFogGroundY;  // altitude where fog is densest (m)
+  float volFogTopY;     // metres above groundY where fog fades out
+  float volFogCoverage; // 0..1 — higher = fewer/smaller banks
+
+  // Per-frame scene state for the depth/volumetric passes, set by the
+  // renderer each frame before BrushPostRun (same pattern as the SSAO
+  // camera matrices above).
+  Vector3 cameraPos;
+  float focusDist;     // auto-DOF focus distance (camera -> target)
+  Vector3 sunDir;      // current light direction (sun or moon)
+  Vector3 sunColor;
+  Vector3 ambientColor; // sky/fill colour (fog body tint)
+  Matrix lightVP;       // shadow-pass light matrix
+  Texture2D shadowMap;  // shadow depth map; id 0 = no shadow pass this frame
 
   bool ready; // false if the HDR framebuffer failed (post silently disabled)
 } BrushPost;

@@ -99,8 +99,26 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->ssaoStrength = EnvF("BRUSH_SSAO_STRENGTH", 0.50f);
   pp->smaaEnabled = (getenv("BRUSH_NO_SMAA") == NULL);
   pp->smaaThreshold = EnvF("BRUSH_SMAA_THRESH", 0.08f);
+  // DOF/god-ray defaults are the donor's tuned values (wide focal zone +
+  // subtle strength: an atmospheric hint for third-person cameras).
+  pp->dofEnabled = (getenv("BRUSH_NO_DOF") == NULL);
+  pp->dofRange = EnvF("BRUSH_DOF_RANGE", 120.0f);
+  pp->dofStrength = EnvF("BRUSH_DOF_STRENGTH", 0.25f);
+  pp->godRaysEnabled = (getenv("BRUSH_NO_GODRAYS") == NULL);
+  pp->godRaysDecay = EnvF("BRUSH_GODRAYS_DECAY", 1.0f);
+  pp->godRaysDensity = EnvF("BRUSH_GODRAYS_DENSITY", 0.04f);
+  pp->godRaysWeight = EnvF("BRUSH_GODRAYS_WEIGHT", 0.85f);
+  pp->godRaysExposure = EnvF("BRUSH_GODRAYS_EXP", 0.7f);
+  // Volumetric fog is OPT-IN (scene mood, not a pipeline default).
+  pp->volFogEnabled = (getenv("BRUSH_VOLFOG") != NULL);
+  pp->volFogDensity = EnvF("BRUSH_VOLFOG_DENSITY", 0.12f);
+  pp->volFogGroundY = EnvF("BRUSH_VOLFOG_GROUND", 0.0f);
+  pp->volFogTopY = EnvF("BRUSH_VOLFOG_TOP", 3.0f);
+  pp->volFogCoverage = EnvF("BRUSH_VOLFOG_COVERAGE", 0.44f);
   pp->projectionMatrix = MatrixIdentity();
   pp->viewMatrix = MatrixIdentity();
+  pp->lightVP = MatrixIdentity();
+  pp->focusDist = 6.0f;
 #if defined(__APPLE__)
   pp->displayP3 = (getenv("BRUSH_NO_P3") == NULL) ? 1.0f : 0.0f;
 #else
@@ -126,6 +144,12 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->aoBlur = LoadRenderTexture(pp->renderW / 2, pp->renderH / 2);
   SetTextureFilter(pp->aoBlur.texture, TEXTURE_FILTER_BILINEAR);
   SetTextureWrap(pp->aoBlur.texture, TEXTURE_WRAP_CLAMP);
+
+  // God rays at quarter render-res (fillrate), fog at half render-res; both
+  // HDR since they add/blend linear light.
+  pp->godRayA = LoadHDRTarget(pp->renderW / 4, pp->renderH / 4, false);
+  pp->godRayB = LoadHDRTarget(pp->renderW / 4, pp->renderH / 4, false);
+  pp->volFogTex = LoadHDRTarget(pp->renderW / 2, pp->renderH / 2, false);
 
   // SMAA pass targets at logical res (it runs on the LDR present image).
   pp->smaaEdgesTex = LoadRenderTexture(pp->outW, pp->outH);
@@ -171,6 +195,48 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locSsaoBlurTexel = GetShaderLocation(pp->ssaoBlur, "uTexel");
   pp->locAOTex = GetShaderLocation(pp->composite, "uAO");
   pp->locAOEnabled = GetShaderLocation(pp->composite, "uAOEnabled");
+
+  // --- DOF (lives in the composite) ---
+  pp->locDofDepth = GetShaderLocation(pp->composite, "uDepth");
+  pp->locDofNear = GetShaderLocation(pp->composite, "uNear");
+  pp->locDofFar = GetShaderLocation(pp->composite, "uFar");
+  pp->locDofFocus = GetShaderLocation(pp->composite, "uFocusDistance");
+  pp->locDofRange = GetShaderLocation(pp->composite, "uFocusRange");
+  pp->locDofStrength = GetShaderLocation(pp->composite, "uDofStrength");
+  pp->locDofEnabled = GetShaderLocation(pp->composite, "uDofEnabled");
+
+  // --- God rays ---
+  pp->godrays = LoadShader(NULL, "engine/shaders/godrays.fs");
+  pp->locGRDepth = GetShaderLocation(pp->godrays, "uDepth");
+  pp->locGRShadowMap = GetShaderLocation(pp->godrays, "uShadowMap");
+  pp->locGRInvVP = GetShaderLocation(pp->godrays, "uInvViewProj");
+  pp->locGRMatLight = GetShaderLocation(pp->godrays, "uMatLight");
+  pp->locGRCamPos = GetShaderLocation(pp->godrays, "uCameraPos");
+  pp->locGRSunDir = GetShaderLocation(pp->godrays, "uSunDir");
+  pp->locGRSunCol = GetShaderLocation(pp->godrays, "uSunColor");
+  pp->locGRRes = GetShaderLocation(pp->godrays, "uResolution");
+  pp->locGRTime = GetShaderLocation(pp->godrays, "uTime");
+  pp->locGRDecay = GetShaderLocation(pp->godrays, "uGodRaysDecay");
+  pp->locGRDensity = GetShaderLocation(pp->godrays, "uGodRaysDensity");
+  pp->locGRWeight = GetShaderLocation(pp->godrays, "uGodRaysWeight");
+  pp->locGRExposure = GetShaderLocation(pp->godrays, "uGodRaysExposure");
+  pp->locGodRayTex = GetShaderLocation(pp->composite, "uGodRayTex");
+  pp->locGodRaysOn = GetShaderLocation(pp->composite, "uGodRaysOn");
+
+  // --- Volumetric ground fog ---
+  pp->volFog = LoadShader(NULL, "engine/shaders/volfog.fs");
+  pp->locVFDepth = GetShaderLocation(pp->volFog, "uDepth");
+  pp->locVFInvVP = GetShaderLocation(pp->volFog, "uInvViewProj");
+  pp->locVFCamPos = GetShaderLocation(pp->volFog, "uCameraPos");
+  pp->locVFSunDir = GetShaderLocation(pp->volFog, "uSunDir");
+  pp->locVFSunCol = GetShaderLocation(pp->volFog, "uSunColor");
+  pp->locVFSkyCol = GetShaderLocation(pp->volFog, "uSkyColor");
+  pp->locVFTime = GetShaderLocation(pp->volFog, "uTime");
+  pp->locVFWind = GetShaderLocation(pp->volFog, "uWindDir");
+  pp->locVFDensity = GetShaderLocation(pp->volFog, "uFogDensity");
+  pp->locVFGroundY = GetShaderLocation(pp->volFog, "uFogGroundY");
+  pp->locVFTopY = GetShaderLocation(pp->volFog, "uFogTopY");
+  pp->locVFCoverage = GetShaderLocation(pp->volFog, "uFogCoverage");
 
   // Hemisphere kernel: cosine-ish samples packed toward the origin so
   // near-surface occlusion dominates (LearnOpenGL-style).
@@ -253,6 +319,9 @@ void BrushPostUnload(BrushPost *pp) {
   UnloadRenderTexture(pp->smaaEdgesTex);
   UnloadRenderTexture(pp->smaaBlendTex);
   UnloadRenderTexture(pp->presentAA);
+  UnloadHDRTarget(&pp->godRayA);
+  UnloadHDRTarget(&pp->godRayB);
+  UnloadHDRTarget(&pp->volFogTex);
   UnloadTexture(pp->noise);
   UnloadTexture(pp->smaaArea);
   UnloadTexture(pp->smaaSearch);
@@ -265,6 +334,8 @@ void BrushPostUnload(BrushPost *pp) {
   UnloadShader(pp->smaaEdges);
   UnloadShader(pp->smaaWeights);
   UnloadShader(pp->smaaBlend);
+  UnloadShader(pp->godrays);
+  UnloadShader(pp->volFog);
   *pp = (BrushPost){0};
 }
 
@@ -328,6 +399,60 @@ void BrushPostRun(BrushPost *pp, float time) {
   int hw = pp->renderW / 2, hh = pp->renderH / 2;
   int qw = pp->renderW / 4, qh = pp->renderH / 4;
   int ew = pp->renderW / 8, eh = pp->renderH / 8;
+
+  Matrix invViewProj =
+      MatrixInvert(MatrixMultiply(pp->viewMatrix, pp->projectionMatrix));
+  float camPos[3] = {pp->cameraPos.x, pp->cameraPos.y, pp->cameraPos.z};
+  float sunDir[3] = {pp->sunDir.x, pp->sunDir.y, pp->sunDir.z};
+  float sunCol[3] = {pp->sunColor.x, pp->sunColor.y, pp->sunColor.z};
+
+  // -1. Volumetric ground fog: raymarch the view ray up to the scene depth
+  //     into a half-res target, then alpha-blend over the HDR scene. Runs
+  //     FIRST so the fog is part of the scene when SSAO/bloom/god rays
+  //     sample it; the march stops at the rasterized surface, so geometry
+  //     occludes the fog.
+  if (pp->volFogEnabled) {
+    // Ambient/sun colours are linear in brush (lit.fs treats them so).
+    float skyCol[3] = {pp->ambientColor.x * pp->exposure,
+                       pp->ambientColor.y * pp->exposure,
+                       pp->ambientColor.z * pp->exposure};
+    float wind[2] = {0.82f, 0.40f}; // gentle horizontal drift
+    // Keep most of the mist at midday: fade density by at most 40% as the
+    // sun climbs (full density at dawn/dusk).
+    float dayFade = (pp->sunDir.y - 0.10f) / (0.45f - 0.10f);
+    if (dayFade < 0.0f) dayFade = 0.0f;
+    if (dayFade > 1.0f) dayFade = 1.0f;
+    float mistDensity = pp->volFogDensity * (1.0f - 0.40f * dayFade);
+
+    BeginTextureMode(pp->volFogTex);
+    ClearBackground(BLANK);
+    BeginShaderMode(pp->volFog);
+    SetShaderValueTexture(pp->volFog, pp->locVFDepth, pp->scene.depth);
+    SetShaderValueMatrix(pp->volFog, pp->locVFInvVP, invViewProj);
+    SetShaderValue(pp->volFog, pp->locVFCamPos, camPos, SHADER_UNIFORM_VEC3);
+    SetShaderValue(pp->volFog, pp->locVFSunDir, sunDir, SHADER_UNIFORM_VEC3);
+    SetShaderValue(pp->volFog, pp->locVFSunCol, sunCol, SHADER_UNIFORM_VEC3);
+    SetShaderValue(pp->volFog, pp->locVFSkyCol, skyCol, SHADER_UNIFORM_VEC3);
+    SetShaderValue(pp->volFog, pp->locVFTime, &time, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->volFog, pp->locVFWind, wind, SHADER_UNIFORM_VEC2);
+    SetShaderValue(pp->volFog, pp->locVFDensity, &mistDensity,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->volFog, pp->locVFGroundY, &pp->volFogGroundY,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->volFog, pp->locVFTopY, &pp->volFogTopY,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->volFog, pp->locVFCoverage, &pp->volFogCoverage,
+                   SHADER_UNIFORM_FLOAT);
+    BlitTexture(pp->scene.texture, pp->renderW, pp->renderH, hw, hh);
+    EndShaderMode();
+    EndTextureMode();
+
+    BeginTextureMode(pp->scene);
+    BeginBlendMode(BLEND_ALPHA);
+    BlitTexture(pp->volFogTex.texture, hw, hh, pp->renderW, pp->renderH);
+    EndBlendMode();
+    EndTextureMode();
+  }
 
   // 0. SSAO: reconstruct view-space positions from scene depth, sample the
   //    rotated hemisphere kernel into aoRaw (half-res), then 4x4 box-blur to
@@ -399,6 +524,39 @@ void BrushPostRun(BrushPost *pp, float time) {
   AddUpsample(pp->bloomC.texture, qw, qh, hw, hh, 0.8f);
   EndTextureMode();
 
+  // 2b. God rays: raymarch the sun shadow map at quarter res, then a
+  //     separable blur smooths the march dither. Skipped (target stays
+  //     black) without a shadow pass or with the sun below the horizon.
+  bool raysOn = pp->godRaysEnabled && pp->shadowMap.id != 0 &&
+                pp->sunDir.y > 0.0f;
+  BeginTextureMode(pp->godRayA);
+  ClearBackground(BLACK);
+  if (raysOn) {
+    BeginShaderMode(pp->godrays);
+    SetShaderValueTexture(pp->godrays, pp->locGRDepth, pp->scene.depth);
+    SetShaderValueTexture(pp->godrays, pp->locGRShadowMap, pp->shadowMap);
+    SetShaderValueMatrix(pp->godrays, pp->locGRInvVP, invViewProj);
+    SetShaderValueMatrix(pp->godrays, pp->locGRMatLight, pp->lightVP);
+    SetShaderValue(pp->godrays, pp->locGRCamPos, camPos, SHADER_UNIFORM_VEC3);
+    SetShaderValue(pp->godrays, pp->locGRSunDir, sunDir, SHADER_UNIFORM_VEC3);
+    SetShaderValue(pp->godrays, pp->locGRSunCol, sunCol, SHADER_UNIFORM_VEC3);
+    float grRes[2] = {(float)qw, (float)qh};
+    SetShaderValue(pp->godrays, pp->locGRRes, grRes, SHADER_UNIFORM_VEC2);
+    SetShaderValue(pp->godrays, pp->locGRTime, &time, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->godrays, pp->locGRDecay, &pp->godRaysDecay,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->godrays, pp->locGRDensity, &pp->godRaysDensity,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->godrays, pp->locGRWeight, &pp->godRaysWeight,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(pp->godrays, pp->locGRExposure, &pp->godRaysExposure,
+                   SHADER_UNIFORM_FLOAT);
+    BlitTexture(pp->scene.texture, pp->renderW, pp->renderH, qw, qh);
+    EndShaderMode();
+  }
+  EndTextureMode();
+  if (raysOn) BlurLevel(pp, pp->godRayA, pp->godRayB, qw, qh, 2);
+
   // 3. Composite into the logical-res present target. The composite shader
   //    flips Y (render textures are stored bottom-up); the final blit flips
   //    back, so the parity nets out upright.
@@ -417,10 +575,30 @@ void BrushPostRun(BrushPost *pp, float time) {
   float aoOn = pp->ssaoEnabled ? 1.0f : 0.0f;
   SetShaderValue(pp->composite, pp->locAOEnabled, &aoOn, SHADER_UNIFORM_FLOAT);
 
+  // DOF: auto-focus at the camera target; near/far match raylib's projection
+  // cull planes (rlgl RL_CULL_DISTANCE_NEAR/FAR).
+  float dofOn = pp->dofEnabled ? 1.0f : 0.0f;
+  float nearP = 0.01f, farP = 1000.0f;
+  SetShaderValue(pp->composite, pp->locDofEnabled, &dofOn,
+                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(pp->composite, pp->locDofNear, &nearP, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(pp->composite, pp->locDofFar, &farP, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(pp->composite, pp->locDofFocus, &pp->focusDist,
+                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(pp->composite, pp->locDofRange, &pp->dofRange,
+                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(pp->composite, pp->locDofStrength, &pp->dofStrength,
+                 SHADER_UNIFORM_FLOAT);
+  float raysOnF = raysOn ? 1.0f : 0.0f;
+  SetShaderValue(pp->composite, pp->locGodRaysOn, &raysOnF,
+                 SHADER_UNIFORM_FLOAT);
+
   BeginTextureMode(pp->present);
   BeginShaderMode(pp->composite);
   SetShaderValueTexture(pp->composite, pp->locBloomTex, pp->bloomA.texture);
   SetShaderValueTexture(pp->composite, pp->locAOTex, pp->aoBlur.texture);
+  SetShaderValueTexture(pp->composite, pp->locDofDepth, pp->scene.depth);
+  SetShaderValueTexture(pp->composite, pp->locGodRayTex, pp->godRayA.texture);
   BlitTexture(pp->scene.texture, pp->renderW, pp->renderH, pp->outW, pp->outH);
   EndShaderMode();
   EndTextureMode();

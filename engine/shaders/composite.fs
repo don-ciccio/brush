@@ -22,6 +22,17 @@ uniform float uTime;       // animates the grain dither
 uniform float uDisplayP3;  // 1 = apply the sRGB->P3 gamut map (Apple wide-gamut)
 uniform float uP3Strength; // 1 = accurate map, lower = punchier native P3
 
+// Depth of field (far-only bokeh: subject/foreground crisp, distance soft).
+uniform sampler2D uDepth;     // scene depth (circle of confusion)
+uniform float uNear, uFar;    // camera clip planes (linearize depth)
+uniform float uFocusDistance; // metres in focus (auto: camera->target)
+uniform float uFocusRange;    // metres from focus to full blur
+uniform float uDofStrength;   // max sharp->blur blend
+uniform float uDofEnabled;    // 1 = apply DoF, 0 = off
+
+uniform sampler2D uGodRayTex; // blurred god-ray shafts (godrays.fs)
+uniform float uGodRaysOn;     // 1 = add the shafts
+
 // Filmic ACES (Narkowicz) — expects LINEAR input.
 vec3 ACESFilm(vec3 x) {
     float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
@@ -43,13 +54,81 @@ vec3 AdjustVibrance(vec3 color, float amount) {
     return max(mix(vec3(luma), color, 1.0 + amount * (1.0 - sat)), 0.0);
 }
 
+// Circular bokeh blur with golden-spiral (Fermat) sampling and bilateral
+// depth-aware weights so background blur never bleeds onto sharp foreground
+// edges (donor implementation; refs: GPU Zen 2017, SIGGRAPH 2014).
+vec3 BokehBlur(vec2 uv, float coc, float linZ) {
+    const float GOLDEN_ANGLE = 2.39996323;
+    const int NUM_SAMPLES = 16;
+
+    vec3 accumulator = vec3(0.0);
+    float totalWeight = 0.0;
+
+    // Small disc for gentle atmospheric blur, resolution-independent.
+    float maxRadiusTexels = 3.5;
+    vec2 maxOffset = (maxRadiusTexels / uResolution) * coc;
+
+    // Per-pixel random rotation converts sampling banding into soft grain.
+    float noiseVal = hash12(uv * uResolution + fract(uTime));
+    float angle = noiseVal * 6.2831853;
+    float c = cos(angle);
+    float s = sin(angle);
+    mat2 ditherRot = mat2(c, s, -s, c);
+
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        float r = sqrt(float(i + 0.5) / float(NUM_SAMPLES));
+        float theta = float(i) * GOLDEN_ANGLE;
+        vec2 offset = ditherRot * (vec2(cos(theta), sin(theta)) * r * maxOffset);
+        vec2 sampleUV = uv + offset;
+
+        vec3 col = texture(texture0, sampleUV).rgb;
+        float d = texture(uDepth, sampleUV).r;
+        float sz = (uNear * uFar) / (uFar - d * (uFar - uNear));
+
+        // Sample's own CoC (far-only DoF).
+        float scoc = 0.0;
+        if (sz > uFocusDistance) {
+            scoc = clamp((sz - uFocusDistance) / uFocusRange, 0.0, 1.0);
+        }
+
+        // Bilateral weight: background samples only bleed if both center and
+        // sample are blurry; the allowable depth gap scales with blur size.
+        float depthDiff = sz - linZ;
+        float maxGap = max(coc, 0.01) * 25.0;
+        float w = (depthDiff > 0.0) ? min(coc, scoc) : scoc;
+        w *= 1.0 - smoothstep(maxGap * 0.5, maxGap, abs(depthDiff));
+
+        accumulator += col * w;
+        totalWeight += w;
+    }
+
+    return (totalWeight > 0.0) ? (accumulator / totalWeight)
+                               : texture(texture0, uv).rgb;
+}
+
 void main() {
     vec2 uv = vec2(fragTexCoord.x, 1.0 - fragTexCoord.y);
 
+    // 0. Depth of field: circle of confusion from linear distance past the
+    //    focus plane; quadratic onset holds sharpness before transitioning.
+    //    Sky (depth ~1) bypasses the blur entirely.
+    float depth = texture(uDepth, uv).r;
+    float linZ = (uNear * uFar) / (uFar - depth * (uFar - uNear));
+    float coc = 0.0;
+    if (linZ > uFocusDistance) {
+        coc = clamp((linZ - uFocusDistance) / uFocusRange, 0.0, 1.0);
+    }
+    coc = coc * coc * uDofStrength * uDofEnabled;
+
+    vec3 sceneCol = (coc < 0.01 || depth >= 0.9999)
+                        ? texture(texture0, uv).rgb
+                        : BokehBlur(uv, coc, linZ);
+
     // 1. Ambient occlusion on the scene (not on bloom — bloom is light
-    //    bleed), then bloom add (linear HDR) + exposure.
-    vec3 hdr = texture(texture0, uv).rgb;
+    //    bleed), god-ray shafts + bloom add (linear HDR), then exposure.
+    vec3 hdr = sceneCol;
     hdr *= mix(1.0, texture(uAO, uv).r, uAOEnabled);
+    hdr += texture(uGodRayTex, uv).rgb * uGodRaysOn;
     hdr += texture(uBloom, uv).rgb * uBloomIntensity;
     hdr *= uExposure;
 

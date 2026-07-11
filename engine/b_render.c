@@ -285,6 +285,16 @@ void BrushRenderExecute(Camera3D camera) {
 
   if (usePost) {
     BrushPostEndScene(&g_r.post);
+    // Scene state for the depth/volumetric passes (DOF focus, god rays,
+    // ground fog) — same handoff pattern as the SSAO camera matrices.
+    g_r.post.cameraPos = camera.position;
+    g_r.post.focusDist = Vector3Distance(camera.position, camera.target);
+    g_r.post.sunDir = g_r.sunDir;
+    g_r.post.sunColor = g_r.sunColor;
+    g_r.post.ambientColor = g_r.ambient;
+    g_r.post.lightVP = g_r.shadow.lightVP;
+    g_r.post.shadowMap =
+        shadowsOn ? g_r.shadow.map.depth : (Texture2D){0};
     BrushPostRun(&g_r.post, (float)GetTime());
   }
 
