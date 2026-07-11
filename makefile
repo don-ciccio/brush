@@ -23,6 +23,7 @@ BUILD_DIR = build
 ENGINE_LIB = $(BUILD_DIR)/libbrush.a
 SANDBOX = $(BUILD_DIR)/sandbox
 EDITOR = $(BUILD_DIR)/editor
+PACKAGER = $(BUILD_DIR)/packager
 
 ENGINE_SRC = $(wildcard engine/*.c)
 ENGINE_OBJ = $(ENGINE_SRC:engine/%.c=$(BUILD_DIR)/engine_%.o)
@@ -40,9 +41,9 @@ ifeq ($(UNAME_S),Darwin)
     EDITOR_OBJ += $(BUILD_DIR)/editor_macos_window.o
 endif
 
-DEPS = $(ENGINE_OBJ:.o=.d) $(BUILD_DIR)/sandbox_main.d $(IMGUI_OBJS:.o=.d) $(EDITOR_OBJ:.o=.d)
+DEPS = $(ENGINE_OBJ:.o=.d) $(BUILD_DIR)/sandbox_main.d $(BUILD_DIR)/packager_main.d $(IMGUI_OBJS:.o=.d) $(EDITOR_OBJ:.o=.d)
 
-all: $(SANDBOX) $(EDITOR)
+all: $(SANDBOX) $(EDITOR) $(PACKAGER)
 
 # Engine builds as a static library; games link it and include engine/brush.h.
 $(ENGINE_LIB): $(ENGINE_OBJ)
@@ -55,6 +56,13 @@ $(BUILD_DIR)/sandbox_main.o: sandbox/main.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(SANDBOX): $(BUILD_DIR)/sandbox_main.o $(ENGINE_LIB)
+	$(CC) $^ -o $@ $(LIBS)
+
+# Packager: cooks + packs a project into game.pak (tools/packager.c).
+$(BUILD_DIR)/packager_main.o: tools/packager.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(PACKAGER): $(BUILD_DIR)/packager_main.o $(ENGINE_LIB)
 	$(CC) $^ -o $@ $(LIBS)
 
 # Compile ImGui Core

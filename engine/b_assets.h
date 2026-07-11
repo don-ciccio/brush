@@ -91,6 +91,22 @@ bool BrushAssetsSetImportParams(const char *path,
 // (consumers must tell the lit shader to reconstruct Z from alpha/green).
 bool BrushAssetsIsSwizzledNormal(Texture2D tex);
 
+// --- Release packaging (.pak) --------------------------------------------------
+// Mount a pak archive (tools/packager output) as the top of the lookup
+// chain. The pak holds the project tree verbatim — logical asset paths
+// (scenes, models, terrain) plus the cooked .brush/imported/ entries — and
+// mounting hooks raylib's file-load callbacks, so EVERY engine/raylib read
+// of a project-relative path (LoadModel, scene text, sculpt blobs, cooked
+// textures) transparently resolves from the archive; paths not in the pak
+// fall through to disk. Call once at startup (the player mounts ./game.pak
+// when present). Returns false if missing/corrupt.
+bool BrushAssetsMount(const char *pakPath);
+
+// Cook every cookable texture under `dir` (recursive) so the import cache
+// is complete and current. Pure CPU — the packager runs this headless
+// before packing. Returns the number of textures (re)cooked.
+int BrushAssetsCookTree(const char *dir);
+
 // Unload everything regardless of refcounts (engine shutdown).
 void BrushAssetsShutdown(void);
 

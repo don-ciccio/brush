@@ -27,12 +27,17 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   strncpy(temp.path, path, BRUSH_SCENE_PATH_MAX - 1);
   temp.path[BRUSH_SCENE_PATH_MAX - 1] = '\0';
 
-  FILE *f = fopen(path, "r");
-  if (f == NULL) return false;
+  // LoadFileText (not fopen) so a mounted release pak serves the scene.
+  char *text = LoadFileText(path);
+  if (text == NULL) return false;
 
-  char line[512];
+  char *cursor = text;
   int lineNo = 0;
-  while (fgets(line, sizeof(line), f) != NULL) {
+  while (*cursor != '\0') {
+    char *line = cursor;
+    char *nl = strchr(cursor, '\n');
+    if (nl != NULL) { *nl = '\0'; cursor = nl + 1; }
+    else cursor += strlen(cursor);
     lineNo++;
     // Strip leading whitespace; skip blanks and comments.
     char *p = line;
@@ -110,7 +115,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
                lineNo, p);
     }
   }
-  fclose(f);
+  UnloadFileText(text);
 
   temp.modTime = GetFileModTime(path);
   BrushSceneUnloadMaterials(s); // drop the outgoing scene's texture refs

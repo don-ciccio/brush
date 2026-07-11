@@ -13,3 +13,6 @@ editor_layout.ini
 
 # The engine repo is not a user project (engine-dev mode runs the gym in place)
 /project.def
+
+# Packager output (run build/packager in a project)
+game.pak

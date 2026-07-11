@@ -22,17 +22,18 @@ bool BrushProjectLoad(BrushProject *p, const char *dir) {
   ProjectDefaults(p);
   char path[512];
   snprintf(path, sizeof(path), "%s/project.def", dir);
-  FILE *f = fopen(path, "r");
-  if (f == NULL) return false;
+  // LoadFileText (not fopen) so a mounted release pak can serve it.
+  char *text = LoadFileText(path);
+  if (text == NULL) return false;
 
-  char line[512];
-  while (fgets(line, sizeof(line), f) != NULL) {
-    char *s = line;
+  char *cursor = text;
+  while (*cursor != '\0') {
+    char *s = cursor;
+    char *nl = strchr(cursor, '\n');
+    if (nl != NULL) { *nl = '\0'; cursor = nl + 1; }
+    else cursor += strlen(cursor);
     while (*s == ' ' || *s == '\t') s++;
-    if (*s == '\0' || *s == '\n' || *s == '#') continue;
-    // Values may contain spaces (project names) — take the rest of the line.
-    char *nl = strchr(s, '\n');
-    if (nl != NULL) *nl = '\0';
+    if (*s == '\0' || *s == '#') continue;
     int version;
     if (sscanf(s, "version %d", &version) == 1) {
       if (version != 1)
@@ -46,7 +47,7 @@ bool BrushProjectLoad(BrushProject *p, const char *dir) {
       TraceLog(LOG_WARNING, "BRUSH project: %s unknown line: %.40s", path, s);
     }
   }
-  fclose(f);
+  UnloadFileText(text);
   return true;
 }
 

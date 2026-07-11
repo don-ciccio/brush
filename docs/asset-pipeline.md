@@ -223,7 +223,7 @@ right; two hardening details added (alignment, hashed lookup):
 | **0** | ~~Engine/project path split (BrushEnginePath + chdir), project.def, Project Manager screen, templates (Empty, Gym), player `--project`~~ DONE | everything below; "brush as a product" |
 | **1** | ~~.import sidecars, `.brush/imported/` cache, Tier-0 .ctex (mips, max_size), invalidation, worker cooking, live re-import on change~~ DONE | fast loads, VRAM safety, drag-in textures |
 | **2** | ~~stb_dxt BC1/BC3 tier, normal-map profile, import settings UI in the editor (per-texture panel)~~ DONE | shipping-quality VRAM budgets |
-| **3** | packager tool + pak mount + release player build | distributable games |
+| **3** | ~~packager tool + pak mount + release player build~~ DONE | distributable games |
 
 Each phase lands usable on its own; no phase requires touching game-facing
 APIs (`BrushAssetsTexture(path)` is already the stable seam all of this
@@ -246,3 +246,17 @@ chains with a non-4-aligned level (512x256 hits 4x2) cook uncompressed
 with a warning. DXT5nm state persists in the .ctex header (reserved bit0)
 and reaches the shader via BrushAssetsIsSwizzledNormal -> material props
 -> uNormalSwizzled.
+
+Phase 3 implementation notes (2026-07): the pak stores the project tree
+VERBATIM — logical asset paths plus the `.brush/imported/...ctex` cache
+paths — so lookups need no translation anywhere. Mounting hooks raylib's
+SetLoadFileData/TextCallback: every project-relative read (scene text,
+sculpt blobs, glTF models via LoadModel) resolves pak-first and falls
+through to disk; absolute engine paths simply miss the pak. b_scene and
+b_project parse from LoadFileText buffers (no fopen) for exactly this
+reason. `packager [project] --release DIR` stages a runnable folder
+(player binary named after the project, engine/shaders + engine/resources,
+project.def, game.pak) — the player's walk-up engine-root detection finds
+the staged engine/ next to the binary, so the folder is fully
+self-contained. Verified end-to-end: template project -> packager ->
+release folder runs standalone with no source assets on disk.

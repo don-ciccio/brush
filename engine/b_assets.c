@@ -353,29 +353,21 @@ static bool CtexValid(const char *srcPath, const char *ctexPath,
          h.paramsHash == ImportParamsHash(prm);
 }
 
-// GPU-upload a .ctex: read header, pipe the mip chain straight to GL.
-// MAIN THREAD only. `outSwizzled` (optional) reports the DXT5nm flag.
-static Texture2D LoadCtex(const char *ctexPath, bool *outSwizzled) {
+// GPU-upload a .ctex blob (header + packed mips). MAIN THREAD only.
+// `outSwizzled` (optional) reports the DXT5nm flag.
+static Texture2D LoadCtexFromMemory(const unsigned char *blob, int blobSize,
+                                    bool *outSwizzled) {
   Texture2D tex = {0};
   if (outSwizzled != NULL) *outSwizzled = false;
-  FILE *f = fopen(ctexPath, "rb");
-  if (f == NULL) return tex;
+  if (blob == NULL || blobSize < (int)sizeof(CtexHeader)) return tex;
   CtexHeader h;
-  if (fread(&h, sizeof(h), 1, f) != 1 || h.magic != BRUSH_CTEX_MAGIC) {
-    fclose(f);
-    return tex;
-  }
+  memcpy(&h, blob, sizeof(h));
+  if (h.magic != BRUSH_CTEX_MAGIC) return tex;
   int dataSize = MipChainSize(h.width, h.height, (int)h.format, h.mipCount);
-  void *data = malloc((size_t)dataSize);
-  if (data == NULL || fread(data, (size_t)dataSize, 1, f) != 1) {
-    free(data);
-    fclose(f);
-    return tex;
-  }
-  fclose(f);
+  if (blobSize < (int)sizeof(h) + dataSize) return tex;
   if (outSwizzled != NULL) *outSwizzled = ((h.reserved & 1u) != 0);
-  tex.id = rlLoadTexture(data, h.width, h.height, (int)h.format, h.mipCount);
-  free(data);
+  tex.id = rlLoadTexture(blob + sizeof(h), h.width, h.height, (int)h.format,
+                         h.mipCount);
   if (tex.id == 0) return (Texture2D){0};
   tex.width = h.width;
   tex.height = h.height;
@@ -387,10 +379,166 @@ static Texture2D LoadCtex(const char *ctexPath, bool *outSwizzled) {
   return tex;
 }
 
+// File wrapper around LoadCtexFromMemory.
+static Texture2D LoadCtex(const char *ctexPath, bool *outSwizzled) {
+  if (outSwizzled != NULL) *outSwizzled = false;
+  FILE *f = fopen(ctexPath, "rb");
+  if (f == NULL) return (Texture2D){0};
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  unsigned char *blob = malloc((size_t)size);
+  Texture2D tex = {0};
+  if (blob != NULL && fread(blob, (size_t)size, 1, f) == 1)
+    tex = LoadCtexFromMemory(blob, (int)size, outSwizzled);
+  free(blob);
+  fclose(f);
+  return tex;
+}
+
 static bool IsCookable(const char *path) {
   return IsFileExtension(path, ".png") || IsFileExtension(path, ".jpg") ||
          IsFileExtension(path, ".jpeg") || IsFileExtension(path, ".tga") ||
          IsFileExtension(path, ".bmp");
+}
+
+// --- .pak archive (release builds — see docs/asset-pipeline.md §4) ---------------
+// Layout: [PakHeader][data blocks, 16-aligned][index]. The index is an
+// array sorted by 64-bit FNV-1a path hash (binary search + path confirm;
+// equal hashes sit adjacent). Written by tools/packager.
+
+#define BRUSH_PAK_MAGIC 0x314B5042u // 'BPK1'
+#define BRUSH_PAK_VERSION 1
+
+typedef struct PakHeader {
+  uint32_t magic;
+  uint32_t version;
+  uint64_t indexOffset;
+} PakHeader;
+
+typedef struct PakEntry {
+  uint64_t hash;
+  uint64_t offset, size;
+  uint32_t pathOffset; // into g_pakPaths
+} PakEntry;
+
+static FILE *g_pak = NULL;
+static PakEntry *g_pakEntries = NULL;
+static int g_pakCount = 0;
+static char *g_pakPaths = NULL;
+
+static uint64_t Fnv1a64(const char *s) {
+  uint64_t h = 14695981039346656037ull;
+  while (*s) h = (h ^ (unsigned char)*s++) * 1099511628211ull;
+  return h;
+}
+
+static const PakEntry *PakFind(const char *path) {
+  if (g_pak == NULL || path == NULL) return NULL;
+  uint64_t hash = Fnv1a64(path);
+  int lo = 0, hi = g_pakCount - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (g_pakEntries[mid].hash < hash) lo = mid + 1;
+    else if (g_pakEntries[mid].hash > hash) hi = mid - 1;
+    else {
+      // Walk the run of equal hashes and confirm by path.
+      int i = mid;
+      while (i > 0 && g_pakEntries[i - 1].hash == hash) i--;
+      for (; i < g_pakCount && g_pakEntries[i].hash == hash; i++)
+        if (strcmp(g_pakPaths + g_pakEntries[i].pathOffset, path) == 0)
+          return &g_pakEntries[i];
+      return NULL;
+    }
+  }
+  return NULL;
+}
+
+// malloc'd copy of an entry's bytes (caller frees). Main thread (one FILE*).
+static unsigned char *PakRead(const PakEntry *e, int *outSize) {
+  unsigned char *data = malloc((size_t)e->size);
+  if (data == NULL) return NULL;
+  if (fseeko(g_pak, (off_t)e->offset, SEEK_SET) != 0 ||
+      fread(data, (size_t)e->size, 1, g_pak) != 1) {
+    free(data);
+    return NULL;
+  }
+  if (outSize != NULL) *outSize = (int)e->size;
+  return data;
+}
+
+// raylib file-load callbacks: pak first, then plain disk (the default
+// behavior we replace). Covers LoadModel/LoadFileText/LoadFileData for
+// every project-relative path; absolute engine paths miss the pak and
+// fall through to disk.
+static unsigned char *PakLoadFileData(const char *fileName, int *dataSize) {
+  *dataSize = 0;
+  const PakEntry *e = PakFind(fileName);
+  if (e != NULL) return PakRead(e, dataSize);
+  FILE *f = fopen(fileName, "rb");
+  if (f == NULL) {
+    TraceLog(LOG_WARNING, "FILEIO: [%s] Failed to open file", fileName);
+    return NULL;
+  }
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  unsigned char *data = (size > 0) ? malloc((size_t)size) : NULL;
+  if (data != NULL && fread(data, (size_t)size, 1, f) == 1) *dataSize = (int)size;
+  else { free(data); data = NULL; }
+  fclose(f);
+  return data;
+}
+
+static char *PakLoadFileText(const char *fileName) {
+  int size = 0;
+  unsigned char *data = PakLoadFileData(fileName, &size);
+  if (data == NULL) return NULL;
+  char *text = realloc(data, (size_t)size + 1);
+  if (text == NULL) { free(data); return NULL; }
+  text[size] = '\0';
+  return text;
+}
+
+bool BrushAssetsMount(const char *pakPath) {
+  FILE *f = fopen(pakPath, "rb");
+  if (f == NULL) return false;
+  PakHeader h;
+  if (fread(&h, sizeof(h), 1, f) != 1 || h.magic != BRUSH_PAK_MAGIC ||
+      h.version != BRUSH_PAK_VERSION) {
+    TraceLog(LOG_WARNING, "ASSETS: %s is not a valid pak", pakPath);
+    fclose(f);
+    return false;
+  }
+  if (fseeko(f, (off_t)h.indexOffset, SEEK_SET) != 0) { fclose(f); return false; }
+  uint32_t count = 0, pathBytes = 0;
+  if (fread(&count, sizeof(count), 1, f) != 1 ||
+      fread(&pathBytes, sizeof(pathBytes), 1, f) != 1) { fclose(f); return false; }
+  PakEntry *entries = malloc(sizeof(PakEntry) * count);
+  char *paths = malloc(pathBytes);
+  bool ok = (entries != NULL && paths != NULL);
+  for (uint32_t i = 0; ok && i < count; i++) {
+    ok = fread(&entries[i].hash, 8, 1, f) == 1 &&
+         fread(&entries[i].offset, 8, 1, f) == 1 &&
+         fread(&entries[i].size, 8, 1, f) == 1 &&
+         fread(&entries[i].pathOffset, 4, 1, f) == 1;
+  }
+  if (ok) ok = (fread(paths, pathBytes, 1, f) == 1);
+  if (!ok) {
+    TraceLog(LOG_WARNING, "ASSETS: %s index unreadable", pakPath);
+    free(entries);
+    free(paths);
+    fclose(f);
+    return false;
+  }
+  g_pak = f;
+  g_pakEntries = entries;
+  g_pakCount = (int)count;
+  g_pakPaths = paths;
+  SetLoadFileDataCallback(PakLoadFileData);
+  SetLoadFileTextCallback(PakLoadFileText);
+  TraceLog(LOG_INFO, "ASSETS: mounted %s (%d entries)", pakPath, g_pakCount);
+  return true;
 }
 
 // --- Cook worker (background re-imports) -----------------------------------------
@@ -481,10 +629,22 @@ static void StatSourcePair(TexEntry *e) {
 static TexEntry g_tex[BRUSH_ASSETS_MAX_TEXTURES];
 static int g_texCount = 0;
 
-// Cache-first load: valid .ctex -> fast path; else cook now (first import)
-// then load; any failure -> raw LoadTexture fallback.
+// Pak-first load (release: cooked entry straight from the archive), then
+// cache (valid .ctex), then cook-now, then raw LoadTexture fallback.
 static Texture2D AcquireTexture(TexEntry *e) {
   const char *path = e->path;
+  if (g_pak != NULL) {
+    char ctex[BRUSH_ASSETS_PATH_MAX + 32];
+    CtexPath(path, ctex, sizeof(ctex));
+    const PakEntry *pe = PakFind(ctex);
+    if (pe != NULL) {
+      int size = 0;
+      unsigned char *blob = PakRead(pe, &size);
+      Texture2D t = LoadCtexFromMemory(blob, size, &e->normalSwizzled);
+      free(blob);
+      if (t.id != 0) return t; // pak textures are final: no watch/re-import
+    }
+  }
   if (IsCookable(path) && FileExists(path)) {
     BrushTexImportParams prm;
     ImportParamsLoad(path, &prm);
@@ -643,6 +803,24 @@ bool BrushAssetsIsSwizzledNormal(Texture2D tex) {
   return false;
 }
 
+int BrushAssetsCookTree(const char *dir) {
+  int cooked = 0;
+  FilePathList fl = LoadDirectoryFilesEx(dir, NULL, true);
+  for (unsigned int i = 0; i < fl.count; i++) {
+    const char *path = fl.paths[i];
+    if (!IsCookable(path)) continue;
+    BrushTexImportParams prm;
+    ImportParamsLoad(path, &prm);
+    char ctex[BRUSH_ASSETS_PATH_MAX + 32];
+    CtexPath(path, ctex, sizeof(ctex));
+    if (CtexValid(path, ctex, &prm)) continue;
+    if (CookTexture(path, ctex, &prm)) cooked++;
+    else TraceLog(LOG_WARNING, "ASSETS: cook failed for %s", path);
+  }
+  UnloadDirectoryFiles(fl);
+  return cooked;
+}
+
 void BrushAssetsShutdown(void) {
   if (g_cookThreadUp) {
     pthread_mutex_lock(&g_jobMx);
@@ -655,4 +833,13 @@ void BrushAssetsShutdown(void) {
   for (int i = 0; i < g_texCount; i++)
     if (g_tex[i].tex.id != 0) UnloadTexture(g_tex[i].tex);
   g_texCount = 0;
+  if (g_pak != NULL) {
+    fclose(g_pak);
+    g_pak = NULL;
+    free(g_pakEntries);
+    g_pakEntries = NULL;
+    free(g_pakPaths);
+    g_pakPaths = NULL;
+    g_pakCount = 0;
+  }
 }

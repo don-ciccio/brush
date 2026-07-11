@@ -813,6 +813,9 @@ int main(int argc, char **argv) {
   // Enter the project (--project <dir> / BRUSH_PROJECT env / cwd) before
   // anything opens files: from here on the cwd IS the project root.
   s.projectLoaded = BrushProjectBoot(&s.project, argc, argv);
+  // Release build: a game.pak beside project.def serves the whole project
+  // tree (cooked textures, scenes, models) — silently absent in dev.
+  BrushAssetsMount("game.pak");
   // No project.def = engine-dev run from the repo: keep the gym fixture
   // (and its BuildGymScene bootstrap) exactly as before projects existed.
   if (!s.projectLoaded)
