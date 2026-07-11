@@ -150,13 +150,14 @@ B. ~~world.def~~ — DONE (b_scene): plain-text v1 format (blocks, lights,
 C. **Edit mode** (engine module, compiled out of release builds): fly camera,
    physics-raycast picking, move gizmo, light tuning panel (raygui),
    time-of-day slider, save to world.def.
-D. **Terrain sculpting** — the namesake feature. Final height =
-   heightFn(x,z) + sculptDelta(x,z): a sparse overlay of editable tiles
-   keyed by chunk coord, persisted with the world. Brush strokes
-   (raise/lower/smooth/flatten, wheel = radius) write the overlay and mark
-   chunks dirty; the chunk recycler already rebuilds in place (mesh,
-   collider, and gameplay queries all read the same heightmap). Heightmap
-   image import (Blender/Gaea) bulk-writes the same tiles.
+D. ~~Terrain sculpting~~ — DONE (the namesake feature): sparse delta tiles
+   (final height = heightFn + delta, allocate-on-touch), brush core with
+   ADD/SMOOTH/FLATTEN ops, dirty-chunk rebake through the recycler (mesh +
+   collider + queries update together; old mesh draws during rebake),
+   binary .terrain persistence + snapshot/restore undo. Editor sculpt mode
+   with ring cursor, radius/strength, shift-lower, cmd+Z. STILL TODO:
+   heightmap image import (Gaea/Blender bulk tile write), erode/noise ops,
+   sculpt-aware vertex colors.
 
 ## v2 — RPG toolkit
 
