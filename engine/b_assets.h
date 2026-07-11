@@ -65,6 +65,32 @@ void BrushAssetsReleaseTexture(Texture2D tex);
 // registry itself is already up to date.
 bool BrushAssetsUpdate(void);
 
+// --- Import settings (.import sidecars) --------------------------------------
+// The authored parameters for one source texture. `compress`: "none",
+// "bc1" (opaque albedo, 8:1) or "bc3" (alpha / normal maps, 4:1) — BC data
+// stays compressed in VRAM. Normal maps cooked with bc3 use the DXT5nm
+// swizzle (X in alpha, Y in green); the lit shader reconstructs Z. BC
+// requires every emitted mip to be a multiple of 4 px — sources that
+// can't satisfy it at the base level cook uncompressed with a warning.
+typedef struct BrushTexImportParams {
+  int maxSize;      // clamp the longest side (0 = no clamp)
+  bool mipmaps;     // build the full mip chain offline
+  bool isNormalMap; // DXT5nm profile when compressed with bc3
+  char compress[8]; // "none" | "bc1" | "bc3"
+} BrushTexImportParams;
+
+// Read <path>.import (writing it with defaults first if absent).
+void BrushAssetsGetImportParams(const char *path, BrushTexImportParams *out);
+
+// Write <path>.import. The live watch (BrushAssetsUpdate) sees the sidecar
+// change and re-imports automatically — this is the whole "apply" story.
+bool BrushAssetsSetImportParams(const char *path,
+                                const BrushTexImportParams *p);
+
+// True if this registry texture was cooked as a DXT5nm-swizzled normal map
+// (consumers must tell the lit shader to reconstruct Z from alpha/green).
+bool BrushAssetsIsSwizzledNormal(Texture2D tex);
+
 // Unload everything regardless of refcounts (engine shutdown).
 void BrushAssetsShutdown(void);
 

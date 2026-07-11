@@ -26,6 +26,9 @@ uniform float uTriplanar;
 uniform float uTexScale;
 uniform float uHasNormalMap;
 uniform float uNormalDepth; // normal map intensity (1 = authored)
+// 1 = the normal map is DXT5nm-swizzled (BC3: X in alpha, Y in green) —
+// reconstruct Z instead of reading xyz directly.
+uniform float uNormalSwizzled;
 
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
@@ -121,6 +124,16 @@ vec3 TriplanarWeights(vec3 n) {
     return w / (w.x + w.y + w.z);
 }
 
+// Tangent-space normal fetch, DXT5nm-aware (see uNormalSwizzled).
+vec3 SampleNormalMap(vec2 uv) {
+    vec4 s = texture(texture2, uv);
+    if (uNormalSwizzled > 0.5) {
+        vec2 xy = s.ag * 2.0 - 1.0;
+        return vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+    }
+    return s.xyz * 2.0 - 1.0;
+}
+
 void main()
 {
     vec3 geoN = normalize(fragNormal);
@@ -146,9 +159,9 @@ void main()
         if (uTriplanar > 0.5) {
             // UDN blend: each projection's tangent-space bump is swizzled
             // onto its axis plane and added to the geometric normal.
-            vec3 tnX = texture(texture2, uvX).xyz * 2.0 - 1.0;
-            vec3 tnY = texture(texture2, uvY).xyz * 2.0 - 1.0;
-            vec3 tnZ = texture(texture2, uvZ).xyz * 2.0 - 1.0;
+            vec3 tnX = SampleNormalMap(uvX);
+            vec3 tnY = SampleNormalMap(uvY);
+            vec3 tnZ = SampleNormalMap(uvZ);
             vec3 bump = vec3(0.0, tnX.y, tnX.x) * triW.x +
                         vec3(tnY.x, 0.0, tnY.y) * triW.y +
                         vec3(tnZ.x, tnZ.y, 0.0) * triW.z;
@@ -160,7 +173,7 @@ void main()
                 vec3 T = fragTangent.xyz / tangentLen;
                 T = normalize(T - dot(T, geoN) * geoN);
                 vec3 B = cross(geoN, T) * fragTangent.w;
-                vec3 tn = texture(texture2, fragTexCoord).xyz * 2.0 - 1.0;
+                vec3 tn = SampleNormalMap(fragTexCoord);
                 tn.xy *= uNormalDepth;
                 N = normalize(mat3(T, B, geoN) * tn);
             }

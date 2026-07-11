@@ -1450,6 +1450,53 @@ int main(int argc, char **argv) {
                 ImGui::Spacing();
                 ImGui::TextDisabled("Select or add a material.");
             }
+
+            // --- Import settings: edits the texture's .import sidecar; the
+            // live watch re-cooks and swaps automatically (no apply logic
+            // here beyond writing the file).
+            ImGui::Spacing();
+            ImGui::SeparatorText("Import Settings");
+            static int selTex = -1;
+            static BrushTexImportParams impParams;
+            if (selTex >= g_texFileCount) selTex = -1;
+            const char *texPreview =
+                (selTex >= 0) ? GetFileName(g_texFiles[selTex]) : "(pick a texture)";
+            if (ImGui::BeginCombo("Texture", texPreview)) {
+                for (int i = 0; i < g_texFileCount; i++) {
+                    if (ImGui::Selectable(GetFileName(g_texFiles[i]), selTex == i) &&
+                        selTex != i) {
+                        selTex = i;
+                        BrushAssetsGetImportParams(g_texFiles[i], &impParams);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (selTex >= 0) {
+                bool edited = false;
+                const int sizes[] = { 0, 256, 512, 1024, 2048, 4096 };
+                int sizeIdx = 0;
+                for (int i = 0; i < 6; i++)
+                    if (impParams.maxSize == sizes[i]) sizeIdx = i;
+                if (ImGui::Combo("Max Size", &sizeIdx,
+                                 "no limit\0 256\0 512\0 1024\0 2048\0 4096\0")) {
+                    impParams.maxSize = sizes[sizeIdx];
+                    edited = true;
+                }
+                int compIdx = (strcmp(impParams.compress, "bc1") == 0) ? 1
+                              : (strcmp(impParams.compress, "bc3") == 0) ? 2 : 0;
+                if (ImGui::Combo("Compression", &compIdx,
+                                 "none (RGBA8)\0BC1 (opaque, 8:1)\0BC3 (alpha/normal, 4:1)\0")) {
+                    snprintf(impParams.compress, sizeof(impParams.compress),
+                             compIdx == 1 ? "bc1" : compIdx == 2 ? "bc3" : "none");
+                    edited = true;
+                }
+                edited |= ImGui::Checkbox("Mipmaps", &impParams.mipmaps);
+                edited |= ImGui::Checkbox("Normal map (DXT5nm)", &impParams.isNormalMap);
+                if (edited &&
+                    BrushAssetsSetImportParams(g_texFiles[selTex], &impParams))
+                    AddEditorLog("Import settings saved: %s (re-importing)",
+                                 GetFileName(g_texFiles[selTex]));
+            }
         }
         ImGui::End();
 

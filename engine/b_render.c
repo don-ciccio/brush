@@ -38,6 +38,7 @@ typedef struct BrushRenderState {
   int locSpecStrength;
   int locLinearize;
   int locTriplanar, locTexScale, locHasNormalMap, locNormalDepth;
+  int locNormalSwizzled;
   float specDefault; // uSpecStrength for draws without material props
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
@@ -87,6 +88,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locTexScale = GetShaderLocation(g_r.lit, "uTexScale");
   g_r.locHasNormalMap = GetShaderLocation(g_r.lit, "uHasNormalMap");
   g_r.locNormalDepth = GetShaderLocation(g_r.lit, "uNormalDepth");
+  g_r.locNormalSwizzled = GetShaderLocation(g_r.lit, "uNormalSwizzled");
   // raylib binds MATERIAL_MAP_NORMAL to whatever loc this maps to; without
   // it, per-draw normal maps would never reach the shader.
   g_r.lit.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(g_r.lit, "texture2");
@@ -262,6 +264,7 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   float texScale = (p && p->texScale > 0.001f) ? p->texScale : 1.0f;
   float hasNormal = (p && p->normal.id != 0) ? 1.0f : 0.0f;
   float normalDepth = p ? p->normalDepth : 1.0f;
+  float normalSwizzled = (p && p->normalSwizzled) ? 1.0f : 0.0f;
   float spec = (p && p->specStrength >= 0.0f) ? p->specStrength
                                               : g_r.specDefault;
   SetShaderValue(g_r.lit, g_r.locTriplanar, &triplanar, SHADER_UNIFORM_FLOAT);
@@ -269,6 +272,8 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNormal,
                  SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locNormalDepth, &normalDepth,
+                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locNormalSwizzled, &normalSwizzled,
                  SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
 }

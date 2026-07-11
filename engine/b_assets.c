@@ -23,13 +23,17 @@
 
 #include <rlgl.h>
 
+#define STB_DXT_IMPLEMENTATION
+#define STB_DXT_STATIC
+#include "../external/stb/stb_dxt.h"
+
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #endif
 
 #define BRUSH_ASSETS_MAX_TEXTURES 128
 #define BRUSH_ASSETS_PATH_MAX 256
-#define BRUSH_CTEX_VERSION 1
+#define BRUSH_CTEX_VERSION 2
 #define BRUSH_CTEX_MAGIC 0x31585442u // 'BTX1'
 #define BRUSH_IMPORT_DIR ".brush/imported"
 
@@ -89,26 +93,19 @@ const char *BrushEnginePath(const char *relative) {
 
 // --- Import params (.import sidecars) ------------------------------------------
 
-typedef struct TexImportParams {
-  int maxSize;      // clamp the longest side (0 = no clamp)
-  bool mipmaps;     // build the full mip chain offline
-  bool isNormalMap; // reserved for the BC tier (affects the params hash)
-  char compress[8]; // "none" today; "bc1"/"bc3" when the stb_dxt tier lands
-} TexImportParams;
-
-static void ImportParamsDefaults(TexImportParams *p, const char *srcPath) {
+static void ImportParamsDefaults(BrushTexImportParams *p, const char *srcPath) {
   p->maxSize = 2048;
   p->mipmaps = true;
   // Filename convention: *_normal* sources default to the normal-map
   // profile so the sidecar starts correct.
   const char *name = GetFileName(srcPath);
   p->isNormalMap = (name != NULL && strstr(name, "normal") != NULL);
-  snprintf(p->compress, sizeof(p->compress), "none");
+  snprintf(p->compress, sizeof(p->compress), p->isNormalMap ? "bc3" : "bc1");
 }
 
 // Load <src>.import; if absent, write it with defaults (Godot-style: the
 // sidecar IS the authored record of how this asset imports).
-static void ImportParamsLoad(const char *srcPath, TexImportParams *p) {
+static void ImportParamsLoad(const char *srcPath, BrushTexImportParams *p) {
   ImportParamsDefaults(p, srcPath);
   char path[BRUSH_ASSETS_PATH_MAX + 16];
   snprintf(path, sizeof(path), "%s.import", srcPath);
@@ -135,13 +132,6 @@ static void ImportParamsLoad(const char *srcPath, TexImportParams *p) {
     else if (strcmp(key, "compress") == 0) snprintf(p->compress, sizeof(p->compress), "%s", val);
   }
   fclose(f);
-  if (strcmp(p->compress, "none") != 0) {
-    TraceLog(LOG_WARNING,
-             "ASSETS: %s: compress '%s' not implemented yet (Tier 1) — "
-             "cooking uncompressed",
-             path, p->compress);
-    snprintf(p->compress, sizeof(p->compress), "none");
-  }
 }
 
 static uint32_t Fnv1a(const void *data, int len) {
@@ -151,7 +141,7 @@ static uint32_t Fnv1a(const void *data, int len) {
   return h;
 }
 
-static uint32_t ImportParamsHash(const TexImportParams *p) {
+static uint32_t ImportParamsHash(const BrushTexImportParams *p) {
   char canon[64];
   int n = snprintf(canon, sizeof(canon), "%d|%d|%d|%s", p->maxSize,
                    p->mipmaps ? 1 : 0, p->isNormalMap ? 1 : 0, p->compress);
@@ -210,9 +200,59 @@ static int MipChainSize(int w, int h, int format, int mips) {
   return total;
 }
 
+// --- BC1/BC3 encoding (stb_dxt) ------------------------------------------------
+// Encode ONE uncompressed RGBA8 mip level into BC blocks. Levels smaller
+// than a block (the 2x2/1x1 chain tail) pad by edge-clamping — the chain
+// MUST reach 1x1 or trilinear sampling reads an incomplete texture (black):
+// raylib never clamps GL_TEXTURE_MAX_LEVEL.
+static void EncodeBCLevel(const unsigned char *rgba, int w, int h, bool bc3,
+                          bool swizzleNm, unsigned char *out) {
+  int blockBytes = bc3 ? 16 : 8;
+  unsigned char block[16 * 4];
+  for (int by = 0; by < h; by += 4) {
+    for (int bx = 0; bx < w; bx += 4) {
+      for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+          int sx = bx + col, sy = by + row;
+          if (sx > w - 1) sx = w - 1; // edge clamp for partial blocks
+          if (sy > h - 1) sy = h - 1;
+          memcpy(block + (row * 4 + col) * 4, rgba + ((sy * w + sx) * 4), 4);
+        }
+      }
+      if (swizzleNm) {
+        // DXT5nm: X rides the high-quality BC3 alpha channel, Y stays in
+        // green (the best-endpoint RGB channel); R/B are don't-cares.
+        for (int px = 0; px < 16; px++) {
+          unsigned char *p = block + px * 4;
+          p[3] = p[0]; // A = X
+          p[0] = 255;  // R = 1
+          p[2] = 0;    // B = 0 (G already = Y)
+        }
+      }
+      stb_compress_dxt_block(out, block, bc3 ? 1 : 0, STB_DXT_HIGHQUAL);
+      out += blockBytes;
+    }
+  }
+}
+
+// A chain is BC-compressible only if EVERY level's byte size agrees with
+// raylib's mip walk (w*h*bpp/8, clamped to one block only when BOTH dims
+// are < 4). Square power-of-two sources pass down to 1x1; things like
+// 512x256 hit a 4x2 level and must cook uncompressed.
+static bool ChainCompressible(int w, int h, int mips) {
+  for (int m = 0; m < mips; m++) {
+    bool aligned = (w % 4 == 0 && h % 4 == 0);
+    bool subBlock = (w < 4 && h < 4);
+    if (!aligned && !subBlock) return false;
+    if (w > 1) w /= 2;
+    if (h > 1) h /= 2;
+  }
+  return true;
+}
+
 // Cook one source image into a .ctex. Pure CPU — safe on the worker.
 static bool CookTexture(const char *srcPath, const char *dstPath,
-                        const TexImportParams *prm) {
+                        const BrushTexImportParams *prm) {
   double t0 = GetTime();
   Image img = LoadImage(srcPath);
   if (img.data == NULL) return false;
@@ -226,6 +266,44 @@ static bool CookTexture(const char *srcPath, const char *dstPath,
   }
   if (prm->mipmaps) ImageMipmaps(&img);
 
+  // BC compression: transcode the WHOLE uncompressed chain (down to 1x1 —
+  // partial chains are GL-incomplete under trilinear and sample black).
+  bool wantBC = (strcmp(prm->compress, "bc1") == 0 ||
+                 strcmp(prm->compress, "bc3") == 0);
+  bool bc3 = (strcmp(prm->compress, "bc3") == 0);
+  bool swizzleNm = bc3 && prm->isNormalMap;
+  if (wantBC && !ChainCompressible(img.width, img.height, img.mipmaps)) {
+    TraceLog(LOG_WARNING,
+             "ASSETS: %s (%dx%d) has non-4-aligned mip levels — cooking "
+             "uncompressed (use square power-of-two sources for BC)",
+             srcPath, img.width, img.height);
+    wantBC = false;
+  }
+  bool appliedSwizzle = false;
+  if (wantBC) {
+    int bcFormat = bc3 ? PIXELFORMAT_COMPRESSED_DXT5_RGBA
+                       : PIXELFORMAT_COMPRESSED_DXT1_RGB;
+    int total = MipChainSize(img.width, img.height, bcFormat, img.mipmaps);
+    unsigned char *bcData = malloc((size_t)total);
+    if (bcData != NULL) {
+      const unsigned char *srcMip = img.data;
+      unsigned char *dstMip = bcData;
+      int w = img.width, hh = img.height;
+      for (int m = 0; m < img.mipmaps; m++) {
+        EncodeBCLevel(srcMip, w, hh, bc3, swizzleNm, dstMip);
+        srcMip += GetPixelDataSize(w, hh, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        dstMip += GetPixelDataSize(w, hh, bcFormat);
+        if (w > 1) w /= 2;
+        if (hh > 1) hh /= 2;
+      }
+      free(img.data);
+      img.data = bcData;
+      img.format = bcFormat;
+      // mip count unchanged: full chain, now in BC blocks
+      appliedSwizzle = swizzleNm;
+    }
+  }
+
   CtexHeader h = {0};
   h.magic = BRUSH_CTEX_MAGIC;
   h.importerVersion = BRUSH_CTEX_VERSION;
@@ -238,6 +316,7 @@ static bool CookTexture(const char *srcPath, const char *dstPath,
   h.width = (uint16_t)img.width;
   h.height = (uint16_t)img.height;
   h.mipCount = (uint16_t)img.mipmaps;
+  h.reserved = appliedSwizzle ? 1u : 0u; // bit0: DXT5nm-swizzled normal map
 
   MakeParentDirs(dstPath);
   FILE *f = fopen(dstPath, "wb");
@@ -259,7 +338,7 @@ static bool CookTexture(const char *srcPath, const char *dstPath,
 
 // Is the cooked file still a faithful product of source + params + importer?
 static bool CtexValid(const char *srcPath, const char *ctexPath,
-                      const TexImportParams *prm) {
+                      const BrushTexImportParams *prm) {
   FILE *f = fopen(ctexPath, "rb");
   if (f == NULL) return false;
   CtexHeader h;
@@ -275,9 +354,10 @@ static bool CtexValid(const char *srcPath, const char *ctexPath,
 }
 
 // GPU-upload a .ctex: read header, pipe the mip chain straight to GL.
-// MAIN THREAD only.
-static Texture2D LoadCtex(const char *ctexPath) {
+// MAIN THREAD only. `outSwizzled` (optional) reports the DXT5nm flag.
+static Texture2D LoadCtex(const char *ctexPath, bool *outSwizzled) {
   Texture2D tex = {0};
+  if (outSwizzled != NULL) *outSwizzled = false;
   FILE *f = fopen(ctexPath, "rb");
   if (f == NULL) return tex;
   CtexHeader h;
@@ -293,6 +373,7 @@ static Texture2D LoadCtex(const char *ctexPath) {
     return tex;
   }
   fclose(f);
+  if (outSwizzled != NULL) *outSwizzled = ((h.reserved & 1u) != 0);
   tex.id = rlLoadTexture(data, h.width, h.height, (int)h.format, h.mipCount);
   free(data);
   if (tex.id == 0) return (Texture2D){0};
@@ -319,7 +400,7 @@ typedef enum { JOB_EMPTY = 0, JOB_QUEUED, JOB_RUNNING, JOB_DONE, JOB_FAILED } Jo
 typedef struct CookJob {
   char src[BRUSH_ASSETS_PATH_MAX];
   char dst[BRUSH_ASSETS_PATH_MAX + 32];
-  TexImportParams params;
+  BrushTexImportParams params;
   JobState state;
 } CookJob;
 
@@ -357,7 +438,7 @@ static void *CookWorker(void *arg) {
 }
 
 static void QueueCook(const char *src, const char *dst,
-                      const TexImportParams *prm) {
+                      const BrushTexImportParams *prm) {
   pthread_mutex_lock(&g_jobMx);
   if (!g_cookThreadUp) {
     g_cookQuit = false;
@@ -384,6 +465,7 @@ typedef struct TexEntry {
   int refs;
   bool watch;         // cookable source on disk — eligible for re-import
   bool cookPending;   // a worker job is in flight for this source
+  bool normalSwizzled; // cooked with the DXT5nm profile
   uint64_t srcSize, srcMtime; // last identity we imported/saw
   uint64_t impSize, impMtime; // .import sidecar identity (0 if absent)
 } TexEntry;
@@ -404,12 +486,12 @@ static int g_texCount = 0;
 static Texture2D AcquireTexture(TexEntry *e) {
   const char *path = e->path;
   if (IsCookable(path) && FileExists(path)) {
-    TexImportParams prm;
+    BrushTexImportParams prm;
     ImportParamsLoad(path, &prm);
     char ctex[BRUSH_ASSETS_PATH_MAX + 32];
     CtexPath(path, ctex, sizeof(ctex));
     if (!CtexValid(path, ctex, &prm)) CookTexture(path, ctex, &prm);
-    Texture2D t = LoadCtex(ctex);
+    Texture2D t = LoadCtex(ctex, &e->normalSwizzled);
     if (t.id != 0) {
       e->watch = true;
       StatSourcePair(e);
@@ -489,13 +571,15 @@ bool BrushAssetsUpdate(void) {
       if (strcmp(e->path, doneSrc[d]) != 0) continue;
       e->cookPending = false;
       if (doneOk[d]) {
-        Texture2D fresh = LoadCtex(doneDst[d]);
+        bool swizzled = false;
+        Texture2D fresh = LoadCtex(doneDst[d], &swizzled);
         if (fresh.id == 0)
           TraceLog(LOG_WARNING, "ASSETS: re-import upload failed for %s",
                    doneSrc[d]);
         if (fresh.id != 0) {
           if (e->tex.id != 0) UnloadTexture(e->tex);
           e->tex = fresh;
+          e->normalSwizzled = swizzled;
           StatSourcePair(e);
           changed = true;
           TraceLog(LOG_INFO, "ASSETS: re-imported %s", e->path);
@@ -521,7 +605,7 @@ bool BrushAssetsUpdate(void) {
       if (size == e->srcSize && mtime == e->srcMtime &&
           impSize == e->impSize && impMtime == e->impMtime)
         continue;
-      TexImportParams prm;
+      BrushTexImportParams prm;
       ImportParamsLoad(e->path, &prm);
       char ctex[BRUSH_ASSETS_PATH_MAX + 32];
       CtexPath(e->path, ctex, sizeof(ctex));
@@ -531,6 +615,32 @@ bool BrushAssetsUpdate(void) {
     }
   }
   return changed;
+}
+
+void BrushAssetsGetImportParams(const char *path, BrushTexImportParams *out) {
+  ImportParamsLoad(path, out);
+}
+
+bool BrushAssetsSetImportParams(const char *path,
+                                const BrushTexImportParams *p) {
+  char imp[BRUSH_ASSETS_PATH_MAX + 16];
+  snprintf(imp, sizeof(imp), "%s.import", path);
+  FILE *f = fopen(imp, "w");
+  if (f == NULL) return false;
+  fprintf(f, "[params]\n");
+  fprintf(f, "max_size = %d\n", p->maxSize);
+  fprintf(f, "generate_mipmaps = %s\n", p->mipmaps ? "true" : "false");
+  fprintf(f, "compress = %s\n", p->compress);
+  fprintf(f, "is_normal_map = %s\n", p->isNormalMap ? "true" : "false");
+  fclose(f);
+  return true; // the live watch re-imports from here
+}
+
+bool BrushAssetsIsSwizzledNormal(Texture2D tex) {
+  if (tex.id == 0) return false;
+  for (int i = 0; i < g_texCount; i++)
+    if (g_tex[i].tex.id == tex.id) return g_tex[i].normalSwizzled;
+  return false;
 }
 
 void BrushAssetsShutdown(void) {
