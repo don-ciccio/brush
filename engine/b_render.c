@@ -33,6 +33,7 @@ typedef struct BrushRenderState {
   int locLayerView;
   int locSpecStrength;
   int locLinearize;
+  int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
   int locShadowMap[BRUSH_SHADOW_CASCADES];
   int locCascadeFar;
@@ -56,6 +57,11 @@ typedef struct BrushRenderState {
 
   BrushDrawCmd cmds[BRUSH_LAYER_COUNT][BRUSH_MAX_DRAWS_PER_LAYER];
   int cmdCount[BRUSH_LAYER_COUNT];
+
+  // Point lights submitted this frame (cleared after execute). More slots
+  // than the shader takes: the nearest BRUSH_MAX_POINT_LIGHTS win.
+  BrushPointLight pointLights[64];
+  int pointLightCount;
 } BrushRenderState;
 
 static BrushRenderState g_r = {0};
@@ -70,6 +76,10 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerView = GetShaderLocation(g_r.lit, "uLayerView");
   g_r.locSpecStrength = GetShaderLocation(g_r.lit, "uSpecStrength");
   g_r.locLinearize = GetShaderLocation(g_r.lit, "uLinearize");
+  g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
+  g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
+  g_r.locPointRadius = GetShaderLocation(g_r.lit, "uPointRadius");
+  g_r.locPointCount = GetShaderLocation(g_r.lit, "uPointCount");
   g_r.locLightVP[0] = GetShaderLocation(g_r.lit, "lightVP0");
   g_r.locLightVP[1] = GetShaderLocation(g_r.lit, "lightVP1");
   g_r.locLightVP[2] = GetShaderLocation(g_r.lit, "lightVP2");
@@ -160,6 +170,51 @@ void BrushRenderSubmit(BrushLayer layer, Model *model, Matrix transform,
   (*count)++;
 }
 
+void BrushRenderSubmitPointLight(BrushPointLight light) {
+  int cap = (int)(sizeof(g_r.pointLights) / sizeof(g_r.pointLights[0]));
+  if (g_r.pointLightCount >= cap) return;
+  g_r.pointLights[g_r.pointLightCount++] = light;
+}
+
+// Upload the nearest BRUSH_MAX_POINT_LIGHTS to the lit shader.
+static void UploadPointLights(Vector3 camPos) {
+  int n = g_r.pointLightCount;
+  BrushPointLight *l = g_r.pointLights;
+  if (n > BRUSH_MAX_POINT_LIGHTS) {
+    // Partial selection sort: pull the nearest MAX to the front. n is tiny.
+    for (int i = 0; i < BRUSH_MAX_POINT_LIGHTS; i++) {
+      int best = i;
+      float bestD = Vector3DistanceSqr(l[i].position, camPos);
+      for (int j = i + 1; j < n; j++) {
+        float d = Vector3DistanceSqr(l[j].position, camPos);
+        if (d < bestD) { best = j; bestD = d; }
+      }
+      BrushPointLight tmp = l[i]; l[i] = l[best]; l[best] = tmp;
+    }
+    n = BRUSH_MAX_POINT_LIGHTS;
+  }
+
+  float pos[BRUSH_MAX_POINT_LIGHTS * 3] = {0};
+  float col[BRUSH_MAX_POINT_LIGHTS * 3] = {0};
+  float rad[BRUSH_MAX_POINT_LIGHTS] = {0};
+  for (int i = 0; i < n; i++) {
+    pos[i * 3 + 0] = l[i].position.x;
+    pos[i * 3 + 1] = l[i].position.y;
+    pos[i * 3 + 2] = l[i].position.z;
+    col[i * 3 + 0] = l[i].color.x;
+    col[i * 3 + 1] = l[i].color.y;
+    col[i * 3 + 2] = l[i].color.z;
+    rad[i] = (l[i].radius > 0.01f) ? l[i].radius : 0.01f;
+  }
+  SetShaderValueV(g_r.lit, g_r.locPointPos, pos, SHADER_UNIFORM_VEC3,
+                  BRUSH_MAX_POINT_LIGHTS);
+  SetShaderValueV(g_r.lit, g_r.locPointColor, col, SHADER_UNIFORM_VEC3,
+                  BRUSH_MAX_POINT_LIGHTS);
+  SetShaderValueV(g_r.lit, g_r.locPointRadius, rad, SHADER_UNIFORM_FLOAT,
+                  BRUSH_MAX_POINT_LIGHTS);
+  SetShaderValue(g_r.lit, g_r.locPointCount, &n, SHADER_UNIFORM_INT);
+}
+
 void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
                            Matrix transform) {
   if (layer < 0 || layer >= BRUSH_LAYER_COUNT) return;
@@ -200,6 +255,7 @@ void BrushRenderExecute(Camera3D camera) {
                  SHADER_UNIFORM_VEC3);
   int view = (int)g_r.layerView;
   SetShaderValue(g_r.lit, g_r.locLayerView, &view, SHADER_UNIFORM_INT);
+  UploadPointLights(camera.position);
 
   // SHADOW — depth-only pass from the sun over this frame's casters. Runs
   // before the scene target opens; receivers then sample the map via PCSS.
@@ -318,6 +374,7 @@ void BrushRenderExecute(Camera3D camera) {
   }
 
   for (int i = 0; i < BRUSH_LAYER_COUNT; i++) g_r.cmdCount[i] = 0;
+  g_r.pointLightCount = 0; // lights are per-frame submissions, like draws
 }
 
 void BrushRenderTogglePost(void) {

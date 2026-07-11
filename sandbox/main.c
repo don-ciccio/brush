@@ -76,6 +76,8 @@ typedef struct Sandbox {
   Model ramp;
   Matrix rampXform;
 
+  Vector3 torchPos[3]; // dynamic point lights (entrance pair + crate stack)
+
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
 
@@ -271,6 +273,12 @@ static void SandboxInit(void *user) {
       MatrixTranslate(9.0f, gy + 0.857f, -14.40f));
   BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
                             "ramp");
+
+  // Torch anchors: flanking the arena's south entrance + atop the crate
+  // stack. The lights themselves are submitted per frame in SandboxDraw.
+  s->torchPos[0] = (Vector3){-4.6f, gy + 2.4f, -2.3f};
+  s->torchPos[1] = (Vector3){4.6f, gy + 2.4f, -2.3f};
+  s->torchPos[2] = (Vector3){-4.0f, gy + 3.4f, -5.0f};
 
   // Harness: BRUSH_TEST_TRIGGER drops a big sensor volume across the
   // default camera boom — raycasts (camera anti-clip, IK probes) must see
@@ -601,6 +609,25 @@ static void SandboxDraw(void *user) {
   Color rampCol = (Color){120, 130, 150, 255};
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->ramp, s->rampXform, rampCol);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
+
+  // Torches: dynamic point lights, submitted per frame like draws. Warm HDR
+  // color (>1 blooms); two detuned sines make a cheap convincing flicker.
+  float tt = (float)GetTime();
+  for (int i = 0; i < 3; i++) {
+    float fl = 0.85f + 0.11f * sinf(tt * 9.0f + (float)i * 2.1f) +
+               0.06f * sinf(tt * 23.7f + (float)i * 4.3f);
+    BrushRenderSubmitPointLight((BrushPointLight){
+        .position = s->torchPos[i],
+        .color = {2.4f * fl, 1.25f * fl, 0.45f * fl},
+        .radius = 9.0f,
+    });
+    // Small marker cube so the source reads in-scene.
+    Matrix mk = MatrixMultiply(
+        MatrixScale(0.16f, 0.16f, 0.16f),
+        MatrixTranslate(s->torchPos[i].x, s->torchPos[i].y, s->torchPos[i].z));
+    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, mk,
+                      (Color){255, 190, 90, 255});
+  }
 
   // Skinned mannequin, feet at p (the animator already posed the meshes).
   // The body stays UPRIGHT on slopes: the animator lowered the hips to the

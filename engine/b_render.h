@@ -82,6 +82,22 @@ Shader BrushGetLitShader(void);
 void BrushSetSun(Vector3 dir, Vector3 color, Vector3 ambient);
 Vector3 BrushGetSunDir(void);
 
+// --- Point lights (DYNAMIC, never baked — see docs/roadmap.md) -------------
+// Submit per frame, like draws: the list clears after every execute, so
+// moving lights (a carried torch) are free. Colors are LINEAR and may exceed
+// 1.0 for intensity (the HDR pipeline blooms them naturally). `radius` is
+// where the light's influence smoothly reaches zero. If more than
+// BRUSH_MAX_POINT_LIGHTS are submitted, the ones nearest the camera win.
+#define BRUSH_MAX_POINT_LIGHTS 8
+
+typedef struct BrushPointLight {
+  Vector3 position;
+  Vector3 color;  // linear; scale for intensity
+  float radius;   // metres to zero influence
+} BrushPointLight;
+
+void BrushRenderSubmitPointLight(BrushPointLight light);
+
 // Drive the whole frame's lighting from a day/night clock (see b_tod.h):
 // sun direction/color, ambient fill, sky sun+moon, post exposure. At night
 // (sun below the horizon) the MOON becomes the directional light — the

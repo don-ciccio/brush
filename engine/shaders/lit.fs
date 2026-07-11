@@ -20,6 +20,13 @@ uniform vec3 uSunColor;
 uniform vec3 uAmbient; // ambient fill color (linear)
 uniform vec3 viewPos;
 uniform float uSpecStrength;
+
+// --- Point lights (dynamic, shadowless — torches/lanterns) ---
+#define MAX_POINT_LIGHTS 8
+uniform vec3 uPointPos[MAX_POINT_LIGHTS];
+uniform vec3 uPointColor[MAX_POINT_LIGHTS]; // linear, may exceed 1 (HDR)
+uniform float uPointRadius[MAX_POINT_LIGHTS];
+uniform int uPointCount;
 uniform int uLayerView;
 // 1 when the HDR post path is active: albedo inputs (textures/colors) are
 // authored in sRGB, so decode them to linear here — the post composite
@@ -117,7 +124,30 @@ void main()
         ? pow(max(dot(N, H), 0.0), 48.0) * uSpecStrength * sunVis
         : 0.0;
 
-    vec3 color = albedo * (uAmbient + uSunColor * diff) + uSunColor * spec;
+    // Point lights: inverse-square falloff with a smooth cutoff at the
+    // radius (UE-style windowing) so influence reaches exactly zero — no
+    // hard sphere edges, no lights popping at the boundary.
+    vec3 pointDiff = vec3(0.0);
+    vec3 pointSpec = vec3(0.0);
+    for (int i = 0; i < uPointCount; i++) {
+        vec3 toL = uPointPos[i] - fragPosition;
+        float dist = length(toL);
+        if (dist >= uPointRadius[i]) continue;
+        vec3 Lp = toL / max(dist, 1e-4);
+        float ratio = dist / uPointRadius[i];
+        float window = 1.0 - ratio * ratio * ratio * ratio; // 1-(d/r)^4
+        float att = (window * window) / (dist * dist + 1.0);
+        float nl = max(dot(N, Lp), 0.0);
+        pointDiff += uPointColor[i] * (nl * att);
+        if (nl > 0.0) {
+            vec3 Hp = normalize(Lp + V);
+            pointSpec += uPointColor[i] *
+                         (pow(max(dot(N, Hp), 0.0), 48.0) * uSpecStrength * att);
+        }
+    }
+
+    vec3 color = albedo * (uAmbient + uSunColor * diff + pointDiff) +
+                 uSunColor * spec + pointSpec;
 
     if (uLayerView == 1)      color = albedo;
     else if (uLayerView == 2) color = vec3(diff);

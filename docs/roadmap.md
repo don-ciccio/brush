@@ -66,7 +66,10 @@ the UAL packs ship no strafe clips — donor used procedural lean for lateral).
    `BRUSH_LAYER_SHADOW` submissions, PCSS soft shadows in the lit shader
    (blocker search -> penumbra-widening PCF), light box follows the view
    target with texel snapping so edges don't crawl. F4 toggles; "sun shadow"
-   joined the F2 layer views. Future work when the world grows: cascades.
+   joined the F2 layer views. **Cascades — DONE**: 3 view-frustum-fitted
+   cascades (sphere-fit slices, per-cascade texel snap, 24/72/220 m
+   defaults via BRUSH_CSM_SPLITS); the lit shader picks by camera distance
+   and runs the same PCSS, god rays march the far cascade.
 3. ~~Render scale~~ — DONE, part of b_post (`BrushConfig.renderScale`,
    `BRUSH_RENDER_SCALE`). The HUD stays at native res.
 4. ~~Time of day~~ — DONE (b_tod): 0..24h clock -> sun/moon directions from
@@ -123,6 +126,35 @@ the UAL packs ship no strafe clips — donor used procedural lean for lateral).
 12. **Audio**: bus mixer, 3D positional playback, ambient beds.
 13. **Save/load**: versioned, section-registered.
 14. **UI toolkit**: immediate-mode widgets grown out of the sandbox menu.
+
+## v1.x — lighting & authoring track (decided 2026-07)
+
+Point lights are DYNAMIC, never baked: in a forward renderer a light is just
+uniforms, and baked sunlight is incompatible with the animated day/night
+anyway. Point-light shadows stay out (cube map per light) — shadowless
+torches are the small-engine norm. The authoring workflow is an IN-GAME edit
+mode (author in the final renderer: real PCSS/bloom/tonemap while dragging a
+light), with raygui for tool panels only — the game UI toolkit stays its own
+roadmap item. Blender/heightmap-image import composes later as a bulk path
+into the same data.
+
+A. **Point lights** — forward N-light loop in lit.fs (pos/color/radius,
+   smooth radius falloff, diffuse + specular), engine keeps the nearest
+   BRUSH_MAX_POINT_LIGHTS to the camera when a scene submits more. Game
+   submits lights per frame (moving torches are free).
+B. **world.def** — load/save: props, lights, spawn, sun/time config. The
+   sandbox gym's AddBlock list becomes its first content. Hot-reload on file
+   change so external editing also works.
+C. **Edit mode** (engine module, compiled out of release builds): fly camera,
+   physics-raycast picking, move gizmo, light tuning panel (raygui),
+   time-of-day slider, save to world.def.
+D. **Terrain sculpting** — the namesake feature. Final height =
+   heightFn(x,z) + sculptDelta(x,z): a sparse overlay of editable tiles
+   keyed by chunk coord, persisted with the world. Brush strokes
+   (raise/lower/smooth/flatten, wheel = radius) write the overlay and mark
+   chunks dirty; the chunk recycler already rebuilds in place (mesh,
+   collider, and gameplay queries all read the same heightmap). Heightmap
+   image import (Blender/Gaea) bulk-writes the same tiles.
 
 ## v2 — RPG toolkit
 
