@@ -61,7 +61,6 @@ typedef struct Sandbox {
   // within one fixed step; this offset absorbs the pop and decays so the
   // visual body glides while foot IK keeps the feet on the treads.
   float stepSmooth, prevStepSmooth;
-  bool wasGrounded;
 
   BrushWorld *world; // chunk-streamed terrain (flat by default)
   Texture2D groundTex;
@@ -447,31 +446,38 @@ static void SandboxFixedUpdate(void *user, float dt) {
   if (s->grounded && s->velY < 0.0f) s->velY = 0.0f;
   s->vel.y = s->body.velocity.y;
 
+  // Debounced airborne: Jolt's ground state flickers for a few frames while
+  // a landing resolves (and mid-riser on stairs); raw flag -> animator
+  // re-triggers jump each flicker. Every gate below uses the DEBOUNCED
+  // signal — raw-grounded gates flap on stair flickers and read as stutter.
+  float prevAirTime = s->airTime;
+  s->airTime = s->grounded ? 0.0f : s->airTime + dt;
+  bool solid = s->airTime < 0.06f;
+
   // Stair-step smoothing: on stairs the capsule's Y is a sawtooth — Jolt's
   // stair-walk spreads each riser over a few steps going up, and stick-to-
   // floor drops a whole riser in ONE step going down — and following it
   // exactly reads as bouncing. Low-pass grounded Y motion into a decaying
-  // render offset, but ONLY while the ground under the capsule is FLAT
-  // (that's the discriminator: vertical motion over flat ground = stairs;
-  // slopes/ramps report a tilted normal and must track exactly — smoothing
-  // them makes the body sink on ascents and float on descents). Landing
-  // edges are skipped (grounded->grounded only); airborne kills the offset
-  // fast — the capsule owns big air moves.
+  // render offset, but ONLY while the ground BELOW is FLAT (that's the
+  // stairs/ramp discriminator: slopes must track exactly — smoothing them
+  // sinks ascents and floats descents). The flatness ray probes straight
+  // down: the capsule's own contact normal tilts whenever it rides a tread
+  // EDGE, flapping a per-step gate. Landing edges are skipped (prevAirTime
+  // check); real airborne kills the offset fast.
   float stepDy = s->pos.y - s->prevPos.y;
-  if (s->grounded && s->wasGrounded && s->body.groundNormal.y > 0.98f)
-    s->stepSmooth -= stepDy;
+  if (solid && prevAirTime < 0.06f) {
+    float underY;
+    Vector3 underN;
+    if (GroundUnder(s, s->pos, &underY, &underN) && underN.y > 0.98f)
+      s->stepSmooth -= stepDy;
+  }
   s->stepSmooth = fminf(fmaxf(s->stepSmooth, -0.30f), 0.30f);
-  s->stepSmooth *= expf((s->grounded ? -8.0f : -30.0f) * dt);
-  s->wasGrounded = s->grounded;
-
-  // Debounced airborne: Jolt's ground state flickers for a few frames while
-  // a landing resolves; raw flag -> animator re-triggers jump each flicker.
-  s->airTime = s->grounded ? 0.0f : s->airTime + dt;
+  s->stepSmooth *= expf((solid ? -8.0f : -30.0f) * dt);
 
   // Shared IK weight: 0 while airborne, eases back in after touchdown
   // (landing raycasts are noisy while the capsule settles). The animator
   // does the actual foot IK via the GroundUnder callback.
-  s->ikWeight = s->grounded ? fminf(s->ikWeight + dt / 0.25f, 1.0f) : 0.0f;
+  s->ikWeight = solid ? fminf(s->ikWeight + dt / 0.25f, 1.0f) : 0.0f;
 
   // Face the movement direction (shortest arc, smoothed).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);
@@ -491,7 +497,7 @@ static void SandboxFixedUpdate(void *user, float dt) {
 static void SandboxUpdate(void *user, float dt, float alpha) {
   Sandbox *s = user;
 
-  if (getenv("BRUSH_AUTO_JUMP") != NULL) {
+  if (getenv("BRUSH_AUTO_JUMP") != NULL || getenv("BRUSH_REND_DBG") != NULL) {
     static int rf = 0;
     TraceLog(LOG_INFO,
              "RENDDBG rf=%d a=%.2f ry=%+.4f pelvis=%+.4f state=%d fade=%.2f",

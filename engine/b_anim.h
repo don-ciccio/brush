@@ -126,6 +126,7 @@ typedef struct BrushAnimator {
 
   // Foot IK state (smoothed per-foot terrain deltas) + output.
   float footDeltaL, footDeltaR;
+  float pelvisSmooth; // terrain pelvis drop, filtered slower than the feet
   float pelvisOffset; // OUTPUT: add to the model's draw Y (<= 0). Includes
                       // the terrain pelvis drop and the landing dip.
 

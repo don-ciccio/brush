@@ -625,9 +625,16 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
     }
   }
   // Smooth the terrain deltas so steps/edges ease instead of popping.
-  float ikBlend = 1.0f - expf(-15.0f * dt);
-  a->footDeltaL += (targetDL - a->footDeltaL) * ikBlend;
-  a->footDeltaR += (targetDR - a->footDeltaR) * ikBlend;
+  // Asymmetric: reaching DOWN to lower ground is fast (a slow foot hangs in
+  // the air over the edge), but releasing back UP is gentle — on stairs the
+  // trailing foot's release would otherwise pop the pelvis up a full riser
+  // in a tenth of a second every stride.
+  float blendDn = 1.0f - expf(-15.0f * dt);
+  float blendUp = 1.0f - expf(-7.0f * dt);
+  a->footDeltaL += (targetDL - a->footDeltaL) *
+                   (targetDL < a->footDeltaL ? blendDn : blendUp);
+  a->footDeltaR += (targetDR - a->footDeltaR) *
+                   (targetDR < a->footDeltaR ? blendDn : blendUp);
 
   // Pelvis follows the LOWEST foot (never rises above the animation), and
   // the landing dip rides on top; the IK below keeps the feet planted, so
@@ -640,7 +647,12 @@ void BrushAnimatorUpdate(BrushAnimator *a, BrushAnimInput in, float dt) {
   float pelvis =
       fminf(0.0f, fminf(a->footDeltaL, a->footDeltaR)) * pelvisAuth;
   pelvis = fmaxf(pelvis, -0.30f);
-  a->pelvisOffset = pelvis - landDip;
+  // The pelvis is the body's mass: filter it slower than the feet (which
+  // must reach their treads quickly) — the legs absorb the difference by
+  // bending, which is exactly how weight reads. Without this the body bobs
+  // at foot-delta speed on every stair stride.
+  a->pelvisSmooth += (pelvis - a->pelvisSmooth) * (1.0f - expf(-6.0f * dt));
+  a->pelvisOffset = a->pelvisSmooth - landDip;
 
   if (haveLegs && (in.groundFn != NULL || landDip > 0.0001f)) {
     for (int side = 0; side < 2; side++) {
