@@ -36,6 +36,9 @@ IMGUI_OBJS = $(IMGUI_CORE_OBJ) $(BUILD_DIR)/imgui_rlimgui.o $(BUILD_DIR)/imgui_i
 
 EDITOR_SRC = $(wildcard editor/*.cpp)
 EDITOR_OBJ = $(EDITOR_SRC:editor/%.cpp=$(BUILD_DIR)/editor_%.o)
+ifeq ($(UNAME_S),Darwin)
+    EDITOR_OBJ += $(BUILD_DIR)/editor_macos_window.o
+endif
 
 DEPS = $(ENGINE_OBJ:.o=.d) $(BUILD_DIR)/sandbox_main.d $(IMGUI_OBJS:.o=.d) $(EDITOR_OBJ:.o=.d)
 
@@ -67,6 +70,9 @@ $(BUILD_DIR)/imgui_imguizmo.o: external/imguizmo/src/ImGuizmo.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compile Editor translation units
+$(BUILD_DIR)/editor_macos_window.o: editor/macos_window.mm | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -x objective-c++ -fobjc-arc -c $< -o $@
+
 $(BUILD_DIR)/editor_%.o: editor/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 

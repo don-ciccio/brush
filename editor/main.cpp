@@ -30,6 +30,13 @@
 #include <sys/wait.h>
 #include <signal.h>
 
+#if defined(__APPLE__)
+// macos_window.mm — Godot-style seamless titlebar (content under the
+// titlebar, traffic lights floating over the menu bar row).
+extern "C" void EditorMacSeamlessTitlebar(void *nsWindow);
+extern "C" void EditorMacDragWindow(void *nsWindow);
+#endif
+
 // ---------------------------------------------------------------------------
 // Editor camera: orbit-centric (focus + yaw/pitch/distance), with a fly mode
 // on right-drag. Orbit/pan/zoom are all distance-proportional so the feel is
@@ -442,6 +449,9 @@ int main() {
     BrushConsoleInit();
     SetConfigFlags(FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI);
     InitWindow(1600, 900, "brush editor");
+#if defined(__APPLE__)
+    EditorMacSeamlessTitlebar(GetWindowHandle());
+#endif
     SetWindowState(FLAG_WINDOW_MAXIMIZED); // fill whatever screen this is
     SetTargetFPS(60);
     SetExitKey(KEY_NULL); // ESC deselects, never quits
@@ -610,6 +620,14 @@ int main() {
 
         // === Menu bar ========================================================
         if (ImGui::BeginMainMenuBar()) {
+#if defined(__APPLE__)
+            // The menu bar row doubles as the titlebar: clear the floating
+            // traffic lights, and drag empty space to move the window.
+            ImGui::SetCursorPosX(76.0f);
+            if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+                ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                EditorMacDragWindow(GetWindowHandle());
+#endif
             if (ImGui::BeginMenu("File")) {
                 if (ImGui::MenuItem("Save", "Cmd+S")) SaveScene();
                 if (ImGui::MenuItem("Reload from Disk")) {
