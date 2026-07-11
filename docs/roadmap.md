@@ -121,8 +121,8 @@ the UAL packs ship no strafe clips — donor used procedural lean for lateral).
 
 9. **Asset manager**: logical names -> paths via manifest, graceful fallbacks.
 10. **Config**: settings file replacing env-var sprawl; data-driven bindings.
-11. **World definition files**: seed, foliage tables, authored placements —
-    a new game becomes data, not code.
+11. **World definition files** (v1 DONE — see authoring track below): seed,
+    foliage tables, and model props still to come with the asset manager.
 12. **Audio**: bus mixer, 3D positional playback, ambient beds.
 13. **Save/load**: versioned, section-registered.
 14. **UI toolkit**: immediate-mode widgets grown out of the sandbox menu.
@@ -142,9 +142,11 @@ A. **Point lights** — forward N-light loop in lit.fs (pos/color/radius,
    smooth radius falloff, diffuse + specular), engine keeps the nearest
    BRUSH_MAX_POINT_LIGHTS to the camera when a scene submits more. Game
    submits lights per frame (moving torches are free).
-B. **world.def** — load/save: props, lights, spawn, sun/time config. The
-   sandbox gym's AddBlock list becomes its first content. Hot-reload on file
-   change so external editing also works.
+B. ~~world.def~~ — DONE (b_scene): plain-text v1 format (blocks, lights,
+   spawn, time), load/save/hot-reload (mtime poll); the sandbox gym
+   bootstraps assets/gym.def on first run and the file is the authority
+   afterwards — colliders re-apply on every reload. Model props join when
+   the asset manager lands.
 C. **Edit mode** (engine module, compiled out of release builds): fly camera,
    physics-raycast picking, move gizmo, light tuning panel (raygui),
    time-of-day slider, save to world.def.

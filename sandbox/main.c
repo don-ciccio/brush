@@ -65,18 +65,17 @@ typedef struct Sandbox {
   BrushWorld *world; // chunk-streamed terrain (flat by default)
   Texture2D groundTex;
 
-  // Blockout gym (UE third-person-template style): unit cube scaled per
-  // block, one shared model; every block registers a matching box collider.
+  // Blockout gym: pure DATA in a world.def scene (assets/gym.def) — blocks,
+  // torches, spawn, time. First run bootstraps the file from BuildGymScene;
+  // afterwards it loads (and HOT-RELOADS: edit the file while running). One
+  // shared unit cube draws every block; colliders are applied from the data.
+  BrushScene scene;
+  JPH_BodyID blockBodies[BRUSH_SCENE_MAX_BLOCKS];
+  int blockBodyCount;
   Model unitCube;
-  struct {
-    Vector3 pos, size;
-    Color color;
-  } blocks[48];
-  int blockCount;
-  Model ramp;
+  Model ramp; // rotated slab: mesh collider — stays procedural (v1 def has
+              // axis-aligned boxes only)
   Matrix rampXform;
-
-  Vector3 torchPos[3]; // dynamic point lights (entrance pair + crate stack)
 
   Model mannequin; // Quaternius UAL mannequin (CC0), skinned + animated
   BrushAnimator animator;
@@ -155,12 +154,66 @@ static bool CameraObstructed(Vector3 from, Vector3 to, Vector3 *hitPoint,
 
 // Add a gym block: visual (drawn from the shared unit cube) + box collider.
 static void AddBlock(Sandbox *s, Vector3 pos, Vector3 size, Color color) {
-  if (s->blockCount >= (int)(sizeof(s->blocks) / sizeof(s->blocks[0]))) return;
-  s->blocks[s->blockCount].pos = pos;
-  s->blocks[s->blockCount].size = size;
-  s->blocks[s->blockCount].color = color;
-  s->blockCount++;
-  BrushPhysicsAddStaticBox(&s->phys, pos, size, 0, "block");
+  BrushScene *sc = &s->scene;
+  if (sc->blockCount >= BRUSH_SCENE_MAX_BLOCKS) return;
+  sc->blocks[sc->blockCount++] =
+      (BrushSceneBlock){.pos = pos, .size = size, .color = color};
+}
+
+// The gym as DATA (see world.def notes in b_scene.h). Runs once to bootstrap
+// assets/gym.def; afterwards the file is the authority and this is only a
+// fallback. gy = ground height under the gym.
+static void BuildGymScene(Sandbox *s, float gy) {
+  Color wallCol = (Color){168, 172, 180, 255};
+  Color platCol = (Color){140, 146, 158, 255};
+  Color stepCol = (Color){110, 130, 168, 255};
+  Color crateCol = (Color){170, 120, 70, 255};
+
+  s->scene.spawn = (Vector3){0, gy + 0.2f, 0};
+  s->scene.timeHours = 10.5f;
+
+  // Arena walls (x in [-14,14], z in [-26,-2]), opening on the south side.
+  AddBlock(s, (Vector3){0, gy + 1.5f, -26}, (Vector3){28.6f, 3, 0.6f}, wallCol);
+  AddBlock(s, (Vector3){-9.25f, gy + 1.5f, -2}, (Vector3){10.1f, 3, 0.6f}, wallCol);
+  AddBlock(s, (Vector3){9.25f, gy + 1.5f, -2}, (Vector3){10.1f, 3, 0.6f}, wallCol);
+  AddBlock(s, (Vector3){-14, gy + 1.5f, -14}, (Vector3){0.6f, 3, 24.6f}, wallCol);
+  AddBlock(s, (Vector3){14, gy + 1.5f, -14}, (Vector3){0.6f, 3, 24.6f}, wallCol);
+
+  // High platform (top at 2 m) + low platform (top at 1 m) beside it.
+  AddBlock(s, (Vector3){9, gy + 1.0f, -21}, (Vector3){8, 2, 7}, platCol);
+  AddBlock(s, (Vector3){2.5f, gy + 0.5f, -21}, (Vector3){5, 1, 5}, platCol);
+
+  // Staircase onto the low platform (0.33 m risers — Jolt stair-step range).
+  AddBlock(s, (Vector3){2.5f, gy + 0.165f, -17.2f}, (Vector3){3, 0.33f, 0.9f}, stepCol);
+  AddBlock(s, (Vector3){2.5f, gy + 0.33f, -18.0f}, (Vector3){3, 0.66f, 0.9f}, stepCol);
+
+  // Stacked crates for jump tests + a lone one inside the arena.
+  AddBlock(s, (Vector3){-4, gy + 0.75f, -5}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+  AddBlock(s, (Vector3){-4, gy + 2.25f, -5}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+  AddBlock(s, (Vector3){-9, gy + 0.75f, -20}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+
+  // Torches: entrance pair + crate stack (warm HDR color, flickering).
+  Vector3 torchCol = {2.4f, 1.25f, 0.45f};
+  s->scene.lights[0] = (BrushSceneLight){
+      .light = {{-4.6f, gy + 2.4f, -2.3f}, torchCol, 9.0f}, .flicker = true};
+  s->scene.lights[1] = (BrushSceneLight){
+      .light = {{4.6f, gy + 2.4f, -2.3f}, torchCol, 9.0f}, .flicker = true};
+  s->scene.lights[2] = (BrushSceneLight){
+      .light = {{-4.0f, gy + 3.4f, -5.0f}, torchCol, 9.0f}, .flicker = true};
+  s->scene.lightCount = 3;
+}
+
+// (Re)create the box colliders from the scene data — called after every
+// load/hot-reload so physics always matches the file.
+static void ApplySceneColliders(Sandbox *s) {
+  for (int i = 0; i < s->blockBodyCount; i++)
+    BrushPhysicsRemoveBody(&s->phys, s->blockBodies[i]);
+  s->blockBodyCount = 0;
+  for (int i = 0; i < s->scene.blockCount; i++) {
+    BrushSceneBlock *k = &s->scene.blocks[i];
+    s->blockBodies[s->blockBodyCount++] =
+        BrushPhysicsAddStaticBox(&s->phys, k->pos, k->size, 0, "block");
+  }
 }
 
 // ------------------------------------------------------------------
@@ -188,8 +241,11 @@ static void SandboxInit(void *user) {
 
   BrushPhysicsInit(&s->phys);
 
-  // Spawn location (BRUSH_SPAWN="x,y,z" overrides for captures).
-  float spx = 0.0f, spz = 0.0f;
+  // World definition: the gym lives in assets/gym.def (data, not code).
+  bool sceneLoaded = BrushSceneLoad(&s->scene, "assets/gym.def");
+
+  // Spawn: BRUSH_SPAWN env > scene file > origin.
+  float spx = s->scene.spawn.x, spz = s->scene.spawn.z;
   const char *spawn = getenv("BRUSH_SPAWN");
   if (spawn != NULL) {
     float sy;
@@ -235,30 +291,13 @@ static void SandboxInit(void *user) {
   s->unitCube.materials[0].shader = BrushGetLitShader();
   float gy = BrushWorldGroundHeight(s->world, 0.0f, -14.0f);
 
-  Color wallCol = (Color){168, 172, 180, 255};
-  Color platCol = (Color){140, 146, 158, 255};
-  Color stepCol = (Color){110, 130, 168, 255};
-  Color crateCol = (Color){170, 120, 70, 255};
-
-  // Arena walls (x in [-14,14], z in [-26,-2]), opening on the south side.
-  AddBlock(s, (Vector3){0, gy + 1.5f, -26}, (Vector3){28.6f, 3, 0.6f}, wallCol);
-  AddBlock(s, (Vector3){-9.25f, gy + 1.5f, -2}, (Vector3){10.1f, 3, 0.6f}, wallCol);
-  AddBlock(s, (Vector3){9.25f, gy + 1.5f, -2}, (Vector3){10.1f, 3, 0.6f}, wallCol);
-  AddBlock(s, (Vector3){-14, gy + 1.5f, -14}, (Vector3){0.6f, 3, 24.6f}, wallCol);
-  AddBlock(s, (Vector3){14, gy + 1.5f, -14}, (Vector3){0.6f, 3, 24.6f}, wallCol);
-
-  // High platform (top at 2 m) + low platform (top at 1 m) beside it.
-  AddBlock(s, (Vector3){9, gy + 1.0f, -21}, (Vector3){8, 2, 7}, platCol);
-  AddBlock(s, (Vector3){2.5f, gy + 0.5f, -21}, (Vector3){5, 1, 5}, platCol);
-
-  // Staircase onto the low platform (0.33 m risers — Jolt stair-step range).
-  AddBlock(s, (Vector3){2.5f, gy + 0.165f, -17.2f}, (Vector3){3, 0.33f, 0.9f}, stepCol);
-  AddBlock(s, (Vector3){2.5f, gy + 0.33f, -18.0f}, (Vector3){3, 0.66f, 0.9f}, stepCol);
-
-  // Stacked crates for jump tests + a lone one inside the arena.
-  AddBlock(s, (Vector3){-4, gy + 0.75f, -5}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
-  AddBlock(s, (Vector3){-4, gy + 2.25f, -5}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
-  AddBlock(s, (Vector3){-9, gy + 0.75f, -20}, (Vector3){1.5f, 1.5f, 1.5f}, crateCol);
+  // Bootstrap: no def file yet -> build the gym in code and SAVE it. From
+  // then on the file is the authority (and hot-reloads while running).
+  if (!sceneLoaded) {
+    BuildGymScene(s, gy);
+    BrushSceneSave(&s->scene, "assets/gym.def");
+  }
+  ApplySceneColliders(s);
 
   // Ramp chain up to the high platform: a rotated slab (triangle-MESH
   // collider path) rising 2 m over ~6.3 m (18 deg), meeting the platform lip.
@@ -274,12 +313,6 @@ static void SandboxInit(void *user) {
   BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
                             "ramp");
 
-  // Torch anchors: flanking the arena's south entrance + atop the crate
-  // stack. The lights themselves are submitted per frame in SandboxDraw.
-  s->torchPos[0] = (Vector3){-4.6f, gy + 2.4f, -2.3f};
-  s->torchPos[1] = (Vector3){4.6f, gy + 2.4f, -2.3f};
-  s->torchPos[2] = (Vector3){-4.0f, gy + 3.4f, -5.0f};
-
   // Harness: BRUSH_TEST_TRIGGER drops a big sensor volume across the
   // default camera boom — raycasts (camera anti-clip, IK probes) must see
   // straight through it, and the capsule must walk through it.
@@ -293,6 +326,9 @@ static void SandboxInit(void *user) {
   s->velY = 0.0f;
 
   BrushTodInit(&s->tod);
+  // Scene file sets the starting clock; BRUSH_TIME env still wins.
+  if (s->scene.timeHours >= 0.0f && getenv("BRUSH_TIME") == NULL)
+    s->tod.timeHours = s->scene.timeHours;
 
   BrushOrbitCamInit(&s->camera, s->pos);
   s->camera.obstructFn = CameraObstructed;
@@ -558,6 +594,14 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
   while (yawDiff < -PI) yawDiff += 2.0f * PI;
   s->renderYaw = s->prevYaw + yawDiff * alpha;
 
+  // world.def hot reload: edit assets/gym.def in any editor while running —
+  // blocks, lights, and colliders re-apply within half a second.
+  static int reloadPoll = 0;
+  if (++reloadPoll >= 30) {
+    reloadPoll = 0;
+    if (BrushSceneHotReload(&s->scene)) ApplySceneColliders(s);
+  }
+
   // Day/night clock drives the frame's whole lighting rig (sun/moon light,
   // ambient, sky, exposure). [ and ] scrub the clock by the hour.
   if (IsKeyDown(KEY_LEFT_BRACKET)) s->tod.timeHours -= 2.4f * dt;
@@ -597,34 +641,36 @@ static void SandboxDraw(void *user) {
   // Streamed terrain (frustum-culled chunks -> opaque + shadow layers).
   BrushWorldSubmit(s->world, s->camera.cam);
 
-  for (int i = 0; i < s->blockCount; i++) {
-    Matrix xf = MatrixMultiply(
-        MatrixScale(s->blocks[i].size.x, s->blocks[i].size.y,
-                    s->blocks[i].size.z),
-        MatrixTranslate(s->blocks[i].pos.x, s->blocks[i].pos.y,
-                        s->blocks[i].pos.z));
-    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, s->blocks[i].color);
-    BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, s->blocks[i].color);
+  // Scene blocks (world.def data): one shared unit cube, scaled per block.
+  for (int i = 0; i < s->scene.blockCount; i++) {
+    BrushSceneBlock *k = &s->scene.blocks[i];
+    Matrix xf =
+        MatrixMultiply(MatrixScale(k->size.x, k->size.y, k->size.z),
+                       MatrixTranslate(k->pos.x, k->pos.y, k->pos.z));
+    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, k->color);
+    BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, k->color);
   }
   Color rampCol = (Color){120, 130, 150, 255};
   BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->ramp, s->rampXform, rampCol);
   BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->ramp, s->rampXform, rampCol);
 
-  // Torches: dynamic point lights, submitted per frame like draws. Warm HDR
-  // color (>1 blooms); two detuned sines make a cheap convincing flicker.
+  // Scene lights, submitted per frame like draws. Flickering ones get two
+  // detuned sines; colors are linear HDR (>1 blooms).
   float tt = (float)GetTime();
-  for (int i = 0; i < 3; i++) {
-    float fl = 0.85f + 0.11f * sinf(tt * 9.0f + (float)i * 2.1f) +
-               0.06f * sinf(tt * 23.7f + (float)i * 4.3f);
-    BrushRenderSubmitPointLight((BrushPointLight){
-        .position = s->torchPos[i],
-        .color = {2.4f * fl, 1.25f * fl, 0.45f * fl},
-        .radius = 9.0f,
-    });
+  for (int i = 0; i < s->scene.lightCount; i++) {
+    BrushSceneLight *l = &s->scene.lights[i];
+    float fl = 1.0f;
+    if (l->flicker)
+      fl = 0.85f + 0.11f * sinf(tt * 9.0f + (float)i * 2.1f) +
+           0.06f * sinf(tt * 23.7f + (float)i * 4.3f);
+    BrushPointLight pl = l->light;
+    pl.color = (Vector3){pl.color.x * fl, pl.color.y * fl, pl.color.z * fl};
+    BrushRenderSubmitPointLight(pl);
     // Small marker cube so the source reads in-scene.
     Matrix mk = MatrixMultiply(
         MatrixScale(0.16f, 0.16f, 0.16f),
-        MatrixTranslate(s->torchPos[i].x, s->torchPos[i].y, s->torchPos[i].z));
+        MatrixTranslate(l->light.position.x, l->light.position.y,
+                        l->light.position.z));
     BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &s->unitCube, mk,
                       (Color){255, 190, 90, 255});
   }

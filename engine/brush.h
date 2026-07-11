@@ -25,6 +25,7 @@
 #include "b_physics.h"
 #include "b_post.h"
 #include "b_render.h"
+#include "b_scene.h"
 #include "b_shadow.h"
 #include "b_sky.h"
 #include "b_tod.h"
