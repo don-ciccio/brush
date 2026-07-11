@@ -10,6 +10,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Object-layer filter for queries: SOLID geometry only. Sensor/trigger
+// volumes must never block raycasts — the camera anti-clip, foot-IK probes,
+// and mantle detection would all collide with invisible gameplay volumes.
+static bool JPH_API_CALL SolidShouldCollide(void *userData,
+                                            JPH_ObjectLayer layer) {
+    (void)userData;
+    return layer != BRUSH_PHYS_LAYER_TRIGGER;
+}
+
 bool BrushPhysicsInit(BrushPhysics *pw) {
     if (!pw) return false;
     memset(pw, 0, sizeof(BrushPhysics));
@@ -78,6 +87,16 @@ bool BrushPhysicsInit(BrushPhysics *pw) {
     // Cache the body interface for adding/removing geometry
     pw->bodyInterface = JPH_PhysicsSystem_GetBodyInterface(pw->system);
 
+    // 6. Query filter: raycasts collide with solid layers only (see
+    // SolidShouldCollide). CAREFUL: SetProcs stores the POINTER (joltc keeps
+    // s_Procs = procs), so the procs table must outlive every query — static,
+    // never stack-local (a local here SIGBUSes on the first raycast).
+    static const JPH_ObjectLayerFilter_Procs solidProcs = {
+        .ShouldCollide = SolidShouldCollide,
+    };
+    JPH_ObjectLayerFilter_SetProcs(&solidProcs);
+    pw->solidFilter = JPH_ObjectLayerFilter_Create(NULL);
+
     TraceLog(LOG_INFO, "JoltC: Centralized BrushPhysics initialized successfully");
     return true;
 }
@@ -98,6 +117,10 @@ void BrushPhysicsCleanup(BrushPhysics *pw) {
     // (see joltc.cpp:1044-1046). Do NOT call their Destroy functions — that
     // would double-free and crash.
 
+    if (pw->solidFilter) {
+        JPH_ObjectLayerFilter_Destroy(pw->solidFilter);
+        pw->solidFilter = NULL;
+    }
     if (pw->system) {
         JPH_PhysicsSystem_Destroy(pw->system);
         pw->system = NULL;
@@ -284,9 +307,10 @@ bool BrushPhysicsRaycast(BrushPhysics *pw, Vector3 origin, Vector3 direction, fl
     JPH_RayCastResult hit;
     memset(&hit, 0, sizeof(JPH_RayCastResult));
 
-    // Perform query colliding only with static and moving layers (ignore triggers)
-    // We pass NULL filters for simplicity, which will match all standard bodies
-    bool hasHit = JPH_NarrowPhaseQuery_CastRay(query, &start, &dir, &hit, NULL, NULL, NULL);
+    // Solid layers only: sensor/trigger volumes never block a ray (camera
+    // anti-clip, foot-IK probes, and mantle detection must see through them).
+    bool hasHit = JPH_NarrowPhaseQuery_CastRay(query, &start, &dir, &hit, NULL,
+                                               pw->solidFilter, NULL);
 
     if (hasHit && hit.bodyID != BRUSH_BODY_INVALID) {
         float fraction = hit.fraction;

@@ -37,6 +37,7 @@ typedef struct BrushPhysics {
   JPH_BroadPhaseLayerInterface *bpInterface;
   JPH_ObjectVsBroadPhaseLayerFilter *objVsBpFilter;
   JPH_ObjectLayerPairFilter *objPairFilter;
+  JPH_ObjectLayerFilter *solidFilter; // query filter: excludes trigger layer
 } BrushPhysics;
 
 bool BrushPhysicsInit(BrushPhysics *pw);

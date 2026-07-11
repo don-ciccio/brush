@@ -272,6 +272,13 @@ static void SandboxInit(void *user) {
   BrushPhysicsAddStaticMesh(&s->phys, s->ramp.meshes[0], s->rampXform, 0,
                             "ramp");
 
+  // Harness: BRUSH_TEST_TRIGGER drops a big sensor volume across the
+  // default camera boom — raycasts (camera anti-clip, IK probes) must see
+  // straight through it, and the capsule must walk through it.
+  if (getenv("BRUSH_TEST_TRIGGER") != NULL)
+    BrushPhysicsAddTriggerBox(&s->phys, (Vector3){0, gy + 1.5f, 6},
+                              (Vector3){8, 3, 2}, 1, "test_trigger");
+
   // Kinematic capsule: radius/height match the mannequin (1.83 m tall).
   BrushCharacterInit(&s->body, &s->phys, s->pos, 0.30f, 1.80f);
 
