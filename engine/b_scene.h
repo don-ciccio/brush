@@ -67,6 +67,7 @@ typedef struct BrushSceneMaterial {
   float aoStrength;  // ambient occlusion strength (default 1.0)
   bool uvProjection; // sample by the mesh's authored UVs instead of
                      // triplanar (textures baked FOR a model, e.g. rocks)
+  bool parallax;     // ray-march the displacement map (POM) — needs a height map
   Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
 } BrushSceneMaterial;
 

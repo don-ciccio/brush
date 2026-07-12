@@ -39,6 +39,7 @@ uniform float uNormalDepth; // normal map intensity (1 = authored)
 uniform float uNormalSwizzled;
 uniform float uHasHeightMap;
 uniform float uHeightScale;
+uniform float uParallax;      // 0 = flat (normal map only), 1 = parallax occlusion
 uniform float uHasAoMap;
 uniform float uAoStrength;
 
@@ -211,6 +212,34 @@ vec3 SampleNormalMap(vec2 uv) {
     return s.xyz * 2.0 - 1.0;
 }
 
+// Parallax Occlusion Mapping: ray-march the height field along the view ray in
+// tangent space and return the offset UV where the ray meets the surface. The
+// height map stores 1 = crest, so we walk depth 0->1. Offset-limited by the
+// grazing angle; step count scales with the angle; textureGrad keeps the mip
+// stable as the UV marches. `viewTS` points from the surface toward the eye.
+vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
+    float nSteps = mix(8.0, 32.0, clamp(1.0 - abs(viewTS.z), 0.0, 1.0));
+    float layerD = 1.0 / nSteps;
+    vec2 P = (viewTS.xy / max(abs(viewTS.z), 0.1)) * scale; // total sweep
+    vec2 dUV = P * layerD;
+    vec2 ddx = dFdx(uv), ddy = dFdy(uv);
+    float curD = 0.0;
+    vec2  cur = uv;
+    float hCur = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
+    for (int i = 0; i < 32; i++) {
+        if (float(i) >= nSteps || curD >= hCur) break;
+        cur  -= dUV;
+        curD += layerD;
+        hCur  = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
+    }
+    // Interpolate the crossing between the last two steps (the "occlusion" bit).
+    vec2  prev  = cur + dUV;
+    float after  = hCur - curD;
+    float before = (1.0 - textureGrad(heightTex, prev, ddx, ddy).r) - (curD - layerD);
+    float t = after / (after - before + 1e-5);
+    return mix(cur, prev, clamp(t, 0.0, 1.0));
+}
+
 void main()
 {
     vec3 geoN = normalize(fragNormal);
@@ -243,38 +272,42 @@ void main()
         }
         uvZ = localPos.xy / ts; // project along Z
 
-        if (uHasHeightMap > 0.5) {
-            // Project view direction V into local space
-            vec3 V_local = vec3(dot(V, worldAxisX),
-                                dot(V, worldAxisY),
-                                dot(V, worldAxisZ));
-
-            float hX = texture(texture6, uvX).r;
-            float hY = texture(texture6, uvY).r;
-            float hZ = texture(texture6, uvZ).r;
-            float h = hX * triW.x + hY * triW.y + hZ * triW.z;
-
-            // Offset the local coordinates along the local view vector
-            vec3 offsetPos = localPos - V_local * ((1.0 - h) * uHeightScale);
-            uvX = offsetPos.zy / ts;
-            if (vSwapUV > 0.5) {
-                uvY = offsetPos.zx / ts;
-            } else {
-                uvY = offsetPos.xz / ts;
+        // Triplanar parallax: POM the DOMINANT axis only (1x, not 3x), faded
+        // with distance. The other two axes are low-weight; leaving them
+        // unoffset is invisible in the blend.
+        if (uHasHeightMap > 0.5 && uParallax > 0.5) {
+            float pomFade = 1.0 - smoothstep(12.0, 24.0, length(viewPos - fragPosition));
+            if (pomFade > 0.0) {
+                vec3 V_local = vec3(dot(V, worldAxisX),
+                                    dot(V, worldAxisY),
+                                    dot(V, worldAxisZ));
+                float pScale = uHeightScale / ts; // world height -> projected-UV units
+                if (triW.x >= triW.y && triW.x >= triW.z) {
+                    vec3 vts = vec3(V_local.z, V_local.y, V_local.x); // uvX = zy, depth X
+                    uvX = mix(uvX, ParallaxUV(texture6, uvX, vts, pScale), pomFade);
+                } else if (triW.y >= triW.z) {
+                    vec3 vts = (vSwapUV > 0.5) ? vec3(V_local.z, V_local.x, V_local.y)
+                                               : vec3(V_local.x, V_local.z, V_local.y);
+                    uvY = mix(uvY, ParallaxUV(texture6, uvY, vts, pScale), pomFade);
+                } else {
+                    vec3 vts = vec3(V_local.x, V_local.y, V_local.z); // uvZ = xy, depth Z
+                    uvZ = mix(uvZ, ParallaxUV(texture6, uvZ, vts, pScale), pomFade);
+                }
             }
-            uvZ = offsetPos.xy / ts;
         }
     } else {
-        if (uHasHeightMap > 0.5) {
+        // Tangent-space parallax (mesh-UV materials / models). POM ray-march,
+        // faded out with distance so far pixels pay nothing and don't shimmer.
+        if (uHasHeightMap > 0.5 && uParallax > 0.5) {
+            float pomFade = 1.0 - smoothstep(12.0, 24.0, length(viewPos - fragPosition));
             float tangentLen = length(fragTangent.xyz);
-            if (tangentLen > 0.1) {
+            if (pomFade > 0.0 && tangentLen > 0.1) {
                 vec3 T = fragTangent.xyz / tangentLen;
                 T = normalize(T - dot(T, geoN) * geoN);
                 vec3 B = cross(geoN, T) * fragTangent.w;
-                float h = texture(texture6, fragTexCoord).r;
                 vec3 viewDirTS = vec3(dot(T, V), dot(B, V), dot(geoN, V));
-                float denom = max(viewDirTS.z, 0.1);
-                uvMesh = fragTexCoord - (viewDirTS.xy / denom) * ((1.0 - h) * uHeightScale);
+                vec2 pomUV = ParallaxUV(texture6, fragTexCoord, viewDirTS, uHeightScale);
+                uvMesh = mix(fragTexCoord, pomUV, pomFade);
             }
         }
     }

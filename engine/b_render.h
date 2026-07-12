@@ -146,6 +146,7 @@ typedef struct BrushMaterialProps {
   float normalDepth;  // normal map intensity (1 = authored)
   float heightScale;  // displacement scale strength (default 0.05)
   float aoStrength;   // ambient occlusion strength (default 1.0)
+  bool parallax;      // ray-march the height map (POM) — needs displacement
 } BrushMaterialProps;
 
 // BrushRenderSubmit with material overrides applied for exactly this draw.

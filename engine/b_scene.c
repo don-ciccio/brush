@@ -63,9 +63,9 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     } else if (sscanf(p, "time %f", &x) == 1) {
       temp.timeHours = x;
     } else if ((n = sscanf(p,
-                           "material %31s %255s %255s %255s %255s %f %f %f %f %f %d",
+                           "material %31s %255s %255s %255s %255s %f %f %f %f %f %d %d",
                            w1, w2, w3, w4, w5, &x, &y, &z, &h, &a,
-                           &flicker)) >= 10) {
+                           &flicker, &ir)) >= 10) {
       if (temp.materialCount < BRUSH_SCENE_MAX_MATERIALS) {
         BrushSceneMaterial *m = &temp.materials[temp.materialCount++];
         memset(m, 0, sizeof(*m));
@@ -79,7 +79,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         m->normalDepth = z;
         m->heightScale = h;
         m->aoStrength = a;
-        m->uvProjection = (n == 11 && flicker != 0);
+        m->uvProjection = (n >= 11 && flicker != 0);
+        m->parallax = (n >= 12 && ir != 0); // 12th field, optional
       }
     } else if (sscanf(p, "material %31s %255s %255s %f %f %f", w1, w2, w3, &x,
                       &y, &z) == 6) {
@@ -224,11 +225,11 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     fprintf(f, "\n# material  name  albedo  normal  displacement  ao  tile spec depth scale aoStrength\n");
   for (int i = 0; i < s->materialCount; i++) {
     const BrushSceneMaterial *m = &s->materials[i];
-    fprintf(f, "material %s %s %s %s %s %g %g %g %g %g %d\n", m->name,
+    fprintf(f, "material %s %s %s %s %s %g %g %g %g %g %d %d\n", m->name,
             m->albedo[0] ? m->albedo : "-", m->normal[0] ? m->normal : "-",
             m->displacement[0] ? m->displacement : "-", m->ao[0] ? m->ao : "-",
             m->tile, m->spec, m->normalDepth, m->heightScale, m->aoStrength,
-            m->uvProjection ? 1 : 0);
+            m->uvProjection ? 1 : 0, m->parallax ? 1 : 0);
   }
   fprintf(f, "\n# block  x y z  rx ry rz  sx sy sz  r g b  material\n");
   for (int i = 0; i < s->blockCount; i++) {
@@ -410,6 +411,7 @@ static bool MaterialProps(const BrushScene *s, const char *name,
       .normalDepth = m->normalDepth,
       .heightScale = m->heightScale,
       .aoStrength = m->aoStrength,
+      .parallax = m->parallax,
   };
   return true;
 }

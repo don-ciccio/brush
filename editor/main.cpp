@@ -2113,6 +2113,14 @@ int main(int argc, char **argv) {
                 }
                 if (ImGui::SliderFloat("Displacement Scale", &m->heightScale, 0.0f,
                                        0.2f, "%.3f")) g_dirty = true;
+                if (ImGui::Checkbox("Parallax (POM)", &m->parallax)) g_dirty = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Ray-march the displacement map for real depth "
+                                      "(cobbles/brick/rock up close). Needs a Displacement "
+                                      "map; fades to flat with distance.");
+                if (m->parallax && m->displacementTex.id == 0)
+                    ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
+                                       "  needs a Displacement map to show");
                 if (ImGui::SliderFloat("AO Strength", &m->aoStrength, 0.0f,
                                        1.0f)) g_dirty = true;
                 if (reresolve) {

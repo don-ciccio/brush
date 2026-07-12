@@ -41,7 +41,7 @@ typedef struct BrushRenderState {
   int locLinearize;
   int locTriplanar, locTexScale, locHasNormalMap, locNormalDepth;
   int locNormalSwizzled;
-  int locHasHeightMap, locHeightScale;
+  int locHasHeightMap, locHeightScale, locParallax;
   int locHasAoMap, locAoStrength;
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
@@ -104,6 +104,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.lit.locs[SHADER_LOC_MAP_HEIGHT] = GetShaderLocation(g_r.lit, "texture6");
   g_r.locHasHeightMap = GetShaderLocation(g_r.lit, "uHasHeightMap");
   g_r.locHeightScale = GetShaderLocation(g_r.lit, "uHeightScale");
+  g_r.locParallax = GetShaderLocation(g_r.lit, "uParallax");
   g_r.locHasAoMap = GetShaderLocation(g_r.lit, "uHasAoMap");
   g_r.locAoStrength = GetShaderLocation(g_r.lit, "uAoStrength");
   g_r.locSplatEnabled = GetShaderLocation(g_r.lit, "uSplatEnabled");
@@ -326,6 +327,7 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
                                               : g_r.specDefault;
   float hasHeight = (p && p->displacement.id != 0) ? 1.0f : 0.0f;
   float heightScale = p ? p->heightScale : 0.05f;
+  float parallax = (p && p->parallax) ? 1.0f : 0.0f;
   float hasAo = (p && p->ao.id != 0) ? 1.0f : 0.0f;
   float aoStrength = p ? p->aoStrength : 1.0f;
 
@@ -340,6 +342,7 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHasHeightMap, &hasHeight, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHeightScale, &heightScale, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locParallax, &parallax, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHasAoMap, &hasAo, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locAoStrength, &aoStrength, SHADER_UNIFORM_FLOAT);
 }
