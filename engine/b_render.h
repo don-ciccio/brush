@@ -204,6 +204,12 @@ void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
 // submission lists afterwards.
 void BrushRenderExecute(Camera3D camera);
 
+// Parallax-occlusion-mapping quality (global gate for the material + terrain
+// POM paths): 0 = off, 1 = POM, 2 = POM + soft self-shadow. Defaults from
+// BRUSH_POM (2). A quality preset / settings menu drives this.
+void BrushRenderSetPomQuality(int quality);
+int BrushRenderGetPomQuality(void);
+
 // Debug layer view (F2 handled by b_app).
 void BrushRenderCycleLayerView(void);
 BrushLayerView BrushRenderGetLayerView(void);

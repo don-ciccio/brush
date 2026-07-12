@@ -40,6 +40,7 @@ uniform float uNormalSwizzled;
 uniform float uHasHeightMap;
 uniform float uHeightScale;
 uniform float uParallax;      // 0 = flat (normal map only), 1 = parallax occlusion
+uniform float uParallaxShadow; // 1 = soft self-shadow the height field toward the sun
 uniform float uHasAoMap;
 uniform float uAoStrength;
 
@@ -244,9 +245,33 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
     return mix(cur, prev, clamp(t, 0.0, 1.0));
 }
 
+// Soft self-shadow of the height field: march from the parallax hit point
+// toward the light (tangent space) and accumulate how far the field pokes above
+// the ray. 1 = lit, 0 = fully occluded (dark grout between raised stones). L
+// points toward the light; scale matches ParallaxUV's depth.
+float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale) {
+    if (L.z <= 0.05) return 1.0;
+    vec2 ddx = dFdx(uv), ddy = dFdy(uv);
+    float h0 = textureGrad(heightTex, uv, ddx, ddy).r; // hit height (1 = crest)
+    const int N = 12;
+    vec2  dUV = (L.xy / L.z) * scale / float(N);
+    float dH  = (1.0 - h0) / float(N);                 // climb to the crest over N steps
+    float occ = 0.0;
+    vec2  cur = uv;
+    float rayH = h0;
+    for (int i = 0; i < N; i++) {
+        cur  += dUV;
+        rayH += dH;
+        float s = textureGrad(heightTex, cur, ddx, ddy).r;
+        if (s > rayH) occ = max(occ, (s - rayH) * (1.0 - float(i) / float(N)));
+    }
+    return 1.0 - clamp(occ * 4.0, 0.0, 1.0);
+}
+
 void main()
 {
     vec3 geoN = normalize(fragNormal);
+    float pomShadow = 1.0; // POM self-shadow, applied to the sun term below
     vec3 triW = TriplanarWeights(geoN);
     float ts = max(uTexScale, 0.001);
 
@@ -312,6 +337,11 @@ void main()
                 vec3 viewDirTS = vec3(dot(T, V), dot(B, V), dot(geoN, V));
                 vec2 pomUV = ParallaxUV(texture6, fragTexCoord, viewDirTS, uHeightScale);
                 uvMesh = mix(fragTexCoord, pomUV, pomFade);
+                if (uParallaxShadow > 0.5) {
+                    vec3 L = normalize(uSunDir);
+                    vec3 lTS = vec3(dot(T, L), dot(B, L), dot(geoN, L));
+                    pomShadow = mix(1.0, ParallaxShadow(texture6, pomUV, lTS, uHeightScale), pomFade);
+                }
             }
         }
     }
@@ -389,6 +419,13 @@ void main()
                 vec3 vts = vec3(V.x, V.z, V.y);             // world XZ tangent frame
                 vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uPomScale);
                 wpPom.xz = wp.xz + (pomUV - uv) * uPomTile * pomFade;
+                if (uParallaxShadow > 0.5) {
+                    vec3 L = normalize(uSunDir);
+                    vec3 lTS = vec3(L.x, L.z, L.y);
+                    float sh = ParallaxShadow(uLayerHeight, pomUV, lTS, uPomScale);
+                    float pomW = sw[uPomLayer]; // shadow only where the paving is
+                    pomShadow = mix(1.0, sh, pomW * pomFade);
+                }
             }
         }
         #define WP(i) ((uPomLayer == (i)) ? wpPom : wp)
@@ -449,7 +486,7 @@ void main()
     // facing away from the sun get no direct light at all — skip the 32-tap
     // PCSS entirely there (roughly half the pixels in a typical view).
     float sunVis = (diff > 0.0) ? 1.0 - ShadowFactor(fragPosition, diff) : 0.0;
-    diff *= sunVis;
+    diff *= sunVis * pomShadow; // POM self-shadow darkens the sun term in the grout
 
     vec3 H = normalize(L + V);
     float spec = (diff > 0.0)

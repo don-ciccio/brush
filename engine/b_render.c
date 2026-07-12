@@ -41,7 +41,8 @@ typedef struct BrushRenderState {
   int locLinearize;
   int locTriplanar, locTexScale, locHasNormalMap, locNormalDepth;
   int locNormalSwizzled;
-  int locHasHeightMap, locHeightScale, locParallax;
+  int locHasHeightMap, locHeightScale, locParallax, locParallaxShadow;
+  int pomQuality; // 0 = off, 1 = POM, 2 = POM + self-shadow (BRUSH_POM)
   int locHasAoMap, locAoStrength;
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
@@ -106,6 +107,11 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locHasHeightMap = GetShaderLocation(g_r.lit, "uHasHeightMap");
   g_r.locHeightScale = GetShaderLocation(g_r.lit, "uHeightScale");
   g_r.locParallax = GetShaderLocation(g_r.lit, "uParallax");
+  g_r.locParallaxShadow = GetShaderLocation(g_r.lit, "uParallaxShadow");
+  {
+    const char *pq = getenv("BRUSH_POM"); // 0 off / 1 on / 2 on+self-shadow
+    g_r.pomQuality = pq ? atoi(pq) : 2;
+  }
   g_r.locHasAoMap = GetShaderLocation(g_r.lit, "uHasAoMap");
   g_r.locAoStrength = GetShaderLocation(g_r.lit, "uAoStrength");
   g_r.locSplatEnabled = GetShaderLocation(g_r.lit, "uSplatEnabled");
@@ -332,7 +338,8 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
                                               : g_r.specDefault;
   float hasHeight = (p && p->displacement.id != 0) ? 1.0f : 0.0f;
   float heightScale = p ? p->heightScale : 0.05f;
-  float parallax = (p && p->parallax) ? 1.0f : 0.0f;
+  float parallax = (p && p->parallax && g_r.pomQuality > 0) ? 1.0f : 0.0f;
+  float pomShadow = (g_r.pomQuality >= 2) ? 1.0f : 0.0f;
   float hasAo = (p && p->ao.id != 0) ? 1.0f : 0.0f;
   float aoStrength = p ? p->aoStrength : 1.0f;
 
@@ -348,6 +355,7 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   SetShaderValue(g_r.lit, g_r.locHasHeightMap, &hasHeight, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHeightScale, &heightScale, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locParallax, &parallax, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locParallaxShadow, &pomShadow, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHasAoMap, &hasAo, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locAoStrength, &aoStrength, SHADER_UNIFORM_FLOAT);
 }
@@ -390,11 +398,12 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   // POM: the first layer flagged for parallax WITH a displacement map gets its
   // height bound to the one free unit (9). Only one layer POMs (4x is absurd).
   int pomLayer = -1;
-  for (int i = 0; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++)
-    if (sp->layers[i].parallax && sp->layers[i].displacement.id != 0) {
-      pomLayer = i;
-      break;
-    }
+  if (g_r.pomQuality > 0)
+    for (int i = 0; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++)
+      if (sp->layers[i].parallax && sp->layers[i].displacement.id != 0) {
+        pomLayer = i;
+        break;
+      }
   if (pomLayer >= 0) {
     rlActiveTextureSlot(9);
     rlEnableTexture(sp->layers[pomLayer].displacement.id);
@@ -441,6 +450,8 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locPomLayer, &pomLayer, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locPomTile, &pomTile, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locPomScale, &pomScale, SHADER_UNIFORM_FLOAT);
+  float pomSh = (g_r.pomQuality >= 2) ? 1.0f : 0.0f;
+  SetShaderValue(g_r.lit, g_r.locParallaxShadow, &pomSh, SHADER_UNIFORM_FLOAT);
   // Matte terrain: override the prop-default specular ApplyMaterialProps set
   // (runs before this) so grass/dirt don't get a plasticky sun sheen.
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.terrainSpec,
@@ -680,6 +691,11 @@ void BrushRenderCycleLayerView(void) {
   g_r.layerView = (BrushLayerView)((g_r.layerView + 1) % BRUSH_VIEW_COUNT);
   TraceLog(LOG_INFO, "BRUSH: layer view -> %s", BrushRenderLayerViewName());
 }
+
+void BrushRenderSetPomQuality(int quality) {
+  g_r.pomQuality = quality < 0 ? 0 : (quality > 2 ? 2 : quality);
+}
+int BrushRenderGetPomQuality(void) { return g_r.pomQuality; }
 
 BrushLayerView BrushRenderGetLayerView(void) { return g_r.layerView; }
 
