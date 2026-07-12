@@ -47,6 +47,7 @@ typedef struct BrushRenderState {
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
   float specDefault; // uSpecStrength for draws without material props
+  float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
   int locShadowMap[BRUSH_SHADOW_CASCADES];
@@ -155,6 +156,13 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.specDefault = 0.35f;
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.specDefault,
                  SHADER_UNIFORM_FLOAT);
+  // Terrain (grass/dirt/rock) is rough/matte — the 0.35 prop default gives it
+  // a plasticky specular sheen that whitens sun-facing ground (reads as washed
+  // out / "translucent" once tonemapped). Near-matte by default; env-tunable.
+  {
+    const char *ts = getenv("BRUSH_TERRAIN_SPEC");
+    g_r.terrainSpec = ts ? (float)atof(ts) : 0.04f;
+  }
 
   g_r.skyEnabled = true;
   g_r.layerView = BRUSH_VIEW_FINAL;
@@ -408,6 +416,10 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNrm, SHADER_UNIFORM_FLOAT);
+  // Matte terrain: override the prop-default specular ApplyMaterialProps set
+  // (runs before this) so grass/dirt don't get a plasticky sun sheen.
+  SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.terrainSpec,
+                 SHADER_UNIFORM_FLOAT);
 }
 
 static void DrawCmd(const BrushDrawCmd *cmd) {
