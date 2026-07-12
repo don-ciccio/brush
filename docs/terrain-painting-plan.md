@@ -141,7 +141,7 @@ weight tiles unchanged).
 |---|---|---|
 | **G1 engine** | ~~weight tiles + BrushWorldPaint + per-chunk splat texture + lit.fs splat branch + BrushWorldSetLayers + BSC2 blob/undo~~ DONE (no apron needed: shared-edge samples + texel-centre UVs are bilinear-seamless; layers sample planar-XZ in v1, triplanar deferred to G3) | BRUSH_TEST_PAINT painted across the x=0 chunk border seamlessly; BSC2 save->load->save byte-identical |
 | **G2 editor** | ~~Paint tool + layer picker + Terrain layer slots (world.def lines) + snapshot-undo covering paint~~ DONE (Paint in the sculpt toolbar, shift = erase to base coat, magenta cursor ring; layer swatches show albedo thumbnails; Terrain Layers combos in Environment; BRUSH_EDITOR_TOOL harness) | editor shows the painted terrain; undo covers paint via the shared BSC2 snapshot |
-| **G3 polish** | slope auto-mask, layer normal maps if deferred from G1, surface query | side-by-side screenshot with/without auto-rock on a cliff |
+| **G3 polish** | ~~slope auto-mask, triplanar layer sampling on steep surfaces, surface query~~ DONE (auto-slope = cos-angle smoothstep beneath the paint, terrain_auto_slope line + Environment UI; layers go full triplanar only where geoN.y < 0.85; BrushWorldSurfaceAt returns the dominant layer) | hills screenshot shows auto-rock on the steep bank; harness: painted spot reports layer 1, unpainted layer 0 |
 
 ## Gotchas to respect (from the sculpt/asset work)
 

@@ -173,6 +173,10 @@ typedef struct BrushSplatDraw {
   int res;            // splat texture resolution per side
   BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
   int layerCount;
+  // Auto-slope mask: steep terrain blends toward `autoSlopeLayer` beneath
+  // the painted weights (-1 = off). Angles in degrees from horizontal.
+  int autoSlopeLayer;
+  float autoSlopeStart, autoSlopeEnd;
 } BrushSplatDraw;
 
 // BrushRenderSubmitMesh with splat blending for exactly this draw.

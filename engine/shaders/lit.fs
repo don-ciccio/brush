@@ -60,6 +60,10 @@ uniform float uSplatRes;   // splat texture resolution per side
 uniform vec4 uLayerTiles;  // metres per repeat, per layer
 uniform vec4 uLayerSwizzled; // DXT5nm flag per layer
 uniform int uLayerCount;
+// Auto-slope mask: steep terrain auto-blends toward one layer beneath the
+// painted weights (x = layer index or -1 off, y = cos(startDeg),
+// z = cos(endDeg); start < end in degrees so cosStart > cosEnd).
+uniform vec3 uAutoSlope;
 
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
@@ -164,6 +168,31 @@ vec3 DecodeNormal(vec4 s, float swizzled) {
     return s.xyz * 2.0 - 1.0;
 }
 
+// One splat layer's albedo: planar-XZ on flat ground, full triplanar on
+// steep surfaces (sculpted cliffs would smear a top-projected texture).
+vec3 SampleLayer(sampler2D tex, float tile, vec3 wp, vec3 triW, bool steep) {
+    if (!steep) return texture(tex, wp.xz / tile).rgb;
+    return texture(tex, wp.zy / tile).rgb * triW.x +
+           texture(tex, wp.xz / tile).rgb * triW.y +
+           texture(tex, wp.xy / tile).rgb * triW.z;
+}
+
+// One splat layer's tangent-space bump lifted to world axes (UDN swizzle),
+// planar or triplanar to match SampleLayer.
+vec3 SampleLayerBump(sampler2D tex, float tile, vec3 wp, vec3 triW,
+                     float sw, bool steep) {
+    if (!steep) {
+        vec3 tn = DecodeNormal(texture(tex, wp.xz / tile), sw);
+        return vec3(tn.x, 0.0, tn.y);
+    }
+    vec3 tnX = DecodeNormal(texture(tex, wp.zy / tile), sw);
+    vec3 tnY = DecodeNormal(texture(tex, wp.xz / tile), sw);
+    vec3 tnZ = DecodeNormal(texture(tex, wp.xy / tile), sw);
+    return vec3(0.0, tnX.y, tnX.x) * triW.x +
+           vec3(tnY.x, 0.0, tnY.y) * triW.y +
+           vec3(tnZ.x, tnZ.y, 0.0) * triW.z;
+}
+
 // Tangent-space normal fetch, DXT5nm-aware (see uNormalSwizzled).
 vec3 SampleNormalMap(vec2 uv) {
     vec4 s = texture(texture2, uv);
@@ -261,30 +290,35 @@ void main()
                         * (uSplatRes - 1.0) + 0.5) / uSplatRes;
         vec4 sw = texture(uSplatMap, suv);
         sw /= max(sw.r + sw.g + sw.b + sw.a, 1e-4);
-        vec2 p = fragPosition.xz;
-        vec3 a = texture(texture0, p / uLayerTiles.x).rgb * sw.r;
-        if (uLayerCount > 1) a += texture(uLayerAlbedo1, p / uLayerTiles.y).rgb * sw.g;
-        if (uLayerCount > 2) a += texture(uLayerAlbedo2, p / uLayerTiles.z).rgb * sw.b;
-        if (uLayerCount > 3) a += texture(uLayerAlbedo3, p / uLayerTiles.w).rgb * sw.a;
+
+        // Auto-slope: steepness pushes the weights toward one layer
+        // beneath the paint (cos-angle smoothstep on the surface normal).
+        if (uAutoSlope.x >= 0.0) {
+            float denom = max(uAutoSlope.y - uAutoSlope.z, 1e-4);
+            float f = clamp((uAutoSlope.y - geoN.y) / denom, 0.0, 1.0);
+            f = f * f * (3.0 - 2.0 * f);
+            vec4 slopeW = vec4(uAutoSlope.x == 0.0 ? 1.0 : 0.0,
+                               uAutoSlope.x == 1.0 ? 1.0 : 0.0,
+                               uAutoSlope.x == 2.0 ? 1.0 : 0.0,
+                               uAutoSlope.x == 3.0 ? 1.0 : 0.0);
+            sw = mix(sw, slopeW, f);
+        }
+
+        // Steep surfaces get full triplanar per layer; flat ground keeps
+        // the cheap single XZ projection.
+        bool steep = (geoN.y < 0.85);
+        vec3 wp = fragPosition;
+        vec3 a = SampleLayer(texture0, uLayerTiles.x, wp, triW, steep) * sw.r;
+        if (uLayerCount > 1) a += SampleLayer(uLayerAlbedo1, uLayerTiles.y, wp, triW, steep) * sw.g;
+        if (uLayerCount > 2) a += SampleLayer(uLayerAlbedo2, uLayerTiles.z, wp, triW, steep) * sw.b;
+        if (uLayerCount > 3) a += SampleLayer(uLayerAlbedo3, uLayerTiles.w, wp, triW, steep) * sw.a;
         albedo = a; // vertex colour/tint intentionally excluded
 
-        // XZ-plane bump blend (uHasNormalMap = layer0 has a normal map;
-        // layers with none contribute flat).
         if (uHasNormalMap > 0.5) {
-            vec3 tn0 = DecodeNormal(texture(texture2, p / uLayerTiles.x), uLayerSwizzled.x);
-            splatBump = vec3(tn0.x, 0.0, tn0.y) * sw.r;
-            if (uLayerCount > 1) {
-                vec3 tn1 = DecodeNormal(texture(uLayerNormal1, p / uLayerTiles.y), uLayerSwizzled.y);
-                splatBump += vec3(tn1.x, 0.0, tn1.y) * sw.g;
-            }
-            if (uLayerCount > 2) {
-                vec3 tn2 = DecodeNormal(texture(uLayerNormal2, p / uLayerTiles.z), uLayerSwizzled.z);
-                splatBump += vec3(tn2.x, 0.0, tn2.y) * sw.b;
-            }
-            if (uLayerCount > 3) {
-                vec3 tn3 = DecodeNormal(texture(uLayerNormal3, p / uLayerTiles.w), uLayerSwizzled.w);
-                splatBump += vec3(tn3.x, 0.0, tn3.y) * sw.a;
-            }
+            splatBump = SampleLayerBump(texture2, uLayerTiles.x, wp, triW, uLayerSwizzled.x, steep) * sw.r;
+            if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, wp, triW, uLayerSwizzled.y, steep) * sw.g;
+            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, wp, triW, uLayerSwizzled.z, steep) * sw.b;
+            if (uLayerCount > 3) splatBump += SampleLayerBump(uLayerNormal3, uLayerTiles.w, wp, triW, uLayerSwizzled.w, steep) * sw.a;
         }
     }
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));

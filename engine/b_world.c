@@ -110,6 +110,8 @@ struct BrushWorld {
 
   BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
   int layerCount;
+  int autoSlopeLayer; // -1 = off
+  float autoSlopeStart, autoSlopeEnd; // degrees
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -651,6 +653,9 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
   w->tileRes = cfg.hmRes - 1;
   w->gridStep = cfg.chunkSize / (float)(cfg.hmRes - 1);
   pthread_mutex_init(&w->sculptMutex, NULL);
+  w->autoSlopeLayer = -1;
+  w->autoSlopeStart = 25.0f;
+  w->autoSlopeEnd = 45.0f;
   w->unloadRadius = cfg.loadRadius + 1;
   w->origin = (BrushChunkCoord){0, 0};
   w->center = ChunkOf(w, spawn.x, spawn.z);
@@ -770,6 +775,9 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
       sd.res = w->cfg.hmRes;
       memcpy(sd.layers, w->layers, sizeof(sd.layers));
       sd.layerCount = w->layerCount;
+      sd.autoSlopeLayer = w->autoSlopeLayer;
+      sd.autoSlopeStart = w->autoSlopeStart;
+      sd.autoSlopeEnd = w->autoSlopeEnd;
       BrushRenderSubmitMeshSplat(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material,
                                  xf, &sd);
     } else {
@@ -952,6 +960,28 @@ void BrushWorldSetLayers(BrushWorld *w,
   w->layerCount = count;
   // Every resident chunk needs its splat pixels (re)baked.
   SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
+}
+
+void BrushWorldSetAutoSlope(BrushWorld *w, int layer, float startDeg,
+                            float endDeg) {
+  w->autoSlopeLayer = (layer >= 0 && layer < BRUSH_TERRAIN_LAYERS) ? layer : -1;
+  if (endDeg < startDeg + 1.0f) endDeg = startDeg + 1.0f;
+  w->autoSlopeStart = startDeg;
+  w->autoSlopeEnd = endDeg;
+}
+
+int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz) {
+  if (w->layerCount <= 0) return -1;
+  long gx = (long)floorf(wx / w->gridStep + 0.5f);
+  long gz = (long)floorf(wz / w->gridStep + 0.5f);
+  unsigned char wt[4];
+  pthread_mutex_lock(&w->sculptMutex);
+  SplatWeightsAt(w, gx, gz, wt);
+  pthread_mutex_unlock(&w->sculptMutex);
+  int best = 0;
+  for (int i = 1; i < w->layerCount; i++)
+    if (wt[i] > wt[best]) best = i;
+  return best;
 }
 
 bool BrushWorldSculptAny(const BrushWorld *w) {

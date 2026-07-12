@@ -166,6 +166,16 @@ void BrushWorldSetLayers(BrushWorld *w,
 void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
                      float strength, int layer);
 
+// Auto-slope mask: terrain steeper than `startDeg` blends toward `layer`
+// (fully by `endDeg`) BENEATH the painted weights — pure shader, no data.
+// layer -1 disables (default).
+void BrushWorldSetAutoSlope(BrushWorld *w, int layer, float startDeg,
+                            float endDeg);
+
+// Dominant painted layer at a world XZ (nearest grid sample), for
+// footsteps/particles. -1 when no layers are configured.
+int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz);
+
 #ifdef __cplusplus
 }
 #endif

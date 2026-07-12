@@ -116,6 +116,9 @@ typedef struct BrushScene {
   int postCount;
   // Paintable terrain layer slots -> material-library names ("" = unset).
   char terrainLayers[BRUSH_TERRAIN_LAYERS][BRUSH_SCENE_NAME_MAX];
+  // Auto-slope mask config (terrain_auto_slope line; layer -1 = off).
+  int autoSlopeLayer;
+  float autoSlopeStart, autoSlopeEnd; // degrees
 
   // Hot-reload bookkeeping (managed by Load/HotReload).
   char path[BRUSH_SCENE_PATH_MAX];

@@ -44,7 +44,7 @@ typedef struct BrushRenderState {
   int locHasHeightMap, locHeightScale;
   int locHasAoMap, locAoStrength;
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
-  int locLayerTiles, locLayerSwizzled, locLayerCount;
+  int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
   float specDefault; // uSpecStrength for draws without material props
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
@@ -111,6 +111,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerTiles = GetShaderLocation(g_r.lit, "uLayerTiles");
   g_r.locLayerSwizzled = GetShaderLocation(g_r.lit, "uLayerSwizzled");
   g_r.locLayerCount = GetShaderLocation(g_r.lit, "uLayerCount");
+  g_r.locAutoSlope = GetShaderLocation(g_r.lit, "uAutoSlope");
   // Splat samplers live on FIXED texture units chosen to dodge raylib's
   // material binds (0=diffuse, 2=normal) and the shadow cascades (10..12):
   // splat=1, layer albedos 1..3 = 3,4,5, layer normals 1..3 = 6,7,8.
@@ -380,6 +381,12 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
     swiz[i] = (i < sp->layerCount && sp->layers[i].normalSwizzled) ? 1.0f : 0.0f;
   }
   int lc = sp->layerCount;
+  float autoSlope[3] = {
+      (float)((sp->autoSlopeLayer >= 0 && sp->autoSlopeLayer < lc)
+                  ? sp->autoSlopeLayer : -1),
+      cosf(sp->autoSlopeStart * DEG2RAD),
+      cosf(sp->autoSlopeEnd * DEG2RAD)};
+  SetShaderValue(g_r.lit, g_r.locAutoSlope, autoSlope, SHADER_UNIFORM_VEC3);
   SetShaderValue(g_r.lit, g_r.locSplatEnabled, &on, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSplatOrigin, origin, SHADER_UNIFORM_VEC2);
   SetShaderValue(g_r.lit, g_r.locSplatSize, &size, SHADER_UNIFORM_FLOAT);

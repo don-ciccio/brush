@@ -217,6 +217,8 @@ static void ApplyTerrainLayers(Sandbox *s) {
   BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
   int n = BrushSceneTerrainLayers(&s->scene, layers);
   BrushWorldSetLayers(s->world, layers, n);
+  BrushWorldSetAutoSlope(s->world, s->scene.autoSlopeLayer,
+                         s->scene.autoSlopeStart, s->scene.autoSlopeEnd);
 }
 
 // (Re)create the box colliders from the scene data — called after every
@@ -362,6 +364,10 @@ static void SandboxInit(void *user) {
       BrushWorldPaint(s->world, (Vector3){0, 0, -14}, 7.0f, 0.25f, 1); // rock
     for (int i = 0; i < 25; i++)
       BrushWorldPaint(s->world, (Vector3){-4, 0, -8}, 4.0f, 0.25f, 2); // dirt
+
+    TraceLog(LOG_INFO, "PAINTTEST surface at painted=(0,-14): %d, unpainted=(25,-14): %d",
+             BrushWorldSurfaceAt(s->world, 0, -14),
+             BrushWorldSurfaceAt(s->world, 25, -14));
 
     // Blob fidelity: save -> restore -> save must be byte-identical
     // (BSC2 carries both overlays; BRUSH_TEST_PAINT_BLOB names the file).

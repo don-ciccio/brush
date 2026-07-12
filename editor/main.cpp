@@ -518,6 +518,8 @@ static void ApplyTerrainLayers() {
     BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
     int n = BrushSceneTerrainLayers(&g_scene, layers);
     BrushWorldSetLayers(g_world, layers, n);
+    BrushWorldSetAutoSlope(g_world, g_scene.autoSlopeLayer,
+                           g_scene.autoSlopeStart, g_scene.autoSlopeEnd);
 }
 
 static void ReloadScene() {
@@ -1950,6 +1952,26 @@ int main(int argc, char **argv) {
                     ImGui::EndCombo();
                 }
                 ImGui::PopID();
+            }
+            // Auto-slope: steep ground blends toward one layer (pure
+            // shader; classic auto-rock).
+            int asIdx = g_scene.autoSlopeLayer + 1; // 0 = Off
+            if (ImGui::Combo("Auto-slope", &asIdx,
+                             "Off\0Layer 0\0Layer 1\0Layer 2\0Layer 3\0")) {
+                g_scene.autoSlopeLayer = asIdx - 1;
+                layersChanged = true;
+            }
+            if (g_scene.autoSlopeLayer >= 0) {
+                bool a = false;
+                a |= ImGui::SliderFloat("Slope start", &g_scene.autoSlopeStart,
+                                        5.0f, 80.0f, "%.0f deg");
+                a |= ImGui::SliderFloat("Slope full", &g_scene.autoSlopeEnd,
+                                        10.0f, 89.0f, "%.0f deg");
+                if (a) {
+                    if (g_scene.autoSlopeEnd < g_scene.autoSlopeStart + 1.0f)
+                        g_scene.autoSlopeEnd = g_scene.autoSlopeStart + 1.0f;
+                    layersChanged = true;
+                }
             }
             if (layersChanged) {
                 ApplyTerrainLayers();

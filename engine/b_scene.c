@@ -24,6 +24,9 @@ static void CopyField(char *dst, int cap, const char *src) {
 bool BrushSceneLoad(BrushScene *s, const char *path) {
   BrushScene temp = {0};
   temp.timeHours = -1.0f;
+  temp.autoSlopeLayer = -1;
+  temp.autoSlopeStart = 25.0f;
+  temp.autoSlopeEnd = 45.0f;
   strncpy(temp.path, path, BRUSH_SCENE_PATH_MAX - 1);
   temp.path[BRUSH_SCENE_PATH_MAX - 1] = '\0';
 
@@ -91,6 +94,10 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         m->heightScale = 0.05f;
         m->aoStrength = 1.0f;
       }
+    } else if (sscanf(p, "terrain_auto_slope %d %f %f", &flicker, &x, &y) == 3) {
+      temp.autoSlopeLayer = flicker;
+      temp.autoSlopeStart = x;
+      temp.autoSlopeEnd = y;
     } else if (sscanf(p, "terrain_layer %d %31s", &flicker, w1) == 2) {
       if (flicker >= 0 && flicker < BRUSH_TERRAIN_LAYERS)
         CopyField(temp.terrainLayers[flicker],
@@ -216,6 +223,9 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
     if (s->terrainLayers[i][0] != '\0')
       fprintf(f, "terrain_layer %d %s\n", i, s->terrainLayers[i]);
+  if (s->autoSlopeLayer >= 0)
+    fprintf(f, "terrain_auto_slope %d %g %g\n", s->autoSlopeLayer,
+            s->autoSlopeStart, s->autoSlopeEnd);
   if (s->postCount > 0) fprintf(f, "\n# post  key value (render tunables)\n");
   for (int i = 0; i < s->postCount; i++)
     fprintf(f, "post %s %g\n", s->post[i].key, s->post[i].value);
