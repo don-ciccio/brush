@@ -2099,21 +2099,22 @@ int main(int argc, char **argv) {
                     ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
                                        "ao MISSING: %s", m->ao);
                 }
+                bool matEdited = false;
                 if (ImGui::DragFloat("Tile", &m->tile, 0.05f, 0.25f, 32.0f,
-                                     "%.2f m")) g_dirty = true;
+                                     "%.2f m")) matEdited = true;
                 if (ImGui::SliderFloat("Specular", &m->spec, 0.0f, 1.0f))
-                    g_dirty = true;
+                    matEdited = true;
                 if (ImGui::SliderFloat("Normal Depth", &m->normalDepth, 0.0f,
-                                       3.0f)) g_dirty = true;
+                                       3.0f)) matEdited = true;
                 int proj = m->uvProjection ? 1 : 0;
                 if (ImGui::Combo("Projection", &proj,
                                  "Triplanar (world wrap)\0Model UVs (authored)\0")) {
                     m->uvProjection = (proj == 1);
-                    g_dirty = true;
+                    matEdited = true;
                 }
                 if (ImGui::SliderFloat("Displacement Scale", &m->heightScale, 0.0f,
-                                       0.2f, "%.3f")) g_dirty = true;
-                if (ImGui::Checkbox("Parallax (POM)", &m->parallax)) g_dirty = true;
+                                       0.2f, "%.3f")) matEdited = true;
+                if (ImGui::Checkbox("Parallax (POM)", &m->parallax)) matEdited = true;
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Ray-march the displacement map for real depth "
                                       "(cobbles/brick/rock up close). Needs a Displacement "
@@ -2122,9 +2123,14 @@ int main(int argc, char **argv) {
                     ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
                                        "  needs a Displacement map to show");
                 if (ImGui::SliderFloat("AO Strength", &m->aoStrength, 0.0f,
-                                       1.0f)) g_dirty = true;
-                if (reresolve) {
-                    BrushSceneResolveMaterials(&g_scene);
+                                       1.0f)) matEdited = true;
+                if (reresolve) BrushSceneResolveMaterials(&g_scene);
+                if (matEdited || reresolve) {
+                    // A material may back a terrain layer; re-push so the world
+                    // re-bakes with the new textures/flags (POM, tile, …). Blocks
+                    // and models rebuild their props each frame, but terrain
+                    // layers are cached in the world.
+                    ApplyTerrainLayers();
                     g_dirty = true;
                 }
                 if (ImGui::SmallButton("Rescan texture folder"))
