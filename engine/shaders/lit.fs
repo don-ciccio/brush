@@ -64,6 +64,11 @@ uniform int uLayerCount;
 // painted weights (x = layer index or -1 off, y = cos(startDeg),
 // z = cos(endDeg); start < end in degrees so cosStart > cosEnd).
 uniform vec3 uAutoSlope;
+// Auto-height bands (x = layer or -1 off, y = start Y, z = full Y):
+// `above` blends in from start upward (snowline), `below` from start
+// downward (shoreline). Applied beneath the paint, before the slope mask.
+uniform vec3 uAutoHeightAbove;
+uniform vec3 uAutoHeightBelow;
 
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
@@ -290,6 +295,29 @@ void main()
                         * (uSplatRes - 1.0) + 0.5) / uSplatRes;
         vec4 sw = texture(uSplatMap, suv);
         sw /= max(sw.r + sw.g + sw.b + sw.a, 1e-4);
+
+        // Auto-height bands (beneath the paint; slope mask applies after
+        // and wins on cliffs — rock cuts through the snowline).
+        if (uAutoHeightBelow.x >= 0.0) {
+            float d = max(uAutoHeightBelow.y - uAutoHeightBelow.z, 1e-4);
+            float f = clamp((uAutoHeightBelow.y - fragPosition.y) / d, 0.0, 1.0);
+            f = f * f * (3.0 - 2.0 * f);
+            vec4 hw = vec4(uAutoHeightBelow.x == 0.0 ? 1.0 : 0.0,
+                           uAutoHeightBelow.x == 1.0 ? 1.0 : 0.0,
+                           uAutoHeightBelow.x == 2.0 ? 1.0 : 0.0,
+                           uAutoHeightBelow.x == 3.0 ? 1.0 : 0.0);
+            sw = mix(sw, hw, f);
+        }
+        if (uAutoHeightAbove.x >= 0.0) {
+            float d = max(uAutoHeightAbove.z - uAutoHeightAbove.y, 1e-4);
+            float f = clamp((fragPosition.y - uAutoHeightAbove.y) / d, 0.0, 1.0);
+            f = f * f * (3.0 - 2.0 * f);
+            vec4 hw = vec4(uAutoHeightAbove.x == 0.0 ? 1.0 : 0.0,
+                           uAutoHeightAbove.x == 1.0 ? 1.0 : 0.0,
+                           uAutoHeightAbove.x == 2.0 ? 1.0 : 0.0,
+                           uAutoHeightAbove.x == 3.0 ? 1.0 : 0.0);
+            sw = mix(sw, hw, f);
+        }
 
         // Auto-slope: steepness pushes the weights toward one layer
         // beneath the paint (cos-angle smoothstep on the surface normal).

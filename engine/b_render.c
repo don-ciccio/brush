@@ -45,6 +45,7 @@ typedef struct BrushRenderState {
   int locHasAoMap, locAoStrength;
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
+  int locAutoHeightAbove, locAutoHeightBelow;
   float specDefault; // uSpecStrength for draws without material props
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
@@ -112,6 +113,8 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerSwizzled = GetShaderLocation(g_r.lit, "uLayerSwizzled");
   g_r.locLayerCount = GetShaderLocation(g_r.lit, "uLayerCount");
   g_r.locAutoSlope = GetShaderLocation(g_r.lit, "uAutoSlope");
+  g_r.locAutoHeightAbove = GetShaderLocation(g_r.lit, "uAutoHeightAbove");
+  g_r.locAutoHeightBelow = GetShaderLocation(g_r.lit, "uAutoHeightBelow");
   // Splat samplers live on FIXED texture units chosen to dodge raylib's
   // material binds (0=diffuse, 2=normal) and the shadow cascades (10..12):
   // splat=1, layer albedos 1..3 = 3,4,5, layer normals 1..3 = 6,7,8.
@@ -387,6 +390,16 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
       cosf(sp->autoSlopeStart * DEG2RAD),
       cosf(sp->autoSlopeEnd * DEG2RAD)};
   SetShaderValue(g_r.lit, g_r.locAutoSlope, autoSlope, SHADER_UNIFORM_VEC3);
+  float autoHigh[3] = {
+      (float)((sp->autoHighLayer >= 0 && sp->autoHighLayer < lc)
+                  ? sp->autoHighLayer : -1),
+      sp->autoHighStart, sp->autoHighFull};
+  float autoLow[3] = {
+      (float)((sp->autoLowLayer >= 0 && sp->autoLowLayer < lc)
+                  ? sp->autoLowLayer : -1),
+      sp->autoLowStart, sp->autoLowFull};
+  SetShaderValue(g_r.lit, g_r.locAutoHeightAbove, autoHigh, SHADER_UNIFORM_VEC3);
+  SetShaderValue(g_r.lit, g_r.locAutoHeightBelow, autoLow, SHADER_UNIFORM_VEC3);
   SetShaderValue(g_r.lit, g_r.locSplatEnabled, &on, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSplatOrigin, origin, SHADER_UNIFORM_VEC2);
   SetShaderValue(g_r.lit, g_r.locSplatSize, &size, SHADER_UNIFORM_FLOAT);

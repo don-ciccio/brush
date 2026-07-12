@@ -172,6 +172,13 @@ void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
 void BrushWorldSetAutoSlope(BrushWorld *w, int layer, float startDeg,
                             float endDeg);
 
+// Auto-height bands beneath the paint: `above` blends `layer` in from
+// startY (fully by fullY, snowline); `below` from startY DOWN to fullY
+// (shoreline). layer -1 disables either band.
+void BrushWorldSetAutoHeight(BrushWorld *w, int aboveLayer, float aboveStart,
+                             float aboveFull, int belowLayer,
+                             float belowStart, float belowFull);
+
 // Dominant painted layer at a world XZ (nearest grid sample), for
 // footsteps/particles. -1 when no layers are configured.
 int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz);

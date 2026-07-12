@@ -177,6 +177,11 @@ typedef struct BrushSplatDraw {
   // the painted weights (-1 = off). Angles in degrees from horizontal.
   int autoSlopeLayer;
   float autoSlopeStart, autoSlopeEnd;
+  // Auto-height bands (-1 = off): above = snowline, below = shoreline.
+  int autoHighLayer;
+  float autoHighStart, autoHighFull; // full > start (Y up)
+  int autoLowLayer;
+  float autoLowStart, autoLowFull;   // full < start
 } BrushSplatDraw;
 
 // BrushRenderSubmitMesh with splat blending for exactly this draw.

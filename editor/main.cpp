@@ -520,6 +520,10 @@ static void ApplyTerrainLayers() {
     BrushWorldSetLayers(g_world, layers, n);
     BrushWorldSetAutoSlope(g_world, g_scene.autoSlopeLayer,
                            g_scene.autoSlopeStart, g_scene.autoSlopeEnd);
+    BrushWorldSetAutoHeight(g_world, g_scene.autoHighLayer,
+                            g_scene.autoHighStart, g_scene.autoHighFull,
+                            g_scene.autoLowLayer, g_scene.autoLowStart,
+                            g_scene.autoLowFull);
 }
 
 static void ReloadScene() {
@@ -1970,6 +1974,43 @@ int main(int argc, char **argv) {
                 if (a) {
                     if (g_scene.autoSlopeEnd < g_scene.autoSlopeStart + 1.0f)
                         g_scene.autoSlopeEnd = g_scene.autoSlopeStart + 1.0f;
+                    layersChanged = true;
+                }
+            }
+            // Height bands: snowline (above) and shoreline (below).
+            int ahIdx = g_scene.autoHighLayer + 1;
+            if (ImGui::Combo("Auto-height above", &ahIdx,
+                             "Off\0Layer 0\0Layer 1\0Layer 2\0Layer 3\0")) {
+                g_scene.autoHighLayer = ahIdx - 1;
+                layersChanged = true;
+            }
+            if (g_scene.autoHighLayer >= 0) {
+                bool a = false;
+                a |= ImGui::DragFloat("Above start Y", &g_scene.autoHighStart,
+                                      0.1f, -100.0f, 500.0f, "%.1f m");
+                a |= ImGui::DragFloat("Above full Y", &g_scene.autoHighFull,
+                                      0.1f, -100.0f, 500.0f, "%.1f m");
+                if (a) {
+                    if (g_scene.autoHighFull < g_scene.autoHighStart + 0.1f)
+                        g_scene.autoHighFull = g_scene.autoHighStart + 0.1f;
+                    layersChanged = true;
+                }
+            }
+            int alIdx = g_scene.autoLowLayer + 1;
+            if (ImGui::Combo("Auto-height below", &alIdx,
+                             "Off\0Layer 0\0Layer 1\0Layer 2\0Layer 3\0")) {
+                g_scene.autoLowLayer = alIdx - 1;
+                layersChanged = true;
+            }
+            if (g_scene.autoLowLayer >= 0) {
+                bool a = false;
+                a |= ImGui::DragFloat("Below start Y", &g_scene.autoLowStart,
+                                      0.1f, -100.0f, 500.0f, "%.1f m");
+                a |= ImGui::DragFloat("Below full Y", &g_scene.autoLowFull,
+                                      0.1f, -100.0f, 500.0f, "%.1f m");
+                if (a) {
+                    if (g_scene.autoLowFull > g_scene.autoLowStart - 0.1f)
+                        g_scene.autoLowFull = g_scene.autoLowStart - 0.1f;
                     layersChanged = true;
                 }
             }
