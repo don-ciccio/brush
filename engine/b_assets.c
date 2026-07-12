@@ -481,21 +481,25 @@ static unsigned char *PakRead(const PakEntry *e, int *outSize) {
 // fall through to disk.
 static unsigned char *PakLoadFileData(const char *fileName, int *dataSize) {
   *dataSize = 0;
+  // LOOSE FILES OVERRIDE THE PAK: a stale dev pak must never shadow fresh
+  // sources (release folders carry no loose assets, so the pak still
+  // serves everything there).
+  FILE *f = fopen(fileName, "rb");
+  if (f != NULL) {
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char *data = (size > 0) ? malloc((size_t)size) : NULL;
+    if (data != NULL && fread(data, (size_t)size, 1, f) == 1)
+      *dataSize = (int)size;
+    else { free(data); data = NULL; }
+    fclose(f);
+    if (data != NULL) return data;
+  }
   const PakEntry *e = PakFind(fileName);
   if (e != NULL) return PakRead(e, dataSize);
-  FILE *f = fopen(fileName, "rb");
-  if (f == NULL) {
-    TraceLog(LOG_WARNING, "FILEIO: [%s] Failed to open file", fileName);
-    return NULL;
-  }
-  fseek(f, 0, SEEK_END);
-  long size = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  unsigned char *data = (size > 0) ? malloc((size_t)size) : NULL;
-  if (data != NULL && fread(data, (size_t)size, 1, f) == 1) *dataSize = (int)size;
-  else { free(data); data = NULL; }
-  fclose(f);
-  return data;
+  TraceLog(LOG_WARNING, "FILEIO: [%s] Failed to open file", fileName);
+  return NULL;
 }
 
 static char *PakLoadFileText(const char *fileName) {
@@ -641,11 +645,11 @@ static void StatSourcePair(TexEntry *e) {
 static TexEntry g_tex[BRUSH_ASSETS_MAX_TEXTURES];
 static int g_texCount = 0;
 
-// Pak-first load (release: cooked entry straight from the archive), then
-// cache (valid .ctex), then cook-now, then raw LoadTexture fallback.
+// Disk source first (cook/cache — fresh files always win), then the pak's
+// cooked entry (release), then raw LoadTexture as the last resort.
 static Texture2D AcquireTexture(TexEntry *e) {
   const char *path = e->path;
-  if (g_pak != NULL) {
+  if (g_pak != NULL && !FileExists(path)) {
     char ctex[BRUSH_ASSETS_PATH_MAX + 32];
     CtexPath(path, ctex, sizeof(ctex));
     const PakEntry *pe = PakFind(ctex);
