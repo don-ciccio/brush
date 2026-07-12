@@ -179,6 +179,8 @@ static ImGuizmo::OPERATION g_gizmoOp = ImGuizmo::TRANSLATE;
 enum EditorMode { MODE_SELECT, MODE_SCULPT };
 static EditorMode g_mode = MODE_SELECT;
 static BrushSculptOp g_sculptOp = BRUSH_SCULPT_ADD;
+static bool g_paintActive = false; // sculpt-mode Paint tool (terrain layers)
+static int g_paintLayer = 1;       // painted layer (0 is the base coat)
 static float g_brushRadius = 6.0f;
 static float g_brushStrength = 1.0f;
 static bool g_sculptStroking = false;
@@ -1062,6 +1064,15 @@ int main(int argc, char **argv) {
 
     LoadRecents();
 
+    // Harness: boot straight into a tool for headless UI screenshots.
+    const char *bm = getenv("BRUSH_EDITOR_TOOL");
+    if (bm != NULL && strcmp(bm, "paint") == 0) {
+        g_mode = MODE_SCULPT;
+        g_paintActive = true;
+    } else if (bm != NULL && strcmp(bm, "sculpt") == 0) {
+        g_mode = MODE_SCULPT;
+    }
+
     // CLI/env project selection skips the manager (also how the headless
     // harnesses run: BRUSH_PROJECT=. from the repo root).
     const char *bootDir = getenv("BRUSH_PROJECT");
@@ -1303,7 +1314,8 @@ int main(int argc, char **argv) {
             RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
             BeginTextureMode(*target);
             BeginMode3D(g_camera.cam);
-            Color ringCol = (g_sculptOp == BRUSH_SCULPT_ADD)    ? GREEN
+            Color ringCol = g_paintActive                       ? MAGENTA
+                            : (g_sculptOp == BRUSH_SCULPT_ADD)  ? GREEN
                             : (g_sculptOp == BRUSH_SCULPT_SMOOTH) ? SKYBLUE
                                                                   : GOLD;
             const int SEGS = 48;
@@ -1905,6 +1917,45 @@ int main(int argc, char **argv) {
         ImGui::SeparatorText("Time of Day");
         if (ImGui::SliderFloat("Hour", &g_tod.timeHours, 0.0f, 24.0f, "%.2f")) g_dirty = true;
         ImGui::DragFloat("Speed", &g_tod.timeScale, 0.01f, -10.0f, 10.0f);
+
+        // Paintable terrain layers: material-library entries per slot
+        // (saved as terrain_layer lines; slot 0 is the base coat the whole
+        // terrain wears, so setting it retextures everything instantly).
+        ImGui::SeparatorText("Terrain Layers");
+        {
+            bool layersChanged = false;
+            for (int slot = 0; slot < BRUSH_TERRAIN_LAYERS; slot++) {
+                const char *cur = g_scene.terrainLayers[slot][0]
+                                      ? g_scene.terrainLayers[slot]
+                                      : "(none)";
+                ImGui::PushID(slot);
+                if (ImGui::BeginCombo(TextFormat("Layer %d%s", slot,
+                                                 slot == 0 ? " (base)" : ""),
+                                      cur)) {
+                    if (ImGui::Selectable("(none)",
+                                          g_scene.terrainLayers[slot][0] == '\0') &&
+                        g_scene.terrainLayers[slot][0] != '\0') {
+                        g_scene.terrainLayers[slot][0] = '\0';
+                        layersChanged = true;
+                    }
+                    for (int m = 0; m < g_scene.materialCount; m++) {
+                        const char *mn = g_scene.materials[m].name;
+                        bool sel = (strcmp(g_scene.terrainLayers[slot], mn) == 0);
+                        if (ImGui::Selectable(mn, sel) && !sel) {
+                            snprintf(g_scene.terrainLayers[slot],
+                                     sizeof(g_scene.terrainLayers[slot]), "%s", mn);
+                            layersChanged = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopID();
+            }
+            if (layersChanged) {
+                ApplyTerrainLayers();
+                g_dirty = true;
+            }
+        }
         // Everything below persists into world.def "post" lines on save
         // (BrushSceneCaptureRenderSettings) — the scene carries its look.
         ImGui::SeparatorText("Post Processing");
@@ -2269,13 +2320,21 @@ int main(int argc, char **argv) {
                     if (g_sculptStroking && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                         float dtStroke = GetFrameTime();
                         bool lower = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-                        float strength;
-                        if (g_sculptOp == BRUSH_SCULPT_ADD)
-                            strength = (lower ? -1.0f : 1.0f) * g_brushStrength * 6.0f * dtStroke;
-                        else
-                            strength = fminf(g_brushStrength * 8.0f * dtStroke, 1.0f);
-                        BrushWorldSculpt(g_world, g_sculptOp, g_cursorPos,
-                                         g_brushRadius, strength, g_flattenY);
+                        if (g_paintActive) {
+                            // shift paints the base coat back (erase).
+                            int layer = lower ? 0 : g_paintLayer;
+                            float flow = fminf(g_brushStrength * 4.0f * dtStroke, 1.0f);
+                            BrushWorldPaint(g_world, g_cursorPos, g_brushRadius,
+                                            flow, layer);
+                        } else {
+                            float strength;
+                            if (g_sculptOp == BRUSH_SCULPT_ADD)
+                                strength = (lower ? -1.0f : 1.0f) * g_brushStrength * 6.0f * dtStroke;
+                            else
+                                strength = fminf(g_brushStrength * 8.0f * dtStroke, 1.0f);
+                            BrushWorldSculpt(g_world, g_sculptOp, g_cursorPos,
+                                             g_brushRadius, strength, g_flattenY);
+                        }
                         g_dirty = true;
                     }
                 }
@@ -2363,20 +2422,62 @@ int main(int argc, char **argv) {
                 ImGui::SameLine();
                 ImGui::Checkbox("Snap", &g_surfaceSnap);
             } else {
-                if (ToolButton(" Raise ", g_sculptOp == BRUSH_SCULPT_ADD))
+                if (ToolButton(" Raise ", !g_paintActive && g_sculptOp == BRUSH_SCULPT_ADD)) {
                     g_sculptOp = BRUSH_SCULPT_ADD;
+                    g_paintActive = false;
+                }
                 ImGui::SameLine();
-                if (ToolButton(" Smooth ", g_sculptOp == BRUSH_SCULPT_SMOOTH))
+                if (ToolButton(" Smooth ", !g_paintActive && g_sculptOp == BRUSH_SCULPT_SMOOTH)) {
                     g_sculptOp = BRUSH_SCULPT_SMOOTH;
+                    g_paintActive = false;
+                }
                 ImGui::SameLine();
-                if (ToolButton(" Flatten ", g_sculptOp == BRUSH_SCULPT_FLATTEN))
+                if (ToolButton(" Flatten ", !g_paintActive && g_sculptOp == BRUSH_SCULPT_FLATTEN)) {
                     g_sculptOp = BRUSH_SCULPT_FLATTEN;
+                    g_paintActive = false;
+                }
+                ImGui::SameLine();
+                if (ToolButton(" Paint ", g_paintActive)) g_paintActive = true;
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(140);
                 ImGui::SliderFloat("Radius", &g_brushRadius, 1.0f, 60.0f, "%.0f m");
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(140);
                 ImGui::SliderFloat("Strength", &g_brushStrength, 0.1f, 4.0f, "%.1f");
+                // Paint tool: one swatch per configured layer (albedo
+                // thumbnails via the material library); click to pick the
+                // painted layer, shift-drag paints layer 0 back (erase).
+                if (g_paintActive) {
+                    BrushTerrainLayer tl[BRUSH_TERRAIN_LAYERS];
+                    int tlCount = BrushSceneTerrainLayers(&g_scene, tl);
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("|");
+                    if (tlCount == 0) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
+                                           "set Terrain Layers in Environment");
+                    }
+                    for (int i = 0; i < tlCount; i++) {
+                        ImGui::SameLine();
+                        ImGui::PushID(i);
+                        bool sel = (g_paintLayer == i);
+                        if (sel)
+                            ImGui::PushStyleColor(ImGuiCol_Button,
+                                                  ImVec4(0.25f, 0.5f, 0.85f, 1));
+                        if (tl[i].albedo.id != 0) {
+                            if (ImGui::ImageButton("##sw",
+                                    (ImTextureID)(intptr_t)tl[i].albedo.id,
+                                    ImVec2(22, 22)))
+                                g_paintLayer = i;
+                        } else if (ImGui::Button(TextFormat("%d", i),
+                                                 ImVec2(28, 28))) {
+                            g_paintLayer = i;
+                        }
+                        if (sel) ImGui::PopStyleColor();
+                        ImGui::PopID();
+                    }
+                    if (g_paintLayer >= tlCount) g_paintLayer = tlCount > 0 ? tlCount - 1 : 0;
+                }
             }
             ImGui::EndGroup();
 
