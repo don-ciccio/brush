@@ -219,10 +219,8 @@ static void ApplyTerrainLayers(Sandbox *s) {
   BrushWorldSetLayers(s->world, layers, n);
   BrushWorldSetAutoSlope(s->world, s->scene.autoSlopeLayer,
                          s->scene.autoSlopeStart, s->scene.autoSlopeEnd);
-  BrushWorldSetAutoHeight(s->world, s->scene.autoHighLayer,
-                          s->scene.autoHighStart, s->scene.autoHighFull,
-                          s->scene.autoLowLayer, s->scene.autoLowStart,
-                          s->scene.autoLowFull);
+  BrushWorldSetLayerHeights(s->world, s->scene.layerHeightOn,
+                            s->scene.layerHeightStart, s->scene.layerHeightFull);
 }
 
 // (Re)create the box colliders from the scene data — called after every

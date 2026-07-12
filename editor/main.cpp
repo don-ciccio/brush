@@ -553,10 +553,8 @@ static void ApplyTerrainLayers() {
     BrushWorldSetLayers(g_world, layers, n);
     BrushWorldSetAutoSlope(g_world, g_scene.autoSlopeLayer,
                            g_scene.autoSlopeStart, g_scene.autoSlopeEnd);
-    BrushWorldSetAutoHeight(g_world, g_scene.autoHighLayer,
-                            g_scene.autoHighStart, g_scene.autoHighFull,
-                            g_scene.autoLowLayer, g_scene.autoLowStart,
-                            g_scene.autoLowFull);
+    BrushWorldSetLayerHeights(g_world, g_scene.layerHeightOn,
+                              g_scene.layerHeightStart, g_scene.layerHeightFull);
 }
 
 static void ReloadScene() {
@@ -2025,38 +2023,37 @@ int main(int argc, char **argv) {
                     layersChanged = true;
                 }
             }
-            // Height bands: snowline (above) and shoreline (below).
-            // ONE band, ONE layer: everything above 'start Y' fades to the
-            // chosen layer, fully covered by 'full Y' (snowline).
-            if (TerrainSlotCombo("Auto-height above", &g_scene.autoHighLayer))
-                layersChanged = true;
-            if (g_scene.autoHighLayer >= 0) {
-                bool a = false;
-                a |= ImGui::DragFloat("Above start Y", &g_scene.autoHighStart,
-                                      0.1f, -100.0f, 500.0f, "%.1f m");
-                a |= ImGui::DragFloat("Above full Y", &g_scene.autoHighFull,
-                                      0.1f, -100.0f, 500.0f, "%.1f m");
-                if (a) {
-                    if (g_scene.autoHighFull < g_scene.autoHighStart + 0.1f)
-                        g_scene.autoHighFull = g_scene.autoHighStart + 0.1f;
+            // Auto-height: one optional altitude band PER layer, so every
+            // configured layer can be placed by height (grass low, rock
+            // mid, snow high...). full > start = fades in going UP; full <
+            // start = going DOWN (shoreline). Applied in slot order beneath
+            // the paint; slope still wins on cliffs.
+            ImGui::SeparatorText("Auto-height (per layer)");
+            for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+                if (g_scene.terrainLayers[i][0] == '\0') continue; // unset slot
+                ImGui::PushID(1000 + i);
+                bool on = g_scene.layerHeightOn[i] != 0;
+                if (ImGui::Checkbox(TerrainSlotLabel(i), &on)) {
+                    g_scene.layerHeightOn[i] = on ? 1 : 0;
+                    // Seed a sensible band the first time it's enabled.
+                    if (on && g_scene.layerHeightStart[i] == 0.0f &&
+                        g_scene.layerHeightFull[i] == 0.0f) {
+                        g_scene.layerHeightStart[i] = (float)i * 4.0f;
+                        g_scene.layerHeightFull[i] = (float)i * 4.0f + 3.0f;
+                    }
                     layersChanged = true;
                 }
-            }
-            // Mirror band going DOWN: below 'start Y' fades to the layer,
-            // fully covered by 'full Y' (shoreline — full Y is LOWER).
-            if (TerrainSlotCombo("Auto-height below", &g_scene.autoLowLayer))
-                layersChanged = true;
-            if (g_scene.autoLowLayer >= 0) {
-                bool a = false;
-                a |= ImGui::DragFloat("Below start Y", &g_scene.autoLowStart,
-                                      0.1f, -100.0f, 500.0f, "%.1f m");
-                a |= ImGui::DragFloat("Below full Y", &g_scene.autoLowFull,
-                                      0.1f, -100.0f, 500.0f, "%.1f m");
-                if (a) {
-                    if (g_scene.autoLowFull > g_scene.autoLowStart - 0.1f)
-                        g_scene.autoLowFull = g_scene.autoLowStart - 0.1f;
-                    layersChanged = true;
+                if (on) {
+                    ImGui::Indent();
+                    bool a = false;
+                    a |= ImGui::DragFloat("start Y", &g_scene.layerHeightStart[i],
+                                          0.1f, -200.0f, 500.0f, "%.1f m");
+                    a |= ImGui::DragFloat("full Y", &g_scene.layerHeightFull[i],
+                                          0.1f, -200.0f, 500.0f, "%.1f m");
+                    if (a) layersChanged = true;
+                    ImGui::Unindent();
                 }
+                ImGui::PopID();
             }
             if (layersChanged) {
                 ApplyTerrainLayers();

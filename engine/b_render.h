@@ -177,11 +177,12 @@ typedef struct BrushSplatDraw {
   // the painted weights (-1 = off). Angles in degrees from horizontal.
   int autoSlopeLayer;
   float autoSlopeStart, autoSlopeEnd;
-  // Auto-height bands (-1 = off): above = snowline, below = shoreline.
-  int autoHighLayer;
-  float autoHighStart, autoHighFull; // full > start (Y up)
-  int autoLowLayer;
-  float autoLowStart, autoLowFull;   // full < start
+  // Per-layer auto-height bands (index by layer slot). on[i]=1 -> layer i
+  // fades in between start[i] and full[i] (full>start = up/snowline,
+  // full<start = down/shoreline). Applied beneath the paint, in slot order.
+  int   layerHeightOn[BRUSH_TERRAIN_LAYERS];
+  float layerHeightStart[BRUSH_TERRAIN_LAYERS];
+  float layerHeightFull[BRUSH_TERRAIN_LAYERS];
 } BrushSplatDraw;
 
 // BrushRenderSubmitMesh with splat blending for exactly this draw.

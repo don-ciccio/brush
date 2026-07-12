@@ -27,12 +27,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   temp.autoSlopeLayer = -1;
   temp.autoSlopeStart = 25.0f;
   temp.autoSlopeEnd = 45.0f;
-  temp.autoHighLayer = -1;
-  temp.autoHighStart = 6.0f;
-  temp.autoHighFull = 10.0f;
-  temp.autoLowLayer = -1;
-  temp.autoLowStart = -1.0f;
-  temp.autoLowFull = -3.0f;
+  // (layerHeight* default to 0/off via the {0} init.)
   strncpy(temp.path, path, BRUSH_SCENE_PATH_MAX - 1);
   temp.path[BRUSH_SCENE_PATH_MAX - 1] = '\0';
 
@@ -100,14 +95,12 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         m->heightScale = 0.05f;
         m->aoStrength = 1.0f;
       }
-    } else if (sscanf(p, "terrain_auto_height above %d %f %f", &flicker, &x, &y) == 3) {
-      temp.autoHighLayer = flicker;
-      temp.autoHighStart = x;
-      temp.autoHighFull = y;
-    } else if (sscanf(p, "terrain_auto_height below %d %f %f", &flicker, &x, &y) == 3) {
-      temp.autoLowLayer = flicker;
-      temp.autoLowStart = x;
-      temp.autoLowFull = y;
+    } else if (sscanf(p, "terrain_layer_height %d %f %f", &flicker, &x, &y) == 3) {
+      if (flicker >= 0 && flicker < BRUSH_TERRAIN_LAYERS) {
+        temp.layerHeightOn[flicker] = 1;
+        temp.layerHeightStart[flicker] = x;
+        temp.layerHeightFull[flicker] = y;
+      }
     } else if (sscanf(p, "terrain_auto_slope %d %f %f", &flicker, &x, &y) == 3) {
       temp.autoSlopeLayer = flicker;
       temp.autoSlopeStart = x;
@@ -240,12 +233,10 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   if (s->autoSlopeLayer >= 0)
     fprintf(f, "terrain_auto_slope %d %g %g\n", s->autoSlopeLayer,
             s->autoSlopeStart, s->autoSlopeEnd);
-  if (s->autoHighLayer >= 0)
-    fprintf(f, "terrain_auto_height above %d %g %g\n", s->autoHighLayer,
-            s->autoHighStart, s->autoHighFull);
-  if (s->autoLowLayer >= 0)
-    fprintf(f, "terrain_auto_height below %d %g %g\n", s->autoLowLayer,
-            s->autoLowStart, s->autoLowFull);
+  for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
+    if (s->layerHeightOn[i])
+      fprintf(f, "terrain_layer_height %d %g %g\n", i, s->layerHeightStart[i],
+              s->layerHeightFull[i]);
   if (s->postCount > 0) fprintf(f, "\n# post  key value (render tunables)\n");
   for (int i = 0; i < s->postCount; i++)
     fprintf(f, "post %s %g\n", s->post[i].key, s->post[i].value);

@@ -119,11 +119,12 @@ typedef struct BrushScene {
   // Auto-slope mask config (terrain_auto_slope line; layer -1 = off).
   int autoSlopeLayer;
   float autoSlopeStart, autoSlopeEnd; // degrees
-  // Auto-height bands (terrain_auto_height lines; layer -1 = off).
-  int autoHighLayer;
-  float autoHighStart, autoHighFull; // snowline: blends upward
-  int autoLowLayer;
-  float autoLowStart, autoLowFull;   // shoreline: blends downward
+  // Per-layer auto-height bands (terrain_layer_height lines): layer i fades
+  // in between start[i] and full[i] (full>start = up, full<start = down);
+  // on[i]=0 disables. Lets every configured layer be placed by altitude.
+  int   layerHeightOn[BRUSH_TERRAIN_LAYERS];
+  float layerHeightStart[BRUSH_TERRAIN_LAYERS];
+  float layerHeightFull[BRUSH_TERRAIN_LAYERS];
 
   // Hot-reload bookkeeping (managed by Load/HotReload).
   char path[BRUSH_SCENE_PATH_MAX];

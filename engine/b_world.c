@@ -125,9 +125,9 @@ struct BrushWorld {
   int layerCount;
   int autoSlopeLayer; // -1 = off
   float autoSlopeStart, autoSlopeEnd; // degrees
-  int autoHighLayer, autoLowLayer;    // -1 = off
-  float autoHighStart, autoHighFull;
-  float autoLowStart, autoLowFull;
+  int   layerHeightOn[BRUSH_TERRAIN_LAYERS];
+  float layerHeightStart[BRUSH_TERRAIN_LAYERS];
+  float layerHeightFull[BRUSH_TERRAIN_LAYERS];
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -828,12 +828,6 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
   w->autoSlopeLayer = -1;
   w->autoSlopeStart = 25.0f;
   w->autoSlopeEnd = 45.0f;
-  w->autoHighLayer = -1;
-  w->autoHighStart = 6.0f;
-  w->autoHighFull = 10.0f;
-  w->autoLowLayer = -1;
-  w->autoLowStart = -1.0f;
-  w->autoLowFull = -3.0f;
   w->unloadRadius = cfg.loadRadius + 1;
   w->origin = (BrushChunkCoord){0, 0};
   w->center = ChunkOf(w, spawn.x, spawn.z);
@@ -1013,12 +1007,11 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
       sd.autoSlopeLayer = w->autoSlopeLayer;
       sd.autoSlopeStart = w->autoSlopeStart;
       sd.autoSlopeEnd = w->autoSlopeEnd;
-      sd.autoHighLayer = w->autoHighLayer;
-      sd.autoHighStart = w->autoHighStart;
-      sd.autoHighFull = w->autoHighFull;
-      sd.autoLowLayer = w->autoLowLayer;
-      sd.autoLowStart = w->autoLowStart;
-      sd.autoLowFull = w->autoLowFull;
+      for (int li = 0; li < BRUSH_TERRAIN_LAYERS; li++) {
+        sd.layerHeightOn[li] = w->layerHeightOn[li];
+        sd.layerHeightStart[li] = w->layerHeightStart[li];
+        sd.layerHeightFull[li] = w->layerHeightFull[li];
+      }
       BrushRenderSubmitMeshSplat(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material,
                                  xf, &sd);
     } else {
@@ -1211,19 +1204,13 @@ void BrushWorldSetAutoSlope(BrushWorld *w, int layer, float startDeg,
   w->autoSlopeEnd = endDeg;
 }
 
-void BrushWorldSetAutoHeight(BrushWorld *w, int aboveLayer, float aboveStart,
-                             float aboveFull, int belowLayer,
-                             float belowStart, float belowFull) {
-  w->autoHighLayer =
-      (aboveLayer >= 0 && aboveLayer < BRUSH_TERRAIN_LAYERS) ? aboveLayer : -1;
-  if (aboveFull < aboveStart + 0.1f) aboveFull = aboveStart + 0.1f;
-  w->autoHighStart = aboveStart;
-  w->autoHighFull = aboveFull;
-  w->autoLowLayer =
-      (belowLayer >= 0 && belowLayer < BRUSH_TERRAIN_LAYERS) ? belowLayer : -1;
-  if (belowFull > belowStart - 0.1f) belowFull = belowStart - 0.1f;
-  w->autoLowStart = belowStart;
-  w->autoLowFull = belowFull;
+void BrushWorldSetLayerHeights(BrushWorld *w, const int *on,
+                               const float *start, const float *full) {
+  for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+    w->layerHeightOn[i] = (on && on[i]) ? 1 : 0;
+    w->layerHeightStart[i] = start ? start[i] : 0.0f;
+    w->layerHeightFull[i] = full ? full[i] : 0.0f;
+  }
 }
 
 int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz) {
