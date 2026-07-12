@@ -512,6 +512,39 @@ static void RebuildAllColliders() {
     }
 }
 
+// "0: grass" / "2: (empty)" — layer slots are meaningless without their
+// material names in front of the user.
+static const char *TerrainSlotLabel(int slot) {
+    return TextFormat("%d: %s", slot,
+                      g_scene.terrainLayers[slot][0]
+                          ? g_scene.terrainLayers[slot]
+                          : "(empty)");
+}
+
+// Combo over the layer slots for the auto-mask pickers: shows material
+// names, greys out empty slots (an unset slot can never render).
+static bool TerrainSlotCombo(const char *label, int *slot) {
+    bool changed = false;
+    const char *preview = (*slot < 0) ? "Off" : TerrainSlotLabel(*slot);
+    if (ImGui::BeginCombo(label, preview)) {
+        if (ImGui::Selectable("Off", *slot < 0) && *slot >= 0) {
+            *slot = -1;
+            changed = true;
+        }
+        for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+            bool empty = (g_scene.terrainLayers[i][0] == '\0');
+            if (ImGui::Selectable(TerrainSlotLabel(i), *slot == i,
+                                  empty ? ImGuiSelectableFlags_Disabled : 0) &&
+                *slot != i) {
+                *slot = i;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
 // Push the scene's terrain_layer slots into the world (load/reload/re-import).
 static void ApplyTerrainLayers() {
     if (g_world == NULL) return;
@@ -1957,14 +1990,29 @@ int main(int argc, char **argv) {
                 }
                 ImGui::PopID();
             }
-            // Auto-slope: steep ground blends toward one layer (pure
-            // shader; classic auto-rock).
-            int asIdx = g_scene.autoSlopeLayer + 1; // 0 = Off
-            if (ImGui::Combo("Auto-slope", &asIdx,
-                             "Off\0Layer 0\0Layer 1\0Layer 2\0Layer 3\0")) {
-                g_scene.autoSlopeLayer = asIdx - 1;
-                layersChanged = true;
+            // Slots must be contiguous: painted weights are indexed by
+            // slot, so a gap silently disables everything above it.
+            {
+                int firstEmpty = -1;
+                for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
+                    if (g_scene.terrainLayers[i][0] == '\0') { firstEmpty = i; break; }
+                if (firstEmpty >= 0)
+                    for (int i = firstEmpty + 1; i < BRUSH_TERRAIN_LAYERS; i++)
+                        if (g_scene.terrainLayers[i][0] != '\0') {
+                            ImGui::TextColored(
+                                ImVec4(1, 0.65f, 0.25f, 1),
+                                "Slot %d is empty: slots above it are ignored.\n"
+                                "Fill layer slots in order (0, 1, 2, 3).",
+                                firstEmpty);
+                            break;
+                        }
             }
+
+            // Auto-slope: ground STEEPER than 'start' blends toward the
+            // chosen layer, fully replacing the paint by 'full'. Applies
+            // under your brush strokes; needs actual slopes to be visible.
+            if (TerrainSlotCombo("Auto-slope", &g_scene.autoSlopeLayer))
+                layersChanged = true;
             if (g_scene.autoSlopeLayer >= 0) {
                 bool a = false;
                 a |= ImGui::SliderFloat("Slope start", &g_scene.autoSlopeStart,
@@ -1978,12 +2026,10 @@ int main(int argc, char **argv) {
                 }
             }
             // Height bands: snowline (above) and shoreline (below).
-            int ahIdx = g_scene.autoHighLayer + 1;
-            if (ImGui::Combo("Auto-height above", &ahIdx,
-                             "Off\0Layer 0\0Layer 1\0Layer 2\0Layer 3\0")) {
-                g_scene.autoHighLayer = ahIdx - 1;
+            // ONE band, ONE layer: everything above 'start Y' fades to the
+            // chosen layer, fully covered by 'full Y' (snowline).
+            if (TerrainSlotCombo("Auto-height above", &g_scene.autoHighLayer))
                 layersChanged = true;
-            }
             if (g_scene.autoHighLayer >= 0) {
                 bool a = false;
                 a |= ImGui::DragFloat("Above start Y", &g_scene.autoHighStart,
@@ -1996,12 +2042,10 @@ int main(int argc, char **argv) {
                     layersChanged = true;
                 }
             }
-            int alIdx = g_scene.autoLowLayer + 1;
-            if (ImGui::Combo("Auto-height below", &alIdx,
-                             "Off\0Layer 0\0Layer 1\0Layer 2\0Layer 3\0")) {
-                g_scene.autoLowLayer = alIdx - 1;
+            // Mirror band going DOWN: below 'start Y' fades to the layer,
+            // fully covered by 'full Y' (shoreline — full Y is LOWER).
+            if (TerrainSlotCombo("Auto-height below", &g_scene.autoLowLayer))
                 layersChanged = true;
-            }
             if (g_scene.autoLowLayer >= 0) {
                 bool a = false;
                 a |= ImGui::DragFloat("Below start Y", &g_scene.autoLowStart,
@@ -2536,6 +2580,8 @@ int main(int argc, char **argv) {
                                                  ImVec2(28, 28))) {
                             g_paintLayer = i;
                         }
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", TerrainSlotLabel(i));
                         if (sel) ImGui::PopStyleColor();
                         ImGui::PopID();
                     }
