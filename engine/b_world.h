@@ -85,6 +85,15 @@ typedef struct BrushWorldConfig {
   // reset per chunk.
   Texture2D groundTex;
   float texMetresPerTile; // world metres per texture repeat (0 -> 4)
+
+  // Initial splat layers, applied BEFORE the blocking initial-ring bake so the
+  // first chunks are textured on frame 1 (no ~1s splat pop-in from a post-
+  // create BrushWorldSetLayers marking every chunk dirty). Equivalent to that
+  // call minus the re-bake; a later matching SetLayers is a no-op. layerCount
+  // 0 -> plain groundTex / vertex-colour terrain (auto-slope + layer heights
+  // are shader-side and can still be set after create without a pop).
+  BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
+  int layerCount;
 } BrushWorldConfig;
 
 typedef struct BrushWorld BrushWorld;

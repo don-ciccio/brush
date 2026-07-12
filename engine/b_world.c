@@ -828,6 +828,15 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
   w->autoSlopeLayer = -1;
   w->autoSlopeStart = 25.0f;
   w->autoSlopeEnd = 45.0f;
+  // Splat layers BEFORE the initial ring builds, so its chunks bake the splat
+  // texture on the first pass (a post-create SetLayers would dirty them all and
+  // pop the texture in ~1s later).
+  if (cfg.layerCount > 0) {
+    int lc = cfg.layerCount > BRUSH_TERRAIN_LAYERS ? BRUSH_TERRAIN_LAYERS
+                                                   : cfg.layerCount;
+    memcpy(w->layers, cfg.layers, sizeof(BrushTerrainLayer) * (size_t)lc);
+    w->layerCount = lc;
+  }
   w->unloadRadius = cfg.loadRadius + 1;
   w->origin = (BrushChunkCoord){0, 0};
   w->center = ChunkOf(w, spawn.x, spawn.z);

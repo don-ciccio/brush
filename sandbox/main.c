@@ -318,6 +318,10 @@ static void SandboxInit(void *user) {
     wcfg.lodRadii[1] = 8;
     wcfg.lodRadii[2] = 14;
   }
+  // Resolve splat layers up front (scene materials are already resolved) so the
+  // initial ring bakes textured — otherwise ApplyTerrainLayers below dirties
+  // every chunk and the terrain texture pops in ~1s after launch.
+  wcfg.layerCount = BrushSceneTerrainLayers(&s->scene, wcfg.layers);
   s->world = BrushWorldCreate(wcfg, (Vector3){spx, 0, spz});
 
   // Terrain sculpt overlay (authored in the editor, saved beside the scene).

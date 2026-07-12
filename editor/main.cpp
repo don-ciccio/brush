@@ -1036,11 +1036,16 @@ static bool OpenProjectAt(const char *dir) {
     BrushTodInit(&g_tod);
     g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
 
+    // Resolve splat layers into the config so the initial ring bakes textured
+    // (a post-create SetLayers would dirty every chunk and pop the terrain
+    // texture in ~1s later). ApplyTerrainLayers below then only sets the
+    // shader-side auto-slope/heights; its SetLayers call is a no-op.
+    BrushWorldConfig wcfg = { .seed = 1337, .heightFn = NULL, .chunkSize = 64.0f,
+                              .loadRadius = 3, .physics = &g_phys,
+                              .groundTex = g_groundTex, .texMetresPerTile = 64.0f };
+    wcfg.layerCount = BrushSceneTerrainLayers(&g_scene, wcfg.layers);
     g_world = BrushWorldCreate(
-        (BrushWorldConfig){ .seed = 1337, .heightFn = NULL, .chunkSize = 64.0f,
-                            .loadRadius = 3, .physics = &g_phys,
-                            .groundTex = g_groundTex, .texMetresPerTile = 64.0f },
-        (Vector3){ g_scene.spawn.x, 0, g_scene.spawn.z });
+        wcfg, (Vector3){ g_scene.spawn.x, 0, g_scene.spawn.z });
 
     BrushWorldSculptLoad(g_world, g_terrainPath);
     ApplyTerrainLayers();
