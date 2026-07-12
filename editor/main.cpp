@@ -1311,7 +1311,8 @@ int main(int argc, char **argv) {
             if (mi->model.meshCount == 0) continue;
             Matrix mxf = BrushModelInstanceMatrix(mi);
             BrushMaterialProps mprops;
-            bool hasMMat = BrushSceneModelProps(&g_scene, mi, &mprops);
+            bool hasMMat = BrushSceneModelProps(&g_scene, mi, &mprops) ||
+                           BrushSceneModelEmbeddedProps(mi, &mprops);
             BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE,
                                 hasMMat ? &mprops : NULL);
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, mxf, WHITE);

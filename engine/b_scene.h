@@ -184,6 +184,14 @@ bool BrushSceneModelProps(const BrushScene *s,
                           const BrushSceneModelInstance *m,
                           BrushMaterialProps *out);
 
+// Fallback when a placed model has NO library material: build props from its
+// OWN embedded normal map (glTF that ships a packed normal). Enables the
+// UV-projected normal path so a self-textured asset lights with its packed
+// detail + generated tangents; per-mesh diffuse is kept (albedo stays 0).
+// False = the model has no embedded normal, so a plain draw is correct.
+bool BrushSceneModelEmbeddedProps(const BrushSceneModelInstance *m,
+                                  BrushMaterialProps *out);
+
 // --- Persisted render settings ("post" lines) --------------------------------
 // Apply the scene's saved tunables to the live render/post pipeline
 // (unknown keys warn once). Call after Load/HotReload, once render is up.

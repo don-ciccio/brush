@@ -14,6 +14,7 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -833,6 +834,120 @@ typedef struct ModelEntry {
 static ModelEntry g_models[BRUSH_ASSETS_MAX_MODELS];
 static int g_modelCount = 0;
 
+// raylib 5.5's GenMeshTangents walks vertices as loose triangles (`i += 3`,
+// ignoring the index buffer), so it computes garbage on indexed glTF — which
+// is nearly every downloaded asset. This generator uses the index buffer
+// (Lengyel's method: accumulate a per-vertex tangent frame across the shared
+// triangles, then Gram-Schmidt against the normal and store handedness in .w),
+// then uploads the tangent VBO into the already-loaded VAO the same way raylib
+// does. Correct for indexed AND unindexed (unindexed = trivial index run).
+static void GenMeshTangentsIndexed(Mesh *mesh) {
+  if (mesh->vertices == NULL || mesh->texcoords == NULL ||
+      mesh->normals == NULL || mesh->vertexCount <= 0)
+    return;
+
+  if (mesh->tangents == NULL)
+    mesh->tangents = (float *)malloc((size_t)mesh->vertexCount * 4 * sizeof(float));
+  float *tan1 = (float *)calloc((size_t)mesh->vertexCount * 3, sizeof(float));
+  float *tan2 = (float *)calloc((size_t)mesh->vertexCount * 3, sizeof(float));
+  if (mesh->tangents == NULL || tan1 == NULL || tan2 == NULL) {
+    free(tan1);
+    free(tan2);
+    return;
+  }
+
+  for (int t = 0; t < mesh->triangleCount; t++) {
+    int i0, i1, i2;
+    if (mesh->indices != NULL) {
+      i0 = mesh->indices[t * 3 + 0];
+      i1 = mesh->indices[t * 3 + 1];
+      i2 = mesh->indices[t * 3 + 2];
+    } else {
+      i0 = t * 3 + 0;
+      i1 = t * 3 + 1;
+      i2 = t * 3 + 2;
+    }
+    const float *p0 = &mesh->vertices[i0 * 3];
+    const float *p1 = &mesh->vertices[i1 * 3];
+    const float *p2 = &mesh->vertices[i2 * 3];
+    const float *w0 = &mesh->texcoords[i0 * 2];
+    const float *w1 = &mesh->texcoords[i1 * 2];
+    const float *w2 = &mesh->texcoords[i2 * 2];
+
+    float x1 = p1[0] - p0[0], y1 = p1[1] - p0[1], z1 = p1[2] - p0[2];
+    float x2 = p2[0] - p0[0], y2 = p2[1] - p0[1], z2 = p2[2] - p0[2];
+    float s1 = w1[0] - w0[0], t1 = w1[1] - w0[1];
+    float s2 = w2[0] - w0[0], t2 = w2[1] - w0[1];
+
+    float div = s1 * t2 - s2 * t1;
+    float r = (fabsf(div) < 0.0001f) ? 0.0f : 1.0f / div;
+    float sx = (t2 * x1 - t1 * x2) * r, sy = (t2 * y1 - t1 * y2) * r,
+          sz = (t2 * z1 - t1 * z2) * r;
+    float tx = (s1 * x2 - s2 * x1) * r, ty = (s1 * y2 - s2 * y1) * r,
+          tz = (s1 * z2 - s2 * z1) * r;
+
+    int idx[3] = {i0, i1, i2};
+    for (int k = 0; k < 3; k++) {
+      float *a = &tan1[idx[k] * 3];
+      float *b = &tan2[idx[k] * 3];
+      a[0] += sx; a[1] += sy; a[2] += sz;
+      b[0] += tx; b[1] += ty; b[2] += tz;
+    }
+  }
+
+  for (int i = 0; i < mesh->vertexCount; i++) {
+    float nx = mesh->normals[i * 3 + 0], ny = mesh->normals[i * 3 + 1],
+          nz = mesh->normals[i * 3 + 2];
+    float tx = tan1[i * 3 + 0], ty = tan1[i * 3 + 1], tz = tan1[i * 3 + 2];
+
+    // Gram-Schmidt: T' = T - N * dot(N, T)
+    float ndt = nx * tx + ny * ty + nz * tz;
+    float ox = tx - nx * ndt, oy = ty - ny * ndt, oz = tz - nz * ndt;
+    float olen = sqrtf(ox * ox + oy * oy + oz * oz);
+    if (olen < 0.0001f) {
+      // Degenerate/zero tangent (bad or missing UVs) — synthesise one.
+      if (fabsf(nz) > 0.707f) { ox = 1.0f; oy = 0.0f; oz = 0.0f; }
+      else {
+        ox = -ny; oy = nx; oz = 0.0f;
+        float l = sqrtf(ox * ox + oy * oy + oz * oz);
+        if (l > 1e-6f) { ox /= l; oy /= l; oz /= l; }
+      }
+    } else {
+      ox /= olen; oy /= olen; oz /= olen;
+    }
+
+    // Handedness = sign(dot(cross(N, T'), tan2))
+    float cx = ny * oz - nz * oy, cy = nz * ox - nx * oz, cz = nx * oy - ny * ox;
+    float bx = tan2[i * 3 + 0], by = tan2[i * 3 + 1], bz = tan2[i * 3 + 2];
+    float handed = (cx * bx + cy * by + cz * bz) < 0.0f ? -1.0f : 1.0f;
+
+    mesh->tangents[i * 4 + 0] = ox;
+    mesh->tangents[i * 4 + 1] = oy;
+    mesh->tangents[i * 4 + 2] = oz;
+    mesh->tangents[i * 4 + 3] = handed;
+  }
+
+  free(tan1);
+  free(tan2);
+
+  // LoadModel already uploaded this mesh, so a mesh that had no tangents has no
+  // tangent VBO. Push the CPU tangents into the existing VAO, mirroring what
+  // raylib's GenMeshTangents does at its tail — without this the shader reads a
+  // zero tangent attribute.
+  if (mesh->vboId != NULL) {
+    if (mesh->vboId[SHADER_LOC_VERTEX_TANGENT] != 0)
+      rlUpdateVertexBuffer(mesh->vboId[SHADER_LOC_VERTEX_TANGENT], mesh->tangents,
+                           mesh->vertexCount * 4 * sizeof(float), 0);
+    else
+      mesh->vboId[SHADER_LOC_VERTEX_TANGENT] = rlLoadVertexBuffer(
+          mesh->tangents, mesh->vertexCount * 4 * sizeof(float), false);
+    rlEnableVertexArray(mesh->vaoId);
+    rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_TANGENT, 4, RL_FLOAT, 0, 0, 0);
+    rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_TANGENT);
+    rlDisableVertexArray();
+  }
+}
+
 Model BrushAssetsModel(const char *path) {
   if (path == NULL || path[0] == '\0') return (Model){0};
 
@@ -864,14 +979,12 @@ Model BrushAssetsModel(const char *path) {
   for (int i = 0; i < e->model.materialCount; i++)
     e->model.materials[i].shader = BrushGetLitShader();
   // Tangents make normal maps work on the UV path; many exports omit them.
-  // Only for UNINDEXED meshes: raylib's GenMeshTangents walks vertices as
-  // loose triangles and computes garbage on indexed data. Indexed meshes
-  // without tangents fall back to geometric normals in the shader.
+  // Our own generator (unlike raylib 5.5) walks the index buffer, so indexed
+  // glTF gets correct tangents instead of geometric-normal fallback.
   for (int i = 0; i < e->model.meshCount; i++)
     if (e->model.meshes[i].tangents == NULL &&
-        e->model.meshes[i].texcoords != NULL &&
-        e->model.meshes[i].indices == NULL)
-      GenMeshTangents(&e->model.meshes[i]);
+        e->model.meshes[i].texcoords != NULL)
+      GenMeshTangentsIndexed(&e->model.meshes[i]);
   TraceLog(LOG_INFO, "ASSETS: loaded model %s (%d meshes, %d materials)",
            path, e->model.meshCount, e->model.materialCount);
   return e->model;

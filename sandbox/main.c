@@ -791,7 +791,10 @@ static void SandboxDraw(void *user) {
     if (mi->model.meshCount == 0) continue;
     Matrix xf = BrushModelInstanceMatrix(mi);
     BrushMaterialProps mprops;
-    bool hasMat = BrushSceneModelProps(&s->scene, mi, &mprops);
+    // Library material first; otherwise fall back to the model's own embedded
+    // normal map so self-textured assets still normal-map.
+    bool hasMat = BrushSceneModelProps(&s->scene, mi, &mprops) ||
+                  BrushSceneModelEmbeddedProps(mi, &mprops);
     BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, xf, WHITE,
                         hasMat ? &mprops : NULL);
     BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, xf, WHITE);

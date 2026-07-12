@@ -401,6 +401,36 @@ bool BrushSceneModelProps(const BrushScene *s,
   return MaterialProps(s, m->material, out);
 }
 
+bool BrushSceneModelEmbeddedProps(const BrushSceneModelInstance *m,
+                                  BrushMaterialProps *out) {
+  if (m->model.meshCount == 0) return false;
+  // Find the first material carrying a normal map (glTF prepends a default
+  // material at 0; real ones are 1..N). The exec loop retargets every slot,
+  // so a single-material asset (the common downloaded rock/prop) lights right;
+  // multi-material assets share this normal but keep their own diffuse.
+  Texture2D normal = {0};
+  for (int i = 0; i < m->model.materialCount; i++) {
+    Texture2D nt = m->model.materials[i].maps[MATERIAL_MAP_NORMAL].texture;
+    if (nt.id != 0) {
+      normal = nt;
+      break;
+    }
+  }
+  if (normal.id == 0) return false;
+  *out = (BrushMaterialProps){
+      .albedo = (Texture2D){0}, // keep each mesh's own diffuse
+      .normal = normal,
+      .triplanar = false,       // sample by the mesh's authored UVs
+      .normalSwizzled = false,  // embedded glTF normals are standard RGB
+      .texScale = 1.0f,
+      .specStrength = -1.0f,    // engine default
+      .normalDepth = 1.0f,
+      .heightScale = 0.05f,
+      .aoStrength = 1.0f,
+  };
+  return true;
+}
+
 // --- Persisted render settings -------------------------------------------------
 // One table maps world.def "post" keys onto the live tunable they drive.
 // Bools ride as 0/1 floats. Capture rewrites the scene's whole post list

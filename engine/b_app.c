@@ -10,6 +10,7 @@
 #include "b_render.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 static bool g_running = false;
 
@@ -43,6 +44,15 @@ void BrushRun(BrushConfig cfg, BrushCallbacks cb) {
   BrushRenderInit(cfg.width, cfg.height, cfg.renderScale);
 
   if (cb.init) cb.init(cb.user);
+
+  // Harness: BRUSH_VIEW=<name> starts in a debug layer view (matches the F2
+  // cycle names, e.g. "normals") so headless captures can isolate a term.
+  const char *viewEnv = getenv("BRUSH_VIEW");
+  if (viewEnv != NULL)
+    for (int i = 0; i < BRUSH_VIEW_COUNT; i++) {
+      if (strcmp(BrushRenderLayerViewName(), viewEnv) == 0) break;
+      BrushRenderCycleLayerView();
+    }
 
   g_running = true;
   float accumulator = 0.0f;
