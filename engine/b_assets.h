@@ -121,6 +121,11 @@ void BrushAssetsReleaseModel(const char *path);
 typedef struct JPH_Shape JPH_Shape;
 JPH_Shape *BrushAssetsModelShape(const char *path, int meshIndex);
 
+// Mesh-space bounding box of a resident model (union over meshes, WITHOUT the
+// model's base transform — the caller's instance matrix supplies that). Used
+// for frustum/distance cull bounds. Zero box if the model isn't resident.
+BoundingBox BrushAssetsModelAABB(const char *path);
+
 // --- Release packaging (.pak) --------------------------------------------------
 // Mount a pak archive (tools/packager output) as the top of the lookup
 // chain. The pak holds the project tree verbatim — logical asset paths

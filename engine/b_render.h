@@ -205,6 +205,26 @@ void BrushRenderCycleLayerView(void);
 BrushLayerView BrushRenderGetLayerView(void);
 const char *BrushRenderLayerViewName(void);
 
+// --- Frustum culling ---------------------------------------------------------
+// Six view-frustum planes (x,y,z = unit normal pointing INTO the frustum,
+// w = signed offset), extracted from the SAME projection the renderer draws
+// with (BeginMode3D: camera fovy, screen aspect, rl cull near/far). Build one
+// per frame from the render camera, then test object bounds before submitting.
+typedef struct BrushFrustum {
+  Vector4 planes[6];
+} BrushFrustum;
+
+BrushFrustum BrushRenderMakeFrustum(Camera3D camera);
+
+// True if the sphere is inside or touching the frustum (conservative).
+bool BrushFrustumContainsSphere(const BrushFrustum *f, Vector3 center,
+                                float radius);
+
+// Conservative world bounding sphere of a local AABB under a transform: all 8
+// corners are transformed (handles rotation + non-uniform scale).
+void BrushBoundingSphere(BoundingBox local, Matrix transform, Vector3 *center,
+                         float *radius);
+
 #ifdef __cplusplus
 }
 #endif

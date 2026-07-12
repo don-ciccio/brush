@@ -646,6 +646,72 @@ void BrushRenderCycleLayerView(void) {
 
 BrushLayerView BrushRenderGetLayerView(void) { return g_r.layerView; }
 
+// --- Frustum culling ----------------------------------------------------------
+
+static Vector4 NormalizePlane(float a, float b, float c, float d) {
+  float len = sqrtf(a * a + b * b + c * c);
+  if (len < 1e-8f) len = 1.0f;
+  return (Vector4){a / len, b / len, c / len, d / len};
+}
+
+BrushFrustum BrushRenderMakeFrustum(Camera3D camera) {
+  // Mirror BeginMode3D exactly: screen aspect, camera fovy, rl cull near/far.
+  float aspect = (float)GetScreenWidth() / (float)GetScreenHeight();
+  Matrix view = GetCameraMatrix(camera);
+  Matrix proj = MatrixPerspective(camera.fovy * DEG2RAD, aspect,
+                                  rlGetCullDistanceNear(),
+                                  rlGetCullDistanceFar());
+  // clip = Vector3Transform(worldPos, m): clip.x uses (m0,m4,m8,m12),
+  // clip.w uses (m3,m7,m11,m15). Gribb-Hartmann plane extraction on those.
+  Matrix m = MatrixMultiply(view, proj);
+  BrushFrustum f;
+  f.planes[0] = NormalizePlane(m.m0 + m.m3, m.m4 + m.m7, m.m8 + m.m11, m.m12 + m.m15);  // left
+  f.planes[1] = NormalizePlane(m.m3 - m.m0, m.m7 - m.m4, m.m11 - m.m8, m.m15 - m.m12);  // right
+  f.planes[2] = NormalizePlane(m.m1 + m.m3, m.m5 + m.m7, m.m9 + m.m11, m.m13 + m.m15);  // bottom
+  f.planes[3] = NormalizePlane(m.m3 - m.m1, m.m7 - m.m5, m.m11 - m.m9, m.m15 - m.m13);  // top
+  f.planes[4] = NormalizePlane(m.m2 + m.m3, m.m6 + m.m7, m.m10 + m.m11, m.m14 + m.m15); // near
+  f.planes[5] = NormalizePlane(m.m3 - m.m2, m.m7 - m.m6, m.m11 - m.m10, m.m15 - m.m14); // far
+  return f;
+}
+
+bool BrushFrustumContainsSphere(const BrushFrustum *f, Vector3 center,
+                                float radius) {
+  for (int i = 0; i < 6; i++) {
+    const Vector4 *p = &f->planes[i];
+    float dist = p->x * center.x + p->y * center.y + p->z * center.z + p->w;
+    if (dist < -radius) return false; // fully outside this plane
+  }
+  return true;
+}
+
+void BrushBoundingSphere(BoundingBox local, Matrix transform, Vector3 *center,
+                         float *radius) {
+  Vector3 corners[8] = {
+      {local.min.x, local.min.y, local.min.z},
+      {local.max.x, local.min.y, local.min.z},
+      {local.min.x, local.max.y, local.min.z},
+      {local.max.x, local.max.y, local.min.z},
+      {local.min.x, local.min.y, local.max.z},
+      {local.max.x, local.min.y, local.max.z},
+      {local.min.x, local.max.y, local.max.z},
+      {local.max.x, local.max.y, local.max.z},
+  };
+  Vector3 wmin = {1e30f, 1e30f, 1e30f}, wmax = {-1e30f, -1e30f, -1e30f};
+  for (int i = 0; i < 8; i++) {
+    corners[i] = Vector3Transform(corners[i], transform);
+    wmin = Vector3Min(wmin, corners[i]);
+    wmax = Vector3Max(wmax, corners[i]);
+  }
+  Vector3 c = Vector3Scale(Vector3Add(wmin, wmax), 0.5f);
+  float r2 = 0.0f;
+  for (int i = 0; i < 8; i++) {
+    float d2 = Vector3DistanceSqr(c, corners[i]);
+    if (d2 > r2) r2 = d2;
+  }
+  *center = c;
+  *radius = sqrtf(r2);
+}
+
 const char *BrushRenderLayerViewName(void) {
   switch (g_r.layerView) {
   case BRUSH_VIEW_FINAL: return "final";

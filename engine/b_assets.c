@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include <rlgl.h>
+#include <raymath.h>
 
 #include "b_physics.h" // model collision-shape cache (cook + JPH_Shape refs)
 
@@ -831,6 +832,7 @@ typedef struct ModelEntry {
   char path[BRUSH_ASSETS_PATH_MAX];
   Model model; // meshCount 0 = load failed (negative cache)
   int refs;
+  BoundingBox aabb; // mesh-space AABB (pre model.transform), for cull bounds
 } ModelEntry;
 
 static ModelEntry g_models[BRUSH_ASSETS_MAX_MODELS];
@@ -987,9 +989,24 @@ Model BrushAssetsModel(const char *path) {
     if (e->model.meshes[i].tangents == NULL &&
         e->model.meshes[i].texcoords != NULL)
       GenMeshTangentsIndexed(&e->model.meshes[i]);
+  // Mesh-space AABB (union over meshes, WITHOUT model.transform) for instance
+  // cull bounds — the draw applies the full instance matrix, so bake nothing.
+  e->aabb = GetMeshBoundingBox(e->model.meshes[0]);
+  for (int i = 1; i < e->model.meshCount; i++) {
+    BoundingBox b = GetMeshBoundingBox(e->model.meshes[i]);
+    e->aabb.min = Vector3Min(e->aabb.min, b.min);
+    e->aabb.max = Vector3Max(e->aabb.max, b.max);
+  }
   TraceLog(LOG_INFO, "ASSETS: loaded model %s (%d meshes, %d materials)",
            path, e->model.meshCount, e->model.materialCount);
   return e->model;
+}
+
+BoundingBox BrushAssetsModelAABB(const char *path) {
+  if (path != NULL)
+    for (int i = 0; i < g_modelCount; i++)
+      if (strcmp(g_models[i].path, path) == 0) return g_models[i].aabb;
+  return (BoundingBox){0};
 }
 
 // --- Model collision-shape cache ----------------------------------------------

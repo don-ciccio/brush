@@ -1313,15 +1313,22 @@ int main(int argc, char **argv) {
         }
 
         // Placed model props (shared registry models, per-instance matrix).
+        // Frustum-cull the opaque submit (off-screen isn't drawn); no distance
+        // cull in the editor, so far placed props stay visible when framed.
+        BrushFrustum efrust = BrushRenderMakeFrustum(g_camera.cam);
         for (int i = 0; i < g_scene.modelCount; i++) {
             BrushSceneModelInstance *mi = &g_scene.models[i];
             if (mi->model.meshCount == 0) continue;
             Matrix mxf = BrushModelInstanceMatrix(mi);
-            BrushMaterialProps mprops;
-            bool hasMMat = BrushSceneModelProps(&g_scene, mi, &mprops) ||
-                           BrushSceneModelEmbeddedProps(mi, &mprops);
-            BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE,
-                                hasMMat ? &mprops : NULL);
+            Vector3 c; float r;
+            BrushBoundingSphere(BrushAssetsModelAABB(mi->path), mxf, &c, &r);
+            if (BrushFrustumContainsSphere(&efrust, c, r)) {
+                BrushMaterialProps mprops;
+                bool hasMMat = BrushSceneModelProps(&g_scene, mi, &mprops) ||
+                               BrushSceneModelEmbeddedProps(mi, &mprops);
+                BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE,
+                                    hasMMat ? &mprops : NULL);
+            }
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, mxf, WHITE);
         }
 

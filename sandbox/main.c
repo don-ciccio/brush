@@ -373,8 +373,10 @@ static void SandboxInit(void *user) {
       memset(mi, 0, sizeof(*mi));
       strncpy(mi->path, tmPath, sizeof(mi->path) - 1);
       mi->model = shared;
+      // Centre the grid on the spawn in BOTH axes so ~half the copies fall
+      // behind the camera (exercises frustum culling).
       float fx = spx + ((float)(n % side) - (side - 1) * 0.5f) * 3.0f;
-      float fz = spz - (float)(n / side) * 3.0f; // row 0 sits at the spawn
+      float fz = spz + ((float)(n / side) - (side - 1) * 0.5f) * 3.0f;
       mi->pos = (Vector3){fx, BrushWorldGroundHeight(s->world, fx, fz), fz};
       mi->rot = (Vector3){0, (float)(n * 37 % 360), 0};
       mi->scale = (Vector3){0.5f, 0.5f, 0.5f};
@@ -815,20 +817,49 @@ static void SandboxDraw(void *user) {
 
   // Placed model props (world.def `model` lines): shared registry models,
   // per-instance transforms; the matrix includes the model's own base
-  // transform (see BrushModelInstanceMatrix).
+  // transform (see BrushModelInstanceMatrix). Frustum + distance cull the
+  // opaque submit; gate shadow casters by distance (a far prop can't shadow
+  // the view). Distances are read once (env overridable).
+  static float drawD2 = 0.0f, shadowD2 = 0.0f;
+  static bool cullDbg = false, distInit = false;
+  if (!distInit) {
+    const char *dd = getenv("BRUSH_MODEL_DRAW_DIST");
+    const char *sd = getenv("BRUSH_SHADOW_DIST");
+    float drawDist = dd ? (float)atof(dd) : 400.0f;
+    float shadowDist = sd ? (float)atof(sd) : 300.0f;
+    drawD2 = drawDist * drawDist;
+    shadowD2 = shadowDist * shadowDist;
+    cullDbg = getenv("BRUSH_CULL_DBG") != NULL;
+    distInit = true;
+  }
+  BrushFrustum frust = BrushRenderMakeFrustum(s->camera.cam);
+  Vector3 camPos = s->camera.cam.position;
+  int modelsSubmitted = 0;
   for (int i = 0; i < s->scene.modelCount; i++) {
     BrushSceneModelInstance *mi = &s->scene.models[i];
     if (mi->model.meshCount == 0) continue;
     Matrix xf = BrushModelInstanceMatrix(mi);
-    BrushMaterialProps mprops;
-    // Library material first; otherwise fall back to the model's own embedded
-    // normal map so self-textured assets still normal-map.
-    bool hasMat = BrushSceneModelProps(&s->scene, mi, &mprops) ||
-                  BrushSceneModelEmbeddedProps(mi, &mprops);
-    BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, xf, WHITE,
-                        hasMat ? &mprops : NULL);
-    BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, xf, WHITE);
+    Vector3 c;
+    float r;
+    BrushBoundingSphere(BrushAssetsModelAABB(mi->path), xf, &c, &r);
+    float d2 = Vector3DistanceSqr(camPos, c);
+    bool visible = d2 <= drawD2 && BrushFrustumContainsSphere(&frust, c, r);
+    if (visible) {
+      BrushMaterialProps mprops;
+      // Library material first; otherwise fall back to the model's own embedded
+      // normal map so self-textured assets still normal-map.
+      bool hasMat = BrushSceneModelProps(&s->scene, mi, &mprops) ||
+                    BrushSceneModelEmbeddedProps(mi, &mprops);
+      BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, xf, WHITE,
+                          hasMat ? &mprops : NULL);
+      modelsSubmitted++;
+    }
+    if (d2 <= shadowD2)
+      BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, xf, WHITE);
   }
+  if (cullDbg)
+    TraceLog(LOG_INFO, "CULL: models %d/%d submitted", modelsSubmitted,
+             s->scene.modelCount);
 
   // Scene lights, submitted per frame like draws. Flickering ones get two
   // detuned sines; colors are linear HDR (>1 blooms).
