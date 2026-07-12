@@ -223,6 +223,34 @@ static void ApplyTerrainLayers(Sandbox *s) {
                             s->scene.layerHeightStart, s->scene.layerHeightFull);
 }
 
+// Push the scene's roads into the live world (roads bake into the terrain each
+// rebake, so the player renders/collides them like the editor). Resolves each
+// road's material to a splat slot (-1 = shape only).
+static void ApplySceneRoads(Sandbox *s) {
+  if (s->world == NULL) return;
+  BrushWorldRoad wr[BRUSH_WORLD_MAX_ROADS];
+  int n = 0;
+  for (int i = 0; i < s->scene.roadCount && n < BRUSH_WORLD_MAX_ROADS; i++) {
+    const BrushSceneRoad *r = &s->scene.roads[i];
+    if (r->pointCount < 2) continue;
+    BrushWorldRoad *o = &wr[n++];
+    int pc = r->pointCount > BRUSH_ROAD_MAX_POINTS ? BRUSH_ROAD_MAX_POINTS
+                                                   : r->pointCount;
+    for (int k = 0; k < pc; k++) o->points[k] = r->points[k];
+    o->pointCount = pc;
+    o->width = r->width;
+    o->fade = r->fade;
+    o->paintFade = r->paintFade;
+    o->layerSlot = -1;
+    for (int L = 0; L < BRUSH_TERRAIN_LAYERS; L++)
+      if (strcmp(s->scene.terrainLayers[L], r->material) == 0) {
+        o->layerSlot = L;
+        break;
+      }
+  }
+  BrushWorldSetRoads(s->world, wr, n);
+}
+
 // (Re)create the box colliders from the scene data — called after every
 // load/hot-reload so physics always matches the file.
 static void ApplySceneColliders(Sandbox *s) {
@@ -391,6 +419,7 @@ static void SandboxInit(void *user) {
   ApplySceneColliders(s);
   BrushSceneApplyRenderSettings(&s->scene); // scene carries its look
   ApplyTerrainLayers(s);
+  ApplySceneRoads(s);
 
   // Harness: BRUSH_TEST_PAINT paints layer dabs straddling the x=0 chunk
   // border ahead of spawn — proves the weight overlay, per-chunk splat
@@ -736,6 +765,7 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
       ApplySceneColliders(s);
       BrushSceneApplyRenderSettings(&s->scene);
       ApplyTerrainLayers(s);
+      ApplySceneRoads(s); // roads are live scene data now
     }
     // Texture import cache: land background re-imports (edited source
     // images) and refresh the material table's texture handles.

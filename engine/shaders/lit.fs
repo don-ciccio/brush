@@ -299,9 +299,17 @@ void main()
         vec4 sw = texture(uSplatMap, suv);
         sw /= max(sw.r + sw.g + sw.b + sw.a, 1e-4);
 
+        // Painting is authoritative; auto-height/slope are a procedural BASE
+        // for UNpainted ground only. `manual` = how far this pixel was painted
+        // away from the default base coat (full layer 0), so a painted road /
+        // path / rock isn't re-covered by an altitude or slope band. Cores of
+        // painted areas keep their paint; the road/brush shoulder fade still
+        // feathers the EDGES (half-painted -> half procedural), and untouched
+        // terrain (manual = 0) gets the full masks.
+        float autoMask = clamp(sw.r, 0.0, 1.0);
+
         // Per-layer auto-height bands, applied in slot order (higher slots
-        // layer over lower ones) beneath the paint. The slope mask below
-        // applies after and wins on cliffs.
+        // layer over lower ones), scaled by autoMask so paint wins.
         for (int hi = 0; hi < 4; hi++) {
             if (uLayerHeightOn[hi] < 0.5) continue;
             float s = uLayerHeightStart[hi];
@@ -312,11 +320,11 @@ void main()
             f = f * f * (3.0 - 2.0 * f);
             vec4 hw = vec4(hi == 0 ? 1.0 : 0.0, hi == 1 ? 1.0 : 0.0,
                            hi == 2 ? 1.0 : 0.0, hi == 3 ? 1.0 : 0.0);
-            sw = mix(sw, hw, f);
+            sw = mix(sw, hw, f * autoMask);
         }
 
-        // Auto-slope: steepness pushes the weights toward one layer
-        // beneath the paint (cos-angle smoothstep on the surface normal).
+        // Auto-slope: steepness pushes the weights toward one layer on
+        // UNpainted ground (cos-angle smoothstep on the surface normal).
         if (uAutoSlope.x >= 0.0) {
             float denom = max(uAutoSlope.y - uAutoSlope.z, 1e-4);
             float f = clamp((uAutoSlope.y - geoN.y) / denom, 0.0, 1.0);
@@ -325,7 +333,7 @@ void main()
                                uAutoSlope.x == 1.0 ? 1.0 : 0.0,
                                uAutoSlope.x == 2.0 ? 1.0 : 0.0,
                                uAutoSlope.x == 3.0 ? 1.0 : 0.0);
-            sw = mix(sw, slopeW, f);
+            sw = mix(sw, slopeW, f * autoMask);
         }
 
         // Steep surfaces get full triplanar per layer; flat ground keeps

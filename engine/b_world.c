@@ -129,6 +129,15 @@ struct BrushWorld {
   float layerHeightStart[BRUSH_TERRAIN_LAYERS];
   float layerHeightFull[BRUSH_TERRAIN_LAYERS];
 
+  // Live roads: evaluated during the bake (BuildCpu), guarded by sculptMutex.
+  // Polylines + world AABBs (expanded by width/2+fade) are cached per road so
+  // the per-chunk bake only re-projects, and AABB-culls chunks that miss.
+  BrushWorldRoad roads[BRUSH_WORLD_MAX_ROADS];
+  int roadCount;
+  Vector3 *roadPoly[BRUSH_WORLD_MAX_ROADS];
+  int roadPolyN[BRUSH_WORLD_MAX_ROADS];
+  float roadAABB[BRUSH_WORLD_MAX_ROADS][4]; // minX, minZ, maxX, maxZ (+ edge)
+
   struct BrushChunkJobQueue *jobs;
 };
 
@@ -521,6 +530,11 @@ static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
   chunk->maxY = maxH;
 }
 
+// Live-road bake hooks (defined with the road section below). Both take world
+// XZ and are called under sculptMutex from BuildCpu.
+static float RoadHeightAt(const BrushWorld *w, float wx, float wz, float h);
+static void RoadSplatAt(const BrushWorld *w, float wx, float wz, unsigned char *px);
+
 static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
   Vector3 o = ChunkOrigin(w, chunk->coord);
   int tr = w->hmTexRes;
@@ -547,6 +561,18 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
         chunk->heightmap[z * tr + x] +=
             SculptDeltaAt(w, baseGx + (x - 1), baseGz + (z - 1));
   }
+  // Live roads flatten the corridor toward their spline, composed AFTER manual
+  // sculpt (a road wins over hand terrain). AABB-culled per road, so chunks
+  // that miss every road pay almost nothing.
+  if (w->roadCount > 0) {
+    for (int z = 0; z < tr; z++)
+      for (int x = 0; x < tr; x++) {
+        float wx = o.x + (float)(x - 1) * step;
+        float wz = o.z + (float)(z - 1) * step;
+        chunk->heightmap[z * tr + x] =
+            RoadHeightAt(w, wx, wz, chunk->heightmap[z * tr + x]);
+      }
+  }
   // Paint weights -> per-chunk pixels (hmRes^2, NO apron: chunk-edge grid
   // samples are canonically shared, so border texels match the neighbour's
   // and bilinear filtering is seamless with texel-centre UVs).
@@ -558,8 +584,13 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     long bGx = (long)chunk->coord.x * w->tileRes;
     long bGz = (long)chunk->coord.z * w->tileRes;
     for (int z = 0; z < sr; z++)
-      for (int x = 0; x < sr; x++)
-        SplatWeightsAt(w, bGx + x, bGz + z, &chunk->splatPixels[(z * sr + x) * 4]);
+      for (int x = 0; x < sr; x++) {
+        unsigned char *px = &chunk->splatPixels[(z * sr + x) * 4];
+        SplatWeightsAt(w, bGx + x, bGz + z, px);
+        if (w->roadCount > 0)
+          RoadSplatAt(w, (float)(bGx + x) * w->gridStep,
+                      (float)(bGz + z) * w->gridStep, px);
+      }
     chunk->splatValid = true;
   }
   pthread_mutex_unlock(&w->sculptMutex);
@@ -1055,6 +1086,8 @@ void BrushWorldDestroy(BrushWorld *w) {
     if (w->jobs->pending) MemFree(w->jobs->pending);
     MemFree(w->jobs);
   }
+  for (int i = 0; i < BRUSH_WORLD_MAX_ROADS; i++)
+    if (w->roadPoly[i]) MemFree(w->roadPoly[i]);
   for (int i = 0; i < w->chunkCount; i++) {
     ReleaseChunk(w, &w->chunks[i]);
     DestroyChunkBuffers(&w->chunks[i]);
@@ -1096,8 +1129,40 @@ static void SculptMarkDirty(BrushWorld *w, float minX, float minZ, float maxX,
   }
 }
 
+static bool PassConstraints(BrushWorld *w, long gx, long gz,
+                            const BrushConstraints *c) {
+  if (!c) return true;
+  float step = w->gridStep, wx = (float)gx * step, wz = (float)gz * step;
+  if (c->checkHeight) {
+    float y = Height(w, wx, wz) + SculptDeltaAt(w, gx, gz); // TOTAL Y
+    if (y < c->minHeight || y > c->maxHeight) return false;
+  }
+  if (c->checkSlope) {
+    float e = step;
+    float hL = Height(w, wx - e, wz) + SculptDeltaAt(w, gx - 1, gz);
+    float hR = Height(w, wx + e, wz) + SculptDeltaAt(w, gx + 1, gz);
+    float hD = Height(w, wx, wz - e) + SculptDeltaAt(w, gx, gz - 1);
+    float hU = Height(w, wx, wz + e) + SculptDeltaAt(w, gx, gz + 1);
+    float nx = (hL - hR) / (2.0f * e), nz = (hD - hU) / (2.0f * e);
+    float cosSlope = 1.0f / sqrtf(nx * nx + 1.0f + nz * nz);
+    if (cosSlope < c->minCosSlope || cosSlope > c->maxCosSlope) return false;
+  }
+  if (c->targetLayer >= 0) {
+    unsigned char wt[4];
+    SplatWeightsAt(w, gx, gz, wt);
+    if (wt[c->targetLayer] < 128) return false;
+  }
+  return true;
+}
+
 void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
                       float radius, float strength, float targetY) {
+  BrushWorldSculptC(w, op, center, radius, strength, targetY, NULL);
+}
+
+void BrushWorldSculptC(BrushWorld *w, BrushSculptOp op, Vector3 center,
+                       float radius, float strength, float targetY,
+                       const BrushConstraints *c) {
   if (radius <= 0.0f) return;
   float step = w->gridStep;
   long g0x = (long)floorf((center.x - radius) / step);
@@ -1112,6 +1177,7 @@ void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
       float dx = wx - center.x, dz = wz - center.z;
       float dist = sqrtf(dx * dx + dz * dz);
       if (dist >= radius) continue;
+      if (!PassConstraints(w, gx, gz, c)) continue;
       float t = dist / radius;
       float fall = 1.0f - t * t * (3.0f - 2.0f * t); // smoothstep falloff
 
@@ -1121,9 +1187,6 @@ void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
         *s += strength * fall;
         break;
       case BRUSH_SCULPT_SMOOTH: {
-        // Relax the TOTAL height toward its 4-neighbour average; the delta
-        // absorbs the difference (base heights come from heightFn, which is
-        // reentrant by contract).
         float base = Height(w, wx, wz);
         float total = base + *s;
         float sum = 0.0f;
@@ -1155,6 +1218,11 @@ void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
 
 void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
                      float strength, int layer) {
+  BrushWorldPaintC(w, center, radius, strength, layer, NULL);
+}
+
+void BrushWorldPaintC(BrushWorld *w, Vector3 center, float radius,
+                      float strength, int layer, const BrushConstraints *c) {
   if (radius <= 0.0f || layer < 0 || layer >= BRUSH_TERRAIN_LAYERS) return;
   float step = w->gridStep;
   long g0x = (long)floorf((center.x - radius) / step);
@@ -1169,6 +1237,7 @@ void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
       float dx = wx - center.x, dz = wz - center.z;
       float dist = sqrtf(dx * dx + dz * dz);
       if (dist >= radius) continue;
+      if (!PassConstraints(w, gx, gz, c)) continue;
       float t = dist / radius;
       float fall = 1.0f - t * t * (3.0f - 2.0f * t); // smoothstep falloff
 
@@ -1402,4 +1471,202 @@ bool BrushWorldSculptLoad(BrushWorld *w, const char *path) {
   UnloadFileData(blob);
   TraceLog(LOG_INFO, "BRUSH sculpt: loaded %s (%d tiles)", path, w->tileCount);
   return true;
+}
+
+static Vector3 CatmullRom(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t) {
+  float t2 = t * t;
+  float t3 = t2 * t;
+
+  float f0 = -0.5f * t3 + t2 - 0.5f * t;
+  float f1 = 1.5f * t3 - 2.5f * t2 + 1.0f;
+  float f2 = -1.5f * t3 + 2.0f * t2 + 0.5f * t;
+  float f3 = 0.5f * t3 - 0.5f * t2;
+
+  Vector3 r;
+  r.x = p0.x * f0 + p1.x * f1 + p2.x * f2 + p3.x * f3;
+  r.y = p0.y * f0 + p1.y * f1 + p2.y * f2 + p3.y * f3;
+  r.z = p0.z * f0 + p1.z * f1 + p2.z * f2 + p3.z * f3;
+  return r;
+}
+
+static float RoadNearest(const Vector3 *poly, int n, float wx, float wz,
+                         float *outRoadY) {
+  float best = 1e30f, bestY = 0.0f;
+  for (int i = 0; i + 1 < n; i++) {
+    Vector2 A = {poly[i].x,   poly[i].z};
+    Vector2 B = {poly[i+1].x, poly[i+1].z};
+    Vector2 AB = {B.x - A.x, B.y - A.y};
+    float len2 = AB.x * AB.x + AB.y * AB.y;
+    float u = len2 > 1e-6f ? ((wx - A.x) * AB.x + (wz - A.y) * AB.y) / len2 : 0.0f;
+    u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+    float cx = A.x + AB.x * u, cz = A.y + AB.y * u;
+    float d = sqrtf((wx - cx) * (wx - cx) + (wz - cz) * (wz - cz));
+    if (d < best) {
+      best = d;
+      bestY = poly[i].y + (poly[i+1].y - poly[i].y) * u;
+    }
+  }
+  *outRoadY = bestY;
+  return best;
+}
+
+Vector3 *BrushWorldRoadPolyline(const BrushWorld *w, const Vector3 *points,
+                                int count, int *outN) {
+  if (points == NULL || count < 2) {
+    if (outN) *outN = 0;
+    return NULL;
+  }
+  // Size first (same per-segment sample count the fill loop uses), then fill:
+  // one polyline shared by the stamp and the editor preview.
+  int total = 0;
+  for (int i = 0; i < count - 1; i++) {
+    Vector3 a = points[i], b = points[i + 1];
+    float segLen = sqrtf((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) +
+                         (b.z - a.z) * (b.z - a.z));
+    int samples = (int)ceilf(segLen / w->gridStep);
+    if (samples < 4) samples = 4;
+    total += samples;
+  }
+  total += 1; // closing point
+
+  Vector3 *poly = (Vector3 *)MemAlloc(sizeof(Vector3) * total);
+  int idx = 0;
+  for (int i = 0; i < count - 1; i++) {
+    Vector3 p0 = (i == 0) ? points[0] : points[i - 1];
+    Vector3 p1 = points[i];
+    Vector3 p2 = points[i + 1];
+    Vector3 p3 = (i + 2 >= count) ? points[count - 1] : points[i + 2];
+    float segLen = sqrtf((p2.x - p1.x) * (p2.x - p1.x) +
+                         (p2.y - p1.y) * (p2.y - p1.y) +
+                         (p2.z - p1.z) * (p2.z - p1.z));
+    int samples = (int)ceilf(segLen / w->gridStep);
+    if (samples < 4) samples = 4;
+    for (int s = 0; s < samples; s++)
+      poly[idx++] = CatmullRom(p0, p1, p2, p3, (float)s / (float)samples);
+  }
+  poly[idx++] = points[count - 1];
+  if (outN) *outN = idx;
+  return poly;
+}
+
+// Distance (XZ) from world (wx,wz) to road i, with its surface Y at the nearest
+// point. Returns -1 when outside the road's WIDEST influence (AABB + max edge);
+// the caller applies its own smoothstep with the height or texture margin.
+static float RoadDistance(const BrushWorld *w, int i, float wx, float wz,
+                          float *y) {
+  if (w->roadPolyN[i] < 2) return -1.0f;
+  if (wx < w->roadAABB[i][0] || wx > w->roadAABB[i][2] ||
+      wz < w->roadAABB[i][1] || wz > w->roadAABB[i][3])
+    return -1.0f;
+  return RoadNearest(w->roadPoly[i], w->roadPolyN[i], wx, wz, y);
+}
+
+// Corridor mask: 1 inside `half`, smoothstep to 0 across `fade`; fade 0 = hard
+// edge (paving stops crisply at the corridor width).
+static float RoadMask(float D, float half, float fade) {
+  if (D <= half) return 1.0f;
+  if (fade < 1e-4f || D >= half + fade) return 0.0f;
+  float t = (D - half) / fade;
+  return 1.0f - t * t * (3.0f - 2.0f * t);
+}
+
+// Bake hook: flatten the surface height toward every overlapping road (the
+// GEOMETRY shoulder always uses `fade`, so the ground eases even for a
+// hard-edged paved texture — no cliff at the road edge).
+static float RoadHeightAt(const BrushWorld *w, float wx, float wz, float h) {
+  for (int i = 0; i < w->roadCount; i++) {
+    float roadY, D = RoadDistance(w, i, wx, wz, &roadY);
+    if (D < 0.0f) continue;
+    float m = RoadMask(D, w->roads[i].width * 0.5f, w->roads[i].fade);
+    if (m > 0.0f) h += (roadY - h) * m;
+  }
+  return h;
+}
+
+// Bake hook: drive the road layer weight dominant across every overlapping
+// road, using the TEXTURE margin `paintFade` (0 = hard paved edge). Sum-255
+// preserving so it doesn't fight the renormalise.
+static void RoadSplatAt(const BrushWorld *w, float wx, float wz,
+                        unsigned char *px) {
+  for (int i = 0; i < w->roadCount; i++) {
+    int slot = w->roads[i].layerSlot;
+    if (slot < 0 || slot >= BRUSH_TERRAIN_LAYERS) continue;
+    float roadY, D = RoadDistance(w, i, wx, wz, &roadY);
+    if (D < 0.0f) continue;
+    float m = RoadMask(D, w->roads[i].width * 0.5f, w->roads[i].paintFade);
+    if (m <= 0.0f) continue;
+    float tgt[4] = {0, 0, 0, 0};
+    tgt[slot] = 255.0f;
+    for (int k = 0; k < 4; k++) {
+      float v = (float)px[k] + (tgt[k] - (float)px[k]) * m;
+      px[k] = (unsigned char)(v < 0.0f ? 0 : (v > 255.0f ? 255 : v + 0.5f));
+    }
+  }
+}
+
+// (Re)build road i's cached polyline + world AABB (edge-expanded). Caller holds
+// sculptMutex. Frees any previous polyline first.
+static void RoadCacheBuild(BrushWorld *w, int i) {
+  if (w->roadPoly[i]) {
+    MemFree(w->roadPoly[i]);
+    w->roadPoly[i] = NULL;
+  }
+  w->roadPolyN[i] = 0;
+  const BrushWorldRoad *r = &w->roads[i];
+  if (r->pointCount < 2) return;
+  int n = 0;
+  w->roadPoly[i] = BrushWorldRoadPolyline(w, r->points, r->pointCount, &n);
+  w->roadPolyN[i] = n;
+  float minX = 1e30f, minZ = 1e30f, maxX = -1e30f, maxZ = -1e30f;
+  for (int k = 0; k < n; k++) {
+    Vector3 p = w->roadPoly[i][k];
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
+  }
+  float edge = r->width * 0.5f + fmaxf(r->fade, r->paintFade);
+  w->roadAABB[i][0] = minX - edge;
+  w->roadAABB[i][1] = minZ - edge;
+  w->roadAABB[i][2] = maxX + edge;
+  w->roadAABB[i][3] = maxZ + edge;
+}
+
+void BrushWorldSetRoads(BrushWorld *w, const BrushWorldRoad *roads, int count) {
+  if (count < 0) count = 0;
+  if (count > BRUSH_WORLD_MAX_ROADS) count = BRUSH_WORLD_MAX_ROADS;
+
+  // Chunks overlapping OLD roads must rebake too (so a shrunk/moved/removed
+  // road restores the terrain it used to cover). Collect old + new AABBs, then
+  // mark dirty OUTSIDE the lock (SculptMarkDirty touches the job queue).
+  float dirty[BRUSH_WORLD_MAX_ROADS * 2][4];
+  int dirtyN = 0;
+
+  pthread_mutex_lock(&w->sculptMutex);
+  for (int i = 0; i < w->roadCount; i++)
+    if (w->roadPolyN[i] > 0 && dirtyN < BRUSH_WORLD_MAX_ROADS * 2)
+      memcpy(dirty[dirtyN++], w->roadAABB[i], sizeof(float) * 4);
+
+  for (int i = 0; i < BRUSH_WORLD_MAX_ROADS; i++) {
+    if (w->roadPoly[i]) {
+      MemFree(w->roadPoly[i]);
+      w->roadPoly[i] = NULL;
+      w->roadPolyN[i] = 0;
+    }
+  }
+  w->roadCount = count;
+  for (int i = 0; i < count; i++) {
+    w->roads[i] = roads[i];
+    RoadCacheBuild(w, i);
+    if (w->roadPolyN[i] > 0 && dirtyN < BRUSH_WORLD_MAX_ROADS * 2)
+      memcpy(dirty[dirtyN++], w->roadAABB[i], sizeof(float) * 4);
+  }
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  for (int i = 0; i < dirtyN; i++)
+    SculptMarkDirty(w, dirty[i][0], dirty[i][1], dirty[i][2], dirty[i][3]);
+}
+
+float BrushWorldGetGridStep(const BrushWorld *w) {
+  return w->gridStep;
 }

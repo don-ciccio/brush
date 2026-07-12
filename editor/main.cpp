@@ -149,7 +149,7 @@ struct EditorCamera {
 // ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
-enum EntityType { ENTITY_NONE, ENTITY_BLOCK, ENTITY_LIGHT, ENTITY_SPAWN, ENTITY_MODEL };
+enum EntityType { ENTITY_NONE, ENTITY_BLOCK, ENTITY_LIGHT, ENTITY_SPAWN, ENTITY_MODEL, ENTITY_ROAD };
 
 static BrushPhysics g_phys;
 static BrushScene g_scene;
@@ -181,6 +181,19 @@ static EditorMode g_mode = MODE_SELECT;
 static BrushSculptOp g_sculptOp = BRUSH_SCULPT_ADD;
 static bool g_paintActive = false; // sculpt-mode Paint tool (terrain layers)
 static int g_paintLayer = 1;       // painted layer (0 is the base coat)
+static bool g_roadActive = false;  // sculpt-mode Road spline tool
+static int g_selectedRoadIdx = -1;
+static int g_selectedNodeIdx = -1;
+static bool g_roadResyncPending = false; // a road changed; re-bake when idle
+
+static bool g_useSlopeFilter = false;
+static float g_constrainSlopeDegMin = 0.0f;
+static float g_constrainSlopeDegMax = 30.0f;
+static bool g_useHeightFilter = false;
+static float g_constrainHeightMin = -10.0f;
+static float g_constrainHeightMax = 100.0f;
+static int g_constrainLayerIdx = -1; // -1 = any
+
 static float g_brushRadius = 6.0f;
 static float g_brushStrength = 1.0f;
 static bool g_sculptStroking = false;
@@ -204,6 +217,52 @@ static char g_scenePath[512] = "assets/gym.def";
 #define MAX_LOG_LINES 128
 static char g_logLines[MAX_LOG_LINES][256];
 static int g_logLineCount = 0;
+
+// Which terrain-layer slot (0..3) a road's material occupies, or -1 if the
+// material isn't assigned to a slot (road then carves shape only, no paint).
+static int RoadLayerSlot(const char *material) {
+    if (!material || !material[0]) return -1;
+    for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
+        if (strcmp(g_scene.terrainLayers[i], material) == 0) return i;
+    return -1;
+}
+
+// Initialise a fresh road with sane defaults. Material defaults to the first
+// configured terrain layer (so it paints out of the box); "" until one is set.
+static void NewRoad(BrushSceneRoad *r) {
+    memset(r, 0, sizeof(*r));
+    r->width = 8.0f;
+    r->fade = 4.0f;
+    r->paintFade = 4.0f; // texture feathers by default; set 0 for paving
+    for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
+        if (g_scene.terrainLayers[i][0]) {
+            strncpy(r->material, g_scene.terrainLayers[i], sizeof(r->material) - 1);
+            break;
+        }
+}
+
+// Push the scene's roads into the live world (resolving each material to a
+// splat slot). Call after loading a scene and whenever a road changes — the
+// world re-bakes the affected chunks, so edits update the terrain live.
+static void SyncRoadsToWorld() {
+    if (!g_world) return;
+    BrushWorldRoad wr[BRUSH_WORLD_MAX_ROADS];
+    int n = 0;
+    for (int i = 0; i < g_scene.roadCount && n < BRUSH_WORLD_MAX_ROADS; i++) {
+        const BrushSceneRoad *r = &g_scene.roads[i];
+        if (r->pointCount < 2) continue; // half-drawn road: nothing to bake yet
+        BrushWorldRoad *o = &wr[n++];
+        int pc = r->pointCount > BRUSH_ROAD_MAX_POINTS ? BRUSH_ROAD_MAX_POINTS
+                                                       : r->pointCount;
+        for (int k = 0; k < pc; k++) o->points[k] = r->points[k];
+        o->pointCount = pc;
+        o->width = r->width;
+        o->fade = r->fade;
+        o->paintFade = r->paintFade;
+        o->layerSlot = RoadLayerSlot(r->material); // -1 = shape only
+    }
+    BrushWorldSetRoads(g_world, wr, n);
+}
 
 static void AddEditorLog(const char *fmt, ...) {
     char buf[256];
@@ -640,6 +699,14 @@ static void DeleteSelected() {
         g_scene.modelCount--;
         RebuildAllColliders();
         AddEditorLog("Deleted model");
+    } else if (g_selectedType == ENTITY_ROAD && g_selectedIdx >= 0) {
+        for (int i = g_selectedIdx; i < g_scene.roadCount - 1; i++)
+            g_scene.roads[i] = g_scene.roads[i + 1];
+        g_scene.roadCount--;
+        g_selectedRoadIdx = -1;
+        g_selectedNodeIdx = -1;
+        g_roadResyncPending = true; // rebake to erase the deleted road
+        AddEditorLog("Deleted road");
     } else {
         return;
     }
@@ -689,6 +756,9 @@ static void FrameSelected() {
         g_camera.Frame(g_scene.lights[g_selectedIdx].light.position, 1.5f);
     } else if (g_selectedType == ENTITY_MODEL && g_selectedIdx >= 0) {
         g_camera.Frame(g_scene.models[g_selectedIdx].pos, 2.5f);
+    } else if (g_selectedType == ENTITY_ROAD && g_selectedIdx >= 0 &&
+               g_scene.roads[g_selectedIdx].pointCount > 0) {
+        g_camera.Frame(g_scene.roads[g_selectedIdx].points[0], 10.0f);
     } else if (g_selectedType == ENTITY_SPAWN) {
         g_camera.Frame(g_scene.spawn, 1.5f);
     } else {
@@ -1049,6 +1119,7 @@ static bool OpenProjectAt(const char *dir) {
 
     BrushWorldSculptLoad(g_world, g_terrainPath);
     ApplyTerrainLayers();
+    SyncRoadsToWorld(); // live-bake the scene's roads on load
 
     // Harness: scripted sculpt + save (headless end-to-end check of the
     // editor -> .terrain -> game pipeline).
@@ -1392,6 +1463,73 @@ int main(int argc, char **argv) {
             EndTextureMode();
         }
 
+        // Road spline preview
+        if (pp && g_mode == MODE_SCULPT && g_roadActive && g_selectedRoadIdx >= 0 &&
+            g_selectedRoadIdx < g_scene.roadCount) {
+            RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
+            BeginTextureMode(*target);
+            BeginMode3D(g_camera.cam);
+
+            BrushSceneRoad *road = &g_scene.roads[g_selectedRoadIdx];
+            int ptCount = road->pointCount;
+            
+            // Draw node connection segments
+            for (int i = 0; i < ptCount - 1; i++) {
+                DrawLine3D(road->points[i], road->points[i+1], Fade(SKYBLUE, 0.4f));
+            }
+
+            // Draw node spheres
+            for (int i = 0; i < ptCount; i++) {
+                Color c = (i == g_selectedNodeIdx) ? ORANGE : SKYBLUE;
+                DrawSphere(road->points[i], 0.35f, Fade(c, 0.8f));
+                DrawSphereWires(road->points[i], 0.36f, 8, 8, c);
+            }
+
+            // Draw the road corridor ribbon. The SAME polyline the stamp uses
+            // (BrushWorldRoadPolyline), and the ribbon rides the spline Y — i.e.
+            // the surface the stamp will carve to — so the preview matches the
+            // result even after a node is lifted off the ground.
+            int polyN = 0;
+            Vector3 *poly = BrushWorldRoadPolyline(g_world, road->points,
+                                                   road->pointCount, &polyN);
+            if (poly != NULL) {
+                Vector3 prevC = poly[0], prevL = poly[0], prevR = poly[0];
+                bool first = true;
+                float halfW = road->width * 0.5f;
+
+                for (int i = 0; i < polyN; i++) {
+                    Vector3 pt = poly[i];
+                    pt.y += 0.05f; // lift off the surface to avoid z-fighting
+
+                    Vector3 dir = {0, 0, 0};
+                    if (i + 1 < polyN)      dir = Vector3Subtract(poly[i+1], poly[i]);
+                    else if (i > 0)         dir = Vector3Subtract(poly[i], poly[i-1]);
+                    dir.y = 0.0f;
+                    dir = Vector3Normalize(dir);
+                    Vector3 right = { dir.z, 0, -dir.x };
+
+                    // Corridor core is flattened to roadY across the full width,
+                    // so both shoulders sit at the spline Y too.
+                    Vector3 leftPt = Vector3Add(pt, Vector3Scale(right, halfW));
+                    Vector3 rightPt = Vector3Subtract(pt, Vector3Scale(right, halfW));
+
+                    if (!first) {
+                        DrawLine3D(prevC, pt, SKYBLUE);
+                        DrawLine3D(prevL, leftPt, Fade(GOLD, 0.6f));
+                        DrawLine3D(prevR, rightPt, Fade(GOLD, 0.6f));
+                    }
+                    prevC = pt;
+                    prevL = leftPt;
+                    prevR = rightPt;
+                    first = false;
+                }
+                MemFree(poly);
+            }
+
+            EndMode3D();
+            EndTextureMode();
+        }
+
         // Selection outline drawn onto the final LDR target (respects rotation).
         if (pp && g_mode == MODE_SELECT && g_selectedType != ENTITY_NONE) {
             RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
@@ -1634,6 +1772,28 @@ int main(int argc, char **argv) {
                 g_selectedType = ENTITY_LIGHT; g_selectedIdx = i;
                 if (ImGui::MenuItem("Frame")) FrameSelected();
                 if (ImGui::MenuItem("Duplicate")) DuplicateSelected();
+                if (ImGui::MenuItem("Delete")) DeleteSelected();
+                ImGui::EndPopup();
+            }
+        }
+        char roadsHdr[32];
+        snprintf(roadsHdr, sizeof(roadsHdr), "Roads (%d)###roads", g_scene.roadCount);
+        if (ImGui::CollapsingHeader(roadsHdr, ImGuiTreeNodeFlags_DefaultOpen))
+        for (int i = 0; i < g_scene.roadCount; i++) {
+            char label[64];
+            snprintf(label, sizeof(label), "  Road %d  (%d pts)##r%d", i,
+                     g_scene.roads[i].pointCount, i);
+            bool sel = (g_selectedType == ENTITY_ROAD && g_selectedIdx == i);
+            // Selecting a road enters the Road tool so its nodes are editable.
+            if (ImGui::Selectable(label, sel)) {
+                g_selectedType = ENTITY_ROAD; g_selectedIdx = i;
+                g_selectedRoadIdx = i; g_selectedNodeIdx = -1;
+                g_mode = MODE_SCULPT; g_roadActive = true; g_paintActive = false;
+            }
+            if (ImGui::BeginPopupContextItem()) {
+                g_selectedType = ENTITY_ROAD; g_selectedIdx = i;
+                g_selectedRoadIdx = i; g_selectedNodeIdx = -1;
+                if (ImGui::MenuItem("Frame")) FrameSelected();
                 if (ImGui::MenuItem("Delete")) DeleteSelected();
                 ImGui::EndPopup();
             }
@@ -2087,6 +2247,7 @@ int main(int argc, char **argv) {
             }
             if (layersChanged) {
                 ApplyTerrainLayers();
+                g_roadResyncPending = true; // layer slots moved -> roads re-resolve
                 g_dirty = true;
             }
         }
@@ -2139,6 +2300,165 @@ int main(int argc, char **argv) {
         } else {
             ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "HDR pipeline offline");
         }
+
+        // --- Brush Constraints UI ---
+        if (ImGui::CollapsingHeader("Brush Constraints")) {
+            ImGui::Checkbox("Slope Filter", &g_useSlopeFilter);
+            if (g_useSlopeFilter) {
+                ImGui::Indent();
+                ImGui::SliderFloat("Min Angle", &g_constrainSlopeDegMin, 0.0f, 90.0f, "%.0f deg");
+                ImGui::SliderFloat("Max Angle", &g_constrainSlopeDegMax, 0.0f, 90.0f, "%.0f deg");
+                if (g_constrainSlopeDegMax < g_constrainSlopeDegMin)
+                    g_constrainSlopeDegMax = g_constrainSlopeDegMin;
+                ImGui::Unindent();
+            }
+
+            ImGui::Checkbox("Height Filter", &g_useHeightFilter);
+            if (g_useHeightFilter) {
+                ImGui::Indent();
+                ImGui::DragFloat("Min Height", &g_constrainHeightMin, 0.1f, -100.0f, 1000.0f, "%.1f m");
+                ImGui::DragFloat("Max Height", &g_constrainHeightMax, 0.1f, -100.0f, 1000.0f, "%.1f m");
+                if (g_constrainHeightMax < g_constrainHeightMin)
+                    g_constrainHeightMax = g_constrainHeightMin;
+                ImGui::Unindent();
+            }
+
+            const char *layerComboStr = "(none)";
+            if (g_constrainLayerIdx >= 0 && g_constrainLayerIdx < BRUSH_TERRAIN_LAYERS) {
+                layerComboStr = TerrainSlotLabel(g_constrainLayerIdx);
+            }
+            if (ImGui::BeginCombo("Layer Mask", layerComboStr)) {
+                if (ImGui::Selectable("(none)", g_constrainLayerIdx == -1)) {
+                    g_constrainLayerIdx = -1;
+                }
+                BrushTerrainLayer tl[BRUSH_TERRAIN_LAYERS];
+                int tlCount = BrushSceneTerrainLayers(&g_scene, tl);
+                for (int i = 0; i < tlCount; i++) {
+                    bool sel = (g_constrainLayerIdx == i);
+                    if (ImGui::Selectable(TerrainSlotLabel(i), sel)) {
+                        g_constrainLayerIdx = i;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Only modify samples where this layer is dominant.");
+            }
+        }
+
+        // --- Road Splines UI ---
+        if (ImGui::CollapsingHeader("Road Splines")) {
+            if (g_scene.roadCount == 0) {
+                ImGui::TextDisabled("No roads in scene.");
+            } else {
+                for (int i = 0; i < g_scene.roadCount; i++) {
+                    char label[64];
+                    snprintf(label, sizeof(label), "Road %d (%s, %d pts)", i, 
+                             g_scene.roads[i].material[0] ? g_scene.roads[i].material : "none",
+                             g_scene.roads[i].pointCount);
+                    bool isSel = (g_selectedRoadIdx == i);
+                    if (ImGui::Selectable(label, isSel)) {
+                        g_selectedRoadIdx = i;
+                        g_selectedNodeIdx = -1;
+                    }
+                }
+            }
+
+            ImGui::Spacing();
+            if (ImGui::Button("Add Road Spline")) {
+                if (g_scene.roadCount < BRUSH_SCENE_MAX_ROADS) {
+                    g_selectedRoadIdx = g_scene.roadCount++;
+                    NewRoad(&g_scene.roads[g_selectedRoadIdx]);
+                    g_selectedNodeIdx = -1;
+                    g_roadActive = true;
+                    g_mode = MODE_SCULPT;
+                    g_dirty = true;
+                    AddEditorLog("Created new road spline %d — click the terrain to add nodes",
+                                 g_selectedRoadIdx);
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(live: edits update the terrain)");
+
+            if (g_selectedRoadIdx >= 0 && g_selectedRoadIdx < g_scene.roadCount) {
+                ImGui::Separator();
+                BrushSceneRoad *road = &g_scene.roads[g_selectedRoadIdx];
+                ImGui::Text("Selected: Road %d", g_selectedRoadIdx);
+                
+                // Only TERRAIN-LAYER materials can be painted (the splat is
+                // slot-indexed), so offer just those — no dead choices.
+                if (ImGui::BeginCombo("Road Material", road->material[0] ? road->material : "(none)")) {
+                    bool any = false;
+                    for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+                        const char *mn = g_scene.terrainLayers[i];
+                        if (!mn[0]) continue;
+                        any = true;
+                        bool sel = (strcmp(road->material, mn) == 0);
+                        if (ImGui::Selectable(TerrainSlotLabel(i), sel)) {
+                            strcpy(road->material, mn);
+                            g_dirty = true;
+                            g_roadResyncPending = true;
+                        }
+                    }
+                    if (!any) ImGui::TextDisabled("No Terrain Layers set");
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Road paints this layer. Set Terrain Layers in the "
+                                      "Terrain panel first; an unset material carves shape only.");
+
+                if (ImGui::SliderFloat("Width", &road->width, 1.0f, 30.0f, "%.1f m")) { g_dirty = true; g_roadResyncPending = true; }
+                if (ImGui::SliderFloat("Ground Shoulder", &road->fade, 0.5f, 20.0f, "%.1f m")) { g_dirty = true; g_roadResyncPending = true; }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("How far the TERRAIN eases back to its original height "
+                                      "at the road edge (keep >0 so there's no cliff).");
+                if (ImGui::SliderFloat("Texture Edge", &road->paintFade, 0.0f, 20.0f,
+                                       road->paintFade < 0.05f ? "hard" : "%.1f m"))
+                    { g_dirty = true; g_roadResyncPending = true; }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("How far the road TEXTURE feathers into the surrounding "
+                                      "terrain. 0 = hard edge (paving/concrete); higher = "
+                                      "soft (dirt/gravel).");
+
+                ImGui::Text("Control Points (%d/32):", road->pointCount);
+                ImGui::Indent();
+                for (int pi = 0; pi < road->pointCount; pi++) {
+                    char nodeLabel[64];
+                    snprintf(nodeLabel, sizeof(nodeLabel), "Node %d: (%.1f, %.1f, %.1f)", pi, 
+                             road->points[pi].x, road->points[pi].y, road->points[pi].z);
+                    bool nodeSel = (g_selectedNodeIdx == pi);
+                    if (ImGui::Selectable(nodeLabel, nodeSel)) {
+                        g_selectedNodeIdx = pi;
+                    }
+                }
+                ImGui::Unindent();
+
+                ImGui::Spacing();
+                if (ImGui::Button("Delete Selected Node")) {
+                    if (g_selectedNodeIdx >= 0 && g_selectedNodeIdx < road->pointCount) {
+                        for (int pi = g_selectedNodeIdx; pi < road->pointCount - 1; pi++) {
+                            road->points[pi] = road->points[pi+1];
+                        }
+                        road->pointCount--;
+                        g_selectedNodeIdx = -1;
+                        g_dirty = true;
+                        g_roadResyncPending = true;
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete Spline")) {
+                    for (int ri = g_selectedRoadIdx; ri < g_scene.roadCount - 1; ri++) {
+                        g_scene.roads[ri] = g_scene.roads[ri+1];
+                    }
+                    g_scene.roadCount--;
+                    g_selectedRoadIdx = -1;
+                    g_selectedNodeIdx = -1;
+                    g_dirty = true;
+                    g_roadResyncPending = true; // rebake to erase the removed road
+                }
+            }
+        }
+
         ImGui::End();
 
         // === Console =========================================================
@@ -2328,7 +2648,10 @@ int main(int argc, char **argv) {
             }
 
             // --- Gizmo (select mode only) -------------------------------------
-            if (g_mode == MODE_SELECT && g_selectedType != ENTITY_NONE) {
+            // Roads are edited in the Sculpt Road tool (node gizmo below), not
+            // the select gizmo — skip them here so it doesn't sit at the origin.
+            if (g_mode == MODE_SELECT && g_selectedType != ENTITY_NONE &&
+                g_selectedType != ENTITY_ROAD) {
                 ImGuizmo::SetDrawlist();
                 ImGuizmo::SetRect(imgPos.x, imgPos.y, imgSize.x, imgSize.y);
 
@@ -2433,6 +2756,37 @@ int main(int argc, char **argv) {
                 }
             }
 
+            // --- Road Node Gizmo (sculpt mode only, road tool active, node selected) ---
+            if (g_mode == MODE_SCULPT && g_roadActive &&
+                g_selectedRoadIdx >= 0 && g_selectedRoadIdx < g_scene.roadCount &&
+                g_selectedNodeIdx >= 0 && g_selectedNodeIdx < g_scene.roads[g_selectedRoadIdx].pointCount) {
+                ImGuizmo::SetDrawlist();
+                ImGuizmo::SetRect(imgPos.x, imgPos.y, imgSize.x, imgSize.y);
+
+                Matrix viewMat = GetCameraMatrix(g_camera.cam);
+                Matrix projMat = MatrixPerspective(g_camera.cam.fovy * DEG2RAD,
+                                                   renderAspect, 0.01f, 1000.0f);
+                BrushSceneRoad *r = &g_scene.roads[g_selectedRoadIdx];
+                Vector3 *node = &r->points[g_selectedNodeIdx];
+                Matrix modelMat = MatrixTranslate(node->x, node->y, node->z);
+
+                Matrix viewT = MatrixTranspose(viewMat);
+                Matrix projT = MatrixTranspose(projMat);
+                Matrix modelT = MatrixTranspose(modelMat);
+
+                ImGuizmo::Manipulate((float *)&viewT, (float *)&projT,
+                                     ImGuizmo::TRANSLATE, ImGuizmo::WORLD, (float *)&modelT);
+
+                if (ImGuizmo::IsUsing()) {
+                    modelMat = MatrixTranspose(modelT);
+                    node->x = modelMat.m12;
+                    node->y = modelMat.m13;
+                    node->z = modelMat.m14;
+                    g_dirty = true;
+                    g_roadResyncPending = true; // re-bakes on release (idle)
+                }
+            }
+
             // --- Sculpting ------------------------------------------------------
             g_cursorOnGround = false;
             if (g_mode == MODE_SCULPT && viewportHovered) {
@@ -2445,7 +2799,7 @@ int main(int argc, char **argv) {
                         g_cursorPos = hitPt;
                     }
                 }
-                if (g_cursorOnGround) {
+                if (g_cursorOnGround && !g_roadActive) {
                     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                         PushSculptUndo();     // stroke-level undo record
                         g_sculptStroking = true;
@@ -2454,24 +2808,94 @@ int main(int argc, char **argv) {
                     if (g_sculptStroking && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                         float dtStroke = GetFrameTime();
                         bool lower = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+
+                        // Build constraints
+                        BrushConstraints bc = {0};
+                        bc.targetLayer = -1;
+                        bool hasBC = false;
+                        if (g_useSlopeFilter) {
+                            bc.checkSlope = true;
+                            bc.minCosSlope = cosf(g_constrainSlopeDegMax * DEG2RAD);
+                            bc.maxCosSlope = cosf(g_constrainSlopeDegMin * DEG2RAD);
+                            hasBC = true;
+                        }
+                        if (g_useHeightFilter) {
+                            bc.checkHeight = true;
+                            bc.minHeight = g_constrainHeightMin;
+                            bc.maxHeight = g_constrainHeightMax;
+                            hasBC = true;
+                        }
+                        if (g_constrainLayerIdx >= 0) {
+                            bc.targetLayer = g_constrainLayerIdx;
+                            hasBC = true;
+                        }
+                        const BrushConstraints *pBc = hasBC ? &bc : NULL;
+
                         if (g_paintActive) {
                             // shift paints the base coat back (erase).
                             int layer = lower ? 0 : g_paintLayer;
                             float flow = fminf(g_brushStrength * 4.0f * dtStroke, 1.0f);
-                            BrushWorldPaint(g_world, g_cursorPos, g_brushRadius,
-                                            flow, layer);
+                            BrushWorldPaintC(g_world, g_cursorPos, g_brushRadius,
+                                             flow, layer, pBc);
                         } else {
                             float strength;
                             if (g_sculptOp == BRUSH_SCULPT_ADD)
                                 strength = (lower ? -1.0f : 1.0f) * g_brushStrength * 6.0f * dtStroke;
                             else
                                 strength = fminf(g_brushStrength * 8.0f * dtStroke, 1.0f);
-                            BrushWorldSculpt(g_world, g_sculptOp, g_cursorPos,
-                                             g_brushRadius, strength, g_flattenY);
+                            BrushWorldSculptC(g_world, g_sculptOp, g_cursorPos,
+                                              g_brushRadius, strength, g_flattenY, pBc);
                         }
                         g_dirty = true;
                     }
                 }
+
+                if (g_cursorOnGround && g_roadActive) {
+                    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
+                        // Click a node of ANY road to select that road + node
+                        // (so roads are viewport-selectable, not just via the
+                        // panel list). Nearest hit across all roads wins.
+                        float closestDist = 1e9f;
+                        int hitRoad = -1, hitNode = -1;
+                        for (int ri = 0; ri < g_scene.roadCount; ri++) {
+                            BrushSceneRoad *road = &g_scene.roads[ri];
+                            for (int ni = 0; ni < road->pointCount; ni++) {
+                                RayCollision col = GetRayCollisionSphere(ray, road->points[ni], 0.5f);
+                                if (col.hit && col.distance < closestDist) {
+                                    closestDist = col.distance;
+                                    hitRoad = ri;
+                                    hitNode = ni;
+                                }
+                            }
+                        }
+
+                        if (hitRoad >= 0) {
+                            g_selectedRoadIdx = hitRoad;
+                            g_selectedNodeIdx = hitNode;
+                        } else {
+                            // Empty click: append a node to the selected road
+                            // (creating one if none is selected).
+                            if (g_selectedRoadIdx < 0 || g_selectedRoadIdx >= g_scene.roadCount) {
+                                if (g_scene.roadCount < BRUSH_SCENE_MAX_ROADS) {
+                                    g_selectedRoadIdx = g_scene.roadCount++;
+                                    NewRoad(&g_scene.roads[g_selectedRoadIdx]);
+                                    AddEditorLog("Created new road spline %d", g_selectedRoadIdx);
+                                }
+                            }
+                            if (g_selectedRoadIdx >= 0 && g_selectedRoadIdx < g_scene.roadCount) {
+                                BrushSceneRoad *r = &g_scene.roads[g_selectedRoadIdx];
+                                if (r->pointCount < BRUSH_ROAD_MAX_POINTS) {
+                                    r->points[r->pointCount++] = g_cursorPos;
+                                    g_selectedNodeIdx = r->pointCount - 1;
+                                    g_dirty = true;
+                                    g_roadResyncPending = true;
+                                    AddEditorLog("Added node %d to road %d", g_selectedNodeIdx, g_selectedRoadIdx);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) g_sculptStroking = false;
                 // Radius on [ ] keys (scroll stays camera navigation).
                 if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket))
@@ -2556,22 +2980,33 @@ int main(int argc, char **argv) {
                 ImGui::SameLine();
                 ImGui::Checkbox("Snap", &g_surfaceSnap);
             } else {
-                if (ToolButton(" Raise ", !g_paintActive && g_sculptOp == BRUSH_SCULPT_ADD)) {
+                if (ToolButton(" Raise ", !g_paintActive && !g_roadActive && g_sculptOp == BRUSH_SCULPT_ADD)) {
                     g_sculptOp = BRUSH_SCULPT_ADD;
                     g_paintActive = false;
+                    g_roadActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Smooth ", !g_paintActive && g_sculptOp == BRUSH_SCULPT_SMOOTH)) {
+                if (ToolButton(" Smooth ", !g_paintActive && !g_roadActive && g_sculptOp == BRUSH_SCULPT_SMOOTH)) {
                     g_sculptOp = BRUSH_SCULPT_SMOOTH;
                     g_paintActive = false;
+                    g_roadActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Flatten ", !g_paintActive && g_sculptOp == BRUSH_SCULPT_FLATTEN)) {
+                if (ToolButton(" Flatten ", !g_paintActive && !g_roadActive && g_sculptOp == BRUSH_SCULPT_FLATTEN)) {
                     g_sculptOp = BRUSH_SCULPT_FLATTEN;
                     g_paintActive = false;
+                    g_roadActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Paint ", g_paintActive)) g_paintActive = true;
+                if (ToolButton(" Paint ", g_paintActive && !g_roadActive)) {
+                    g_paintActive = true;
+                    g_roadActive = false;
+                }
+                ImGui::SameLine();
+                if (ToolButton(" Road ", g_roadActive && !g_paintActive)) {
+                    g_roadActive = true;
+                    g_paintActive = false;
+                }
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(140);
                 ImGui::SliderFloat("Radius", &g_brushRadius, 1.0f, 60.0f, "%.0f m");
@@ -2666,6 +3101,13 @@ int main(int argc, char **argv) {
                     g_selectedType = ENTITY_NONE; g_selectedIdx = -1;
                 }
             }
+        }
+
+        // Live roads: re-bake the terrain once the user stops dragging (a
+        // slider/gizmo still active defers it, so we don't rebake every frame).
+        if (g_roadResyncPending && !ImGui::IsAnyItemActive() && !ImGuizmo::IsUsing()) {
+            SyncRoadsToWorld();
+            g_roadResyncPending = false;
         }
 
         rlImGuiEnd();

@@ -47,6 +47,7 @@ extern "C" {
 #define BRUSH_SCENE_MAX_MATERIALS 32
 #define BRUSH_SCENE_MAX_MODELS 128
 #define BRUSH_SCENE_MAX_POST 48
+#define BRUSH_SCENE_MAX_ROADS 32
 #define BRUSH_SCENE_PATH_MAX 512
 #define BRUSH_SCENE_NAME_MAX 32
 
@@ -100,6 +101,15 @@ typedef struct BrushSceneLight {
   bool flicker; // game decides what flicker looks like
 } BrushSceneLight;
 
+typedef struct BrushSceneRoad {
+  char  material[64];   // terrain-layer material name (resolved to a slot 0..3)
+  float width;          // full-weight corridor width (m)
+  float fade;           // HEIGHT shoulder: ground eases back over this margin (m)
+  float paintFade;      // TEXTURE edge: 0 = hard (paving), >0 = feathered (dirt)
+  Vector3 points[32];   // control points (Y matters: it's the road surface)
+  int   pointCount;
+} BrushSceneRoad;
+
 typedef struct BrushScene {
   Vector3 spawn;
   float timeHours; // starting clock (b_tod), <0 = not specified
@@ -108,6 +118,8 @@ typedef struct BrushScene {
   int blockCount;
   BrushSceneLight lights[BRUSH_SCENE_MAX_LIGHTS];
   int lightCount;
+  BrushSceneRoad roads[BRUSH_SCENE_MAX_ROADS];
+  int roadCount;
   BrushSceneMaterial materials[BRUSH_SCENE_MAX_MATERIALS];
   int materialCount;
   BrushSceneModelInstance models[BRUSH_SCENE_MAX_MODELS];

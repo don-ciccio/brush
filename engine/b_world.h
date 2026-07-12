@@ -141,11 +141,22 @@ typedef enum {
   BRUSH_SCULPT_FLATTEN,
 } BrushSculptOp;
 
+typedef struct BrushConstraints {
+  bool  checkSlope;                 // gate on surface steepness
+  float minCosSlope, maxCosSlope;   // cos(angle): flat=1, vertical=0
+  bool  checkHeight;                // gate on absolute Y
+  float minHeight, maxHeight;
+  int   targetLayer;                // -1 = any; else only where this layer dominant
+} BrushConstraints;
+
 // Apply one brush dab at `center` (world XZ; radius in metres, smoothstep
 // falloff). Touched chunks are marked for rebake automatically; they keep
 // drawing their old mesh until the worker delivers the new one.
 void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
                       float radius, float strength, float targetY);
+void BrushWorldSculptC(BrushWorld *w, BrushSculptOp op, Vector3 center,
+                       float radius, float strength, float targetY,
+                       const BrushConstraints *c);
 
 // True if any sculpt data exists (used to decide whether to save).
 bool BrushWorldSculptAny(const BrushWorld *w);
@@ -183,6 +194,8 @@ void BrushWorldSetLayers(BrushWorld *w,
 // renormalise the others. strength ~0..1 per application (flow).
 void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
                      float strength, int layer);
+void BrushWorldPaintC(BrushWorld *w, Vector3 center, float radius,
+                      float strength, int layer, const BrushConstraints *c);
 
 // Auto-slope mask: terrain steeper than `startDeg` blends toward `layer`
 // (fully by `endDeg`) BENEATH the painted weights — pure shader, no data.
@@ -200,6 +213,40 @@ void BrushWorldSetLayerHeights(BrushWorld *w, const int *on,
 // Dominant painted layer at a world XZ (nearest grid sample), for
 // footsteps/particles. -1 when no layers are configured.
 int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz);
+
+// --- Spline roads (LIVE / non-destructive) -----------------------------------
+// A road is a Catmull-Rom spline (through `points`, XZ path / per-node Y = road
+// surface) that flattens the terrain within `width` (easing back over `fade`)
+// and paints `layerSlot` across the corridor (slot < 0 = carve shape only).
+// Unlike a stamp, roads are re-evaluated DURING the chunk bake — so editing one
+// and re-submitting via BrushWorldSetRoads updates the mesh, collider, ground
+// query, and foot-IK automatically through the normal dirty-chunk rebake, with
+// no destructive tile writes. Roads compose ON TOP of heightFn + manual sculpt.
+#define BRUSH_ROAD_MAX_POINTS 32
+#define BRUSH_WORLD_MAX_ROADS 32
+typedef struct BrushWorldRoad {
+  Vector3 points[BRUSH_ROAD_MAX_POINTS];
+  int pointCount;
+  float width;     // full-strength corridor width
+  float fade;      // HEIGHT shoulder: terrain eases back over this margin
+  float paintFade; // TEXTURE edge: 0 = hard (paving), >0 = feathered (dirt)
+  int layerSlot;   // splat slot to paint; -1 = carve shape only
+} BrushWorldRoad;
+
+// Replace the world's live road set (copied in). Re-caches the spline polylines
+// and marks every chunk overlapping the OLD or NEW roads dirty so they rebake
+// with the change. Call whenever roads change (editor edit) or after loading
+// them from a scene. count 0 clears all roads.
+void BrushWorldSetRoads(BrushWorld *w, const BrushWorldRoad *roads, int count);
+
+// Flatten a road spline to a world-space polyline at ~gridStep spacing (phantom
+// endpoints so it reaches both ends). Returns a MemAlloc'd array of `*outN`
+// points (caller MemFree) or NULL if count < 2. SHARED by the bake and the
+// editor preview so they sample the corridor identically.
+Vector3 *BrushWorldRoadPolyline(const BrushWorld *w, const Vector3 *points,
+                                int count, int *outN);
+
+float BrushWorldGetGridStep(const BrushWorld *w);
 
 #ifdef __cplusplus
 }

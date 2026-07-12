@@ -160,6 +160,38 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
             .flicker = (flicker != 0),
         };
       }
+    } else if (strncmp(p, "road ", 5) == 0) {
+      if (temp.roadCount < BRUSH_SCENE_MAX_ROADS) {
+        BrushSceneRoad *r = &temp.roads[temp.roadCount++];
+        memset(r, 0, sizeof(*r));
+        int ptCount = 0;
+        char matName[64] = {0};
+        int bytesRead = 0;
+        if (sscanf(p, "road %63s %f %f %d%n", matName, &r->width, &r->fade, &ptCount, &bytesRead) >= 4) {
+          CopyField(r->material, sizeof(r->material), matName);
+          if (ptCount > 32) ptCount = 32;
+          r->pointCount = ptCount;
+          const char *ptPtr = p + bytesRead;
+          for (int pi = 0; pi < ptCount; pi++) {
+            float px, py, pz;
+            int step = 0;
+            if (sscanf(ptPtr, " %f %f %f%n", &px, &py, &pz, &step) >= 3) {
+              r->points[pi] = (Vector3){px, py, pz};
+              ptPtr += step;
+            } else {
+              r->pointCount = pi;
+              break;
+            }
+          }
+          // Optional TRAILING texture-edge margin (backward compatible: an old
+          // road line without it feathers the texture like the height, so
+          // default paintFade to fade).
+          float pf;
+          r->paintFade = (sscanf(ptPtr, " %f", &pf) == 1) ? pf : r->fade;
+        } else {
+          temp.roadCount--;
+        }
+      }
     } else {
       // Forward compatibility: unknown entity types are skipped, not fatal.
       TraceLog(LOG_WARNING, "BRUSH scene: %s:%d unknown line: %.40s", path,
@@ -240,6 +272,17 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   if (s->postCount > 0) fprintf(f, "\n# post  key value (render tunables)\n");
   for (int i = 0; i < s->postCount; i++)
     fprintf(f, "post %s %g\n", s->post[i].key, s->post[i].value);
+  if (s->roadCount > 0)
+    fprintf(f, "\n# road  material  width  fade  pointCount  points(x y z ...)  paintFade\n");
+  for (int i = 0; i < s->roadCount; i++) {
+    const BrushSceneRoad *r = &s->roads[i];
+    fprintf(f, "road %s %g %g %d", r->material[0] ? r->material : "-", r->width, r->fade, r->pointCount);
+    for (int pi = 0; pi < r->pointCount; pi++) {
+      fprintf(f, " %g %g %g", r->points[pi].x, r->points[pi].y, r->points[pi].z);
+    }
+    fprintf(f, " %g\n", r->paintFade); // trailing texture-edge margin
+  }
+
   fclose(f);
   strncpy(s->path, path, BRUSH_SCENE_PATH_MAX - 1);
   s->modTime = GetFileModTime(path);
