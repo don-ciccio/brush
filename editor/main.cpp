@@ -366,6 +366,67 @@ static bool IsImageAsset(const char *path) {
            IsFileExtension(path, ".bmp");
 }
 
+static void DrawFolderContents(const char* parentFolder, int& selAsset, BrushTexImportParams& impParams) {
+    char parentPath[256];
+    if (parentFolder[0] == '\0') {
+        snprintf(parentPath, sizeof(parentPath), "assets/");
+    } else {
+        snprintf(parentPath, sizeof(parentPath), "assets/%s/", parentFolder);
+    }
+    int parentLen = strlen(parentPath);
+    char lastSubfolder[128] = "";
+
+    for (int i = 0; i < g_assetFileCount; i++) {
+        const char* path = g_assetFiles[i];
+        if (strncmp(path, parentPath, parentLen) != 0) continue;
+
+        const char* sub = path + parentLen;
+        const char* slash = strchr(sub, '/');
+
+        if (slash != NULL) {
+            char subfolderName[128];
+            int subfolderLen = slash - sub;
+            if (subfolderLen >= (int)sizeof(subfolderName)) subfolderLen = sizeof(subfolderName) - 1;
+            strncpy(subfolderName, sub, subfolderLen);
+            subfolderName[subfolderLen] = '\0';
+
+            if (strcmp(subfolderName, lastSubfolder) == 0) continue;
+            snprintf(lastSubfolder, sizeof(lastSubfolder), "%s", subfolderName);
+
+            char nextFolder[256];
+            if (parentFolder[0] == '\0') {
+                snprintf(nextFolder, sizeof(nextFolder), "%s", subfolderName);
+            } else {
+                snprintf(nextFolder, sizeof(nextFolder), "%s/%s", parentFolder, subfolderName);
+            }
+
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+            ImGui::PushID(subfolderName);
+            if (ImGui::TreeNodeEx(subfolderName, flags)) {
+                DrawFolderContents(nextFolder, selAsset, impParams);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        } else {
+            bool isSelected = (selAsset == i);
+            if (ImGui::Selectable(sub, isSelected)) {
+                selAsset = i;
+                if (g_assetPreviewPath[0] != '\0') {
+                    BrushAssetsReleaseTexture(g_assetPreview);
+                    g_assetPreview = (Texture2D){ 0 };
+                    g_assetPreviewPath[0] = '\0';
+                }
+                if (IsImageAsset(g_assetFiles[i])) {
+                    g_assetPreview = BrushAssetsTexture(g_assetFiles[i]);
+                    snprintf(g_assetPreviewPath, sizeof(g_assetPreviewPath),
+                             "%s", g_assetFiles[i]);
+                    BrushAssetsGetImportParams(g_assetFiles[i], &impParams);
+                }
+            }
+        }
+    }
+}
+
 // Copy image files into the project's assets/textures (creating it on
 // demand — the Empty template starts without one) and rescan the pickers.
 // This is how textures enter a project: drag & drop onto the editor, or
@@ -646,6 +707,21 @@ static bool g_projectOpen = false;
 #define MAX_RECENT_PROJECTS 16
 static char g_recent[MAX_RECENT_PROJECTS][512];
 static int g_recentCount = 0;
+static BrushProject g_recentProjects[MAX_RECENT_PROJECTS];
+static bool g_recentExists[MAX_RECENT_PROJECTS];
+
+static void ResolveRecentProjectMetadata() {
+    for (int i = 0; i < g_recentCount; i++) {
+        char pd[560];
+        snprintf(pd, sizeof(pd), "%s/project.def", g_recent[i]);
+        g_recentExists[i] = FileExists(pd);
+        if (g_recentExists[i]) {
+            BrushProjectLoad(&g_recentProjects[i], g_recent[i]);
+        } else {
+            memset(&g_recentProjects[i], 0, sizeof(BrushProject));
+        }
+    }
+}
 
 static const char *BrushUserDir() {
     static char dir[512] = "";
@@ -671,6 +747,7 @@ static void LoadRecents() {
             snprintf(g_recent[g_recentCount++], sizeof(g_recent[0]), "%s", line);
     }
     fclose(f);
+    ResolveRecentProjectMetadata();
 }
 
 static void SaveRecents() {
@@ -697,6 +774,7 @@ static void AddRecent(const char *dir) {
         strcpy(g_recent[j], g_recent[j - 1]);
     snprintf(g_recent[0], sizeof(g_recent[0]), "%s", abs);
     SaveRecents();
+    ResolveRecentProjectMetadata();
 }
 
 // mkdir -p
@@ -970,14 +1048,10 @@ int main(int argc, char **argv) {
         ImGui::SeparatorText("Projects");
         ImGui::BeginChild("##recents", ImVec2(0, h * 0.42f));
         for (int i = 0; i < g_recentCount; i++) {
-            char pd[560];
-            snprintf(pd, sizeof(pd), "%s/project.def", g_recent[i]);
-            bool exists = FileExists(pd);
-            BrushProject rp;
-            if (exists) BrushProjectLoad(&rp, g_recent[i]);
+            bool exists = g_recentExists[i];
             char label[640];
             snprintf(label, sizeof(label), "%s##rec%d",
-                     exists ? rp.name : "(missing)", i);
+                     exists ? g_recentProjects[i].name : "(missing)", i);
             if (ImGui::Selectable(label, selRecent == i,
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 selRecent = i;
@@ -999,6 +1073,7 @@ int main(int argc, char **argv) {
             g_recentCount--;
             selRecent = -1;
             SaveRecents();
+            ResolveRecentProjectMetadata();
         }
 
         ImGui::Spacing();
@@ -1491,6 +1566,8 @@ int main(int argc, char **argv) {
                 m->tile = 2.0f;
                 m->spec = 0.25f;
                 m->normalDepth = 1.0f;
+                m->heightScale = 0.05f;
+                m->aoStrength = 1.0f;
                 selMat = g_scene.materialCount++;
                 snprintf(nameBuf, sizeof(nameBuf), "%s", m->name);
                 g_dirty = true;
@@ -1504,6 +1581,8 @@ int main(int argc, char **argv) {
                         g_scene.blocks[i].material[0] = '\0';
                 BrushAssetsReleaseTexture(g_scene.materials[selMat].albedoTex);
                 BrushAssetsReleaseTexture(g_scene.materials[selMat].normalTex);
+                BrushAssetsReleaseTexture(g_scene.materials[selMat].displacementTex);
+                BrushAssetsReleaseTexture(g_scene.materials[selMat].aoTex);
                 for (int i = selMat; i < g_scene.materialCount - 1; i++)
                     g_scene.materials[i] = g_scene.materials[i + 1];
                 g_scene.materialCount--;
@@ -1531,6 +1610,10 @@ int main(int argc, char **argv) {
                                           sizeof(m->albedo));
                 reresolve |= TexPathCombo("Normal", m->normal,
                                           sizeof(m->normal));
+                reresolve |= TexPathCombo("Displacement", m->displacement,
+                                          sizeof(m->displacement));
+                reresolve |= TexPathCombo("AO", m->ao,
+                                          sizeof(m->ao));
                 // Thumbnails: proof the textures actually loaded. A path
                 // with no image = red MISSING (typo / file moved).
                 float thumb = 72.0f;
@@ -1560,12 +1643,40 @@ int main(int argc, char **argv) {
                     ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
                                        "normal MISSING: %s", m->normal);
                 }
+                if (m->displacementTex.id != 0) {
+                    ImGui::SameLine();
+                    ImGui::Image((ImTextureID)(intptr_t)m->displacementTex.id,
+                                 ImVec2(thumb, thumb));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s (%dx%d)", m->displacement,
+                                          m->displacementTex.width,
+                                          m->displacementTex.height);
+                } else if (m->displacement[0] != '\0') {
+                    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
+                                       "displacement MISSING: %s", m->displacement);
+                }
+                if (m->aoTex.id != 0) {
+                    ImGui::SameLine();
+                    ImGui::Image((ImTextureID)(intptr_t)m->aoTex.id,
+                                 ImVec2(thumb, thumb));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s (%dx%d)", m->ao,
+                                          m->aoTex.width,
+                                          m->aoTex.height);
+                } else if (m->ao[0] != '\0') {
+                    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
+                                       "ao MISSING: %s", m->ao);
+                }
                 if (ImGui::DragFloat("Tile", &m->tile, 0.05f, 0.25f, 32.0f,
                                      "%.2f m")) g_dirty = true;
                 if (ImGui::SliderFloat("Specular", &m->spec, 0.0f, 1.0f))
                     g_dirty = true;
                 if (ImGui::SliderFloat("Normal Depth", &m->normalDepth, 0.0f,
                                        3.0f)) g_dirty = true;
+                if (ImGui::SliderFloat("Displacement Scale", &m->heightScale, 0.0f,
+                                       0.2f, "%.3f")) g_dirty = true;
+                if (ImGui::SliderFloat("AO Strength", &m->aoStrength, 0.0f,
+                                       1.0f)) g_dirty = true;
                 if (reresolve) {
                     BrushSceneResolveMaterials(&g_scene);
                     g_dirty = true;
@@ -1691,25 +1802,7 @@ int main(int argc, char **argv) {
             // Left: file list. Right: preview + per-file import settings.
             float listW = ImGui::GetContentRegionAvail().x * 0.45f;
             ImGui::BeginChild("##assetlist", ImVec2(listW, 0));
-            for (int i = 0; i < g_assetFileCount; i++) {
-                const char *rel = g_assetFiles[i] + 7; // strip "assets/"
-                if (ImGui::Selectable(rel, selAsset == i)) {
-                    selAsset = i;
-                    // Swap the preview ref: release the old, acquire the new
-                    // (acquiring cooks on first touch, same as a material).
-                    if (g_assetPreviewPath[0] != '\0') {
-                        BrushAssetsReleaseTexture(g_assetPreview);
-                        g_assetPreview = (Texture2D){ 0 };
-                        g_assetPreviewPath[0] = '\0';
-                    }
-                    if (IsImageAsset(g_assetFiles[i])) {
-                        g_assetPreview = BrushAssetsTexture(g_assetFiles[i]);
-                        snprintf(g_assetPreviewPath, sizeof(g_assetPreviewPath),
-                                 "%s", g_assetFiles[i]);
-                        BrushAssetsGetImportParams(g_assetFiles[i], &impParams);
-                    }
-                }
-            }
+            DrawFolderContents("", selAsset, impParams);
             if (g_assetFileCount == 0)
                 ImGui::TextDisabled("No files yet — import textures above.");
             ImGui::EndChild();

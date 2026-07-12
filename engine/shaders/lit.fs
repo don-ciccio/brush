@@ -12,9 +12,17 @@ in vec2 fragTexCoord;
 in vec3 fragNormal;
 in vec4 fragColor;
 in vec4 fragTangent;
+in vec3 localPosScaled;
+in vec3 worldAxisX;
+in vec3 worldAxisY;
+in vec3 worldAxisZ;
+in float vSwapUV;
+in vec3 localNormal;
 
 uniform sampler2D texture0; // MATERIAL_MAP_DIFFUSE (albedo)
 uniform sampler2D texture2; // MATERIAL_MAP_NORMAL (raylib binds normals here)
+uniform sampler2D texture4; // MATERIAL_MAP_OCCLUSION (ao)
+uniform sampler2D texture6; // MATERIAL_MAP_HEIGHT (displacement)
 uniform vec4 colDiffuse;
 
 // --- Per-draw material (set by the renderer from BrushMaterialProps) ---
@@ -29,6 +37,10 @@ uniform float uNormalDepth; // normal map intensity (1 = authored)
 // 1 = the normal map is DXT5nm-swizzled (BC3: X in alpha, Y in green) —
 // reconstruct Z instead of reading xyz directly.
 uniform float uNormalSwizzled;
+uniform float uHasHeightMap;
+uniform float uHeightScale;
+uniform float uHasAoMap;
+uniform float uAoStrength;
 
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
@@ -139,9 +151,68 @@ void main()
     vec3 geoN = normalize(fragNormal);
     vec3 triW = TriplanarWeights(geoN);
     float ts = max(uTexScale, 0.001);
-    vec2 uvX = fragPosition.zy / ts; // project along X
-    vec2 uvY = fragPosition.xz / ts; // project along Y
-    vec2 uvZ = fragPosition.xy / ts; // project along Z
+
+    vec3 V = normalize(viewPos - fragPosition);
+
+    // Default world-space UV coordinates (fallback if uTriplanar <= 0.5)
+    vec2 uvMesh = fragTexCoord;
+
+    // Local-space triplanar coordinates and weights
+    vec2 uvX = vec2(0.0);
+    vec2 uvY = vec2(0.0);
+    vec2 uvZ = vec2(0.0);
+    vec3 norm = normalize(localNormal);
+    vec3 localPos = vec3(0.0);
+
+    if (uTriplanar > 0.5) {
+        triW = TriplanarWeights(norm);
+
+        localPos = localPosScaled;
+
+        // Project local coordinates along local axes
+        uvX = localPos.zy / ts; // project along X
+        if (vSwapUV > 0.5) {
+            uvY = localPos.zx / ts; // project along Y, swapped to align bricks along Z length
+        } else {
+            uvY = localPos.xz / ts; // project along Y, standard to align bricks along X length
+        }
+        uvZ = localPos.xy / ts; // project along Z
+
+        if (uHasHeightMap > 0.5) {
+            // Project view direction V into local space
+            vec3 V_local = vec3(dot(V, worldAxisX),
+                                dot(V, worldAxisY),
+                                dot(V, worldAxisZ));
+
+            float hX = texture(texture6, uvX).r;
+            float hY = texture(texture6, uvY).r;
+            float hZ = texture(texture6, uvZ).r;
+            float h = hX * triW.x + hY * triW.y + hZ * triW.z;
+
+            // Offset the local coordinates along the local view vector
+            vec3 offsetPos = localPos - V_local * ((1.0 - h) * uHeightScale);
+            uvX = offsetPos.zy / ts;
+            if (vSwapUV > 0.5) {
+                uvY = offsetPos.zx / ts;
+            } else {
+                uvY = offsetPos.xz / ts;
+            }
+            uvZ = offsetPos.xy / ts;
+        }
+    } else {
+        if (uHasHeightMap > 0.5) {
+            float tangentLen = length(fragTangent.xyz);
+            if (tangentLen > 0.1) {
+                vec3 T = fragTangent.xyz / tangentLen;
+                T = normalize(T - dot(T, geoN) * geoN);
+                vec3 B = cross(geoN, T) * fragTangent.w;
+                float h = texture(texture6, fragTexCoord).r;
+                vec3 viewDirTS = vec3(dot(T, V), dot(B, V), dot(geoN, V));
+                float denom = max(viewDirTS.z, 0.1);
+                uvMesh = fragTexCoord - (viewDirTS.xy / denom) * ((1.0 - h) * uHeightScale);
+            }
+        }
+    }
 
     vec4 tex;
     if (uTriplanar > 0.5) {
@@ -149,7 +220,7 @@ void main()
               texture(texture0, uvY) * triW.y +
               texture(texture0, uvZ) * triW.z;
     } else {
-        tex = texture(texture0, fragTexCoord);
+        tex = texture(texture0, uvMesh);
     }
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb;
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
@@ -157,15 +228,22 @@ void main()
     vec3 N = geoN;
     if (uHasNormalMap > 0.5) {
         if (uTriplanar > 0.5) {
-            // UDN blend: each projection's tangent-space bump is swizzled
-            // onto its axis plane and added to the geometric normal.
+            // UDN blend in local space
             vec3 tnX = SampleNormalMap(uvX);
             vec3 tnY = SampleNormalMap(uvY);
             vec3 tnZ = SampleNormalMap(uvZ);
+            
+            // Construct tangent-space bump on local planes
             vec3 bump = vec3(0.0, tnX.y, tnX.x) * triW.x +
                         vec3(tnY.x, 0.0, tnY.y) * triW.y +
                         vec3(tnZ.x, tnZ.y, 0.0) * triW.z;
-            N = normalize(geoN + bump * uNormalDepth);
+                        
+            vec3 N_local = normalize(norm + bump * uNormalDepth);
+            
+            // Transform the bumped local normal back to world space
+            N = normalize(N_local.x * worldAxisX +
+                          N_local.y * worldAxisY +
+                          N_local.z * worldAxisZ);
         } else {
             // Standard tangent-space path for models with authored UVs.
             float tangentLen = length(fragTangent.xyz);
@@ -173,7 +251,7 @@ void main()
                 vec3 T = fragTangent.xyz / tangentLen;
                 T = normalize(T - dot(T, geoN) * geoN);
                 vec3 B = cross(geoN, T) * fragTangent.w;
-                vec3 tn = SampleNormalMap(fragTexCoord);
+                vec3 tn = SampleNormalMap(uvMesh);
                 tn.xy *= uNormalDepth;
                 N = normalize(mat3(T, B, geoN) * tn);
             }
@@ -188,7 +266,6 @@ void main()
     float sunVis = (diff > 0.0) ? 1.0 - ShadowFactor(fragPosition, diff) : 0.0;
     diff *= sunVis;
 
-    vec3 V = normalize(viewPos - fragPosition);
     vec3 H = normalize(L + V);
     float spec = (diff > 0.0)
         ? pow(max(dot(N, H), 0.0), 48.0) * uSpecStrength * sunVis
@@ -212,11 +289,25 @@ void main()
         if (nl > 0.0) {
             vec3 Hp = normalize(Lp + V);
             pointSpec += uPointColor[i] *
-                         (pow(max(dot(N, Hp), 0.0), 48.0) * uSpecStrength * att);
+                          (pow(max(dot(N, Hp), 0.0), 48.0) * uSpecStrength * att);
         }
     }
 
-    vec3 color = albedo * (uAmbient + uSunColor * diff + pointDiff) +
+    // Ambient Occlusion
+    float ao = 1.0;
+    if (uHasAoMap > 0.5) {
+        if (uTriplanar > 0.5) {
+            float aoX = texture(texture4, uvX).r;
+            float aoY = texture(texture4, uvY).r;
+            float aoZ = texture(texture4, uvZ).r;
+            ao = aoX * triW.x + aoY * triW.y + aoZ * triW.z;
+        } else {
+            ao = texture(texture4, uvMesh).r;
+        }
+        ao = 1.0 - (1.0 - ao) * uAoStrength;
+    }
+
+    vec3 color = albedo * (uAmbient * ao + uSunColor * diff + pointDiff) +
                  uSunColor * spec + pointSpec;
 
     if (uLayerView == 1)      color = albedo;

@@ -39,6 +39,8 @@ typedef struct BrushRenderState {
   int locLinearize;
   int locTriplanar, locTexScale, locHasNormalMap, locNormalDepth;
   int locNormalSwizzled;
+  int locHasHeightMap, locHeightScale;
+  int locHasAoMap, locAoStrength;
   float specDefault; // uSpecStrength for draws without material props
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
@@ -92,6 +94,12 @@ void BrushRenderInit(int width, int height, float renderScale) {
   // raylib binds MATERIAL_MAP_NORMAL to whatever loc this maps to; without
   // it, per-draw normal maps would never reach the shader.
   g_r.lit.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(g_r.lit, "texture2");
+  g_r.lit.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(g_r.lit, "texture4");
+  g_r.lit.locs[SHADER_LOC_MAP_HEIGHT] = GetShaderLocation(g_r.lit, "texture6");
+  g_r.locHasHeightMap = GetShaderLocation(g_r.lit, "uHasHeightMap");
+  g_r.locHeightScale = GetShaderLocation(g_r.lit, "uHeightScale");
+  g_r.locHasAoMap = GetShaderLocation(g_r.lit, "uHasAoMap");
+  g_r.locAoStrength = GetShaderLocation(g_r.lit, "uAoStrength");
   g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
   g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
   g_r.locPointRadius = GetShaderLocation(g_r.lit, "uPointRadius");
@@ -267,6 +275,11 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   float normalSwizzled = (p && p->normalSwizzled) ? 1.0f : 0.0f;
   float spec = (p && p->specStrength >= 0.0f) ? p->specStrength
                                               : g_r.specDefault;
+  float hasHeight = (p && p->displacement.id != 0) ? 1.0f : 0.0f;
+  float heightScale = p ? p->heightScale : 0.05f;
+  float hasAo = (p && p->ao.id != 0) ? 1.0f : 0.0f;
+  float aoStrength = p ? p->aoStrength : 1.0f;
+
   SetShaderValue(g_r.lit, g_r.locTriplanar, &triplanar, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locTexScale, &texScale, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNormal,
@@ -276,6 +289,10 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   SetShaderValue(g_r.lit, g_r.locNormalSwizzled, &normalSwizzled,
                  SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHasHeightMap, &hasHeight, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHeightScale, &heightScale, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHasAoMap, &hasAo, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locAoStrength, &aoStrength, SHADER_UNIFORM_FLOAT);
 }
 
 // Draw a submitted command: the submitted matrix becomes the model transform
@@ -291,10 +308,14 @@ static void DrawCmd(const BrushDrawCmd *cmd) {
   Material *mat = &cmd->model->materials[0];
   Texture2D savedAlbedo = mat->maps[MATERIAL_MAP_DIFFUSE].texture;
   Texture2D savedNormal = mat->maps[MATERIAL_MAP_NORMAL].texture;
+  Texture2D savedOcclusion = mat->maps[MATERIAL_MAP_OCCLUSION].texture;
+  Texture2D savedHeight = mat->maps[MATERIAL_MAP_HEIGHT].texture;
   if (cmd->hasProps) {
     if (cmd->props.albedo.id != 0)
       mat->maps[MATERIAL_MAP_DIFFUSE].texture = cmd->props.albedo;
     mat->maps[MATERIAL_MAP_NORMAL].texture = cmd->props.normal;
+    mat->maps[MATERIAL_MAP_OCCLUSION].texture = cmd->props.ao;
+    mat->maps[MATERIAL_MAP_HEIGHT].texture = cmd->props.displacement;
   }
   Matrix saved = cmd->model->transform;
   cmd->model->transform = cmd->transform;
@@ -302,6 +323,8 @@ static void DrawCmd(const BrushDrawCmd *cmd) {
   cmd->model->transform = saved;
   mat->maps[MATERIAL_MAP_DIFFUSE].texture = savedAlbedo;
   mat->maps[MATERIAL_MAP_NORMAL].texture = savedNormal;
+  mat->maps[MATERIAL_MAP_OCCLUSION].texture = savedOcclusion;
+  mat->maps[MATERIAL_MAP_HEIGHT].texture = savedHeight;
 }
 
 static int CompareFarToNear(const void *a, const void *b) {

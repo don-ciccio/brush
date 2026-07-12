@@ -56,10 +56,14 @@ typedef struct BrushSceneMaterial {
   char name[BRUSH_SCENE_NAME_MAX];
   char albedo[128];
   char normal[128];
+  char displacement[128];
+  char ao[128];
   float tile;        // world metres per texture repeat
   float spec;        // specular strength (engine default 0.35)
   float normalDepth; // normal map intensity (1 = authored)
-  Texture2D albedoTex, normalTex; // resolved, not saved
+  float heightScale; // displacement scale strength (default 0.05)
+  float aoStrength;  // ambient occlusion strength (default 1.0)
+  Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
 } BrushSceneMaterial;
 
 typedef struct BrushSceneBlock {

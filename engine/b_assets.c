@@ -100,7 +100,8 @@ static void ImportParamsDefaults(BrushTexImportParams *p, const char *srcPath) {
   // profile so the sidecar starts correct.
   const char *name = GetFileName(srcPath);
   p->isNormalMap = (name != NULL && strstr(name, "normal") != NULL);
-  snprintf(p->compress, sizeof(p->compress), p->isNormalMap ? "bc3" : "bc1");
+  bool isDisplacement = (name != NULL && (strstr(name, "height") != NULL || strstr(name, "disp") != NULL));
+  snprintf(p->compress, sizeof(p->compress), p->isNormalMap ? "bc3" : (isDisplacement ? "none" : "bc1"));
 }
 
 // Load <src>.import; if absent, write it with defaults (Godot-style: the

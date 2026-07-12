@@ -45,19 +45,35 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     if (*p == '\0' || *p == '\n' || *p == '#') continue;
 
     int version;
-    float x, y, z, rx, ry, rz, sx, sy, sz, r, g, b, radius;
+    float x, y, z, h, a, rx, ry, rz, sx, sy, sz, r, g, b, radius;
     int ir, ig, ib, flicker, n;
-    char w1[256], w2[256], w3[256];
+    char w1[256], w2[256], w3[256], w4[256], w5[256];
 
     if (sscanf(p, "version %d", &version) == 1) {
-      if (version < 1 || version > 2)
+      if (version < 1 || version > 3)
         TraceLog(LOG_WARNING,
-                 "BRUSH scene: %s is version %d (engine reads 1-2)", path,
+                 "BRUSH scene: %s is version %d (engine reads 1-3)", path,
                  version);
     } else if (sscanf(p, "spawn %f %f %f", &x, &y, &z) == 3) {
       temp.spawn = (Vector3){x, y, z};
     } else if (sscanf(p, "time %f", &x) == 1) {
       temp.timeHours = x;
+    } else if (sscanf(p, "material %31s %255s %255s %255s %255s %f %f %f %f %f", w1, w2, w3, w4, w5, &x,
+                      &y, &z, &h, &a) == 10) {
+      if (temp.materialCount < BRUSH_SCENE_MAX_MATERIALS) {
+        BrushSceneMaterial *m = &temp.materials[temp.materialCount++];
+        memset(m, 0, sizeof(*m));
+        CopyField(m->name, sizeof(m->name), w1);
+        CopyField(m->albedo, sizeof(m->albedo), w2);
+        CopyField(m->normal, sizeof(m->normal), w3);
+        CopyField(m->displacement, sizeof(m->displacement), w4);
+        CopyField(m->ao, sizeof(m->ao), w5);
+        m->tile = (x > 0.01f) ? x : 1.0f;
+        m->spec = y;
+        m->normalDepth = z;
+        m->heightScale = h;
+        m->aoStrength = a;
+      }
     } else if (sscanf(p, "material %31s %255s %255s %f %f %f", w1, w2, w3, &x,
                       &y, &z) == 6) {
       if (temp.materialCount < BRUSH_SCENE_MAX_MATERIALS) {
@@ -69,6 +85,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         m->tile = (x > 0.01f) ? x : 1.0f;
         m->spec = y;
         m->normalDepth = z;
+        m->heightScale = 0.05f;
+        m->aoStrength = 1.0f;
       }
     } else if (sscanf(p, "post %23s %f", w1, &x) == 2) {
       if (temp.postCount < BRUSH_SCENE_MAX_POST) {
@@ -134,16 +152,17 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     return false;
   }
   fprintf(f, "# brush world definition (see engine/b_scene.h)\n");
-  fprintf(f, "version 2\n\n");
+  fprintf(f, "version 3\n\n");
   fprintf(f, "spawn %g %g %g\n", s->spawn.x, s->spawn.y, s->spawn.z);
   if (s->timeHours >= 0.0f) fprintf(f, "time %g\n", s->timeHours);
   if (s->materialCount > 0)
-    fprintf(f, "\n# material  name  albedo  normal  tile spec depth\n");
+    fprintf(f, "\n# material  name  albedo  normal  displacement  ao  tile spec depth scale aoStrength\n");
   for (int i = 0; i < s->materialCount; i++) {
     const BrushSceneMaterial *m = &s->materials[i];
-    fprintf(f, "material %s %s %s %g %g %g\n", m->name,
+    fprintf(f, "material %s %s %s %s %s %g %g %g %g %g\n", m->name,
             m->albedo[0] ? m->albedo : "-", m->normal[0] ? m->normal : "-",
-            m->tile, m->spec, m->normalDepth);
+            m->displacement[0] ? m->displacement : "-", m->ao[0] ? m->ao : "-",
+            m->tile, m->spec, m->normalDepth, m->heightScale, m->aoStrength);
   }
   fprintf(f, "\n# block  x y z  rx ry rz  sx sy sz  r g b  material\n");
   for (int i = 0; i < s->blockCount; i++) {
@@ -222,8 +241,12 @@ void BrushSceneUnloadMaterials(BrushScene *s) {
   for (int i = 0; i < s->materialCount; i++) {
     BrushAssetsReleaseTexture(s->materials[i].albedoTex);
     BrushAssetsReleaseTexture(s->materials[i].normalTex);
+    BrushAssetsReleaseTexture(s->materials[i].displacementTex);
+    BrushAssetsReleaseTexture(s->materials[i].aoTex);
     s->materials[i].albedoTex = (Texture2D){0};
     s->materials[i].normalTex = (Texture2D){0};
+    s->materials[i].displacementTex = (Texture2D){0};
+    s->materials[i].aoTex = (Texture2D){0};
   }
 }
 
@@ -235,6 +258,8 @@ void BrushSceneResolveMaterials(BrushScene *s) {
     BrushSceneMaterial *m = &s->materials[i];
     m->albedoTex = BrushAssetsTexture(m->albedo);
     m->normalTex = BrushAssetsTexture(m->normal);
+    m->displacementTex = BrushAssetsTexture(m->displacement);
+    m->aoTex = BrushAssetsTexture(m->ao);
     if (m->tile <= 0.01f) m->tile = 1.0f;
   }
 }
@@ -244,15 +269,19 @@ bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
   int mi = BrushSceneFindMaterial(s, k->material);
   if (mi < 0) return false;
   const BrushSceneMaterial *m = &s->materials[mi];
-  if (m->albedoTex.id == 0 && m->normalTex.id == 0) return false;
+  if (m->albedoTex.id == 0 && m->normalTex.id == 0 && m->displacementTex.id == 0 && m->aoTex.id == 0) return false;
   *out = (BrushMaterialProps){
       .albedo = m->albedoTex,
       .normal = m->normalTex,
+      .displacement = m->displacementTex,
+      .ao = m->aoTex,
       .triplanar = true,
       .normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex),
       .texScale = m->tile,
       .specStrength = m->spec,
       .normalDepth = m->normalDepth,
+      .heightScale = m->heightScale,
+      .aoStrength = m->aoStrength,
   };
   return true;
 }

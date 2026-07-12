@@ -105,13 +105,14 @@ run: $(SANDBOX)
 # app name to the bundle/process name — runtime renames don't stick).
 ifeq ($(UNAME_S),Darwin)
 EDITOR_APP = $(BUILD_DIR)/Brush.app
-run-editor: $(EDITOR)
+run-editor: $(EDITOR) $(SANDBOX)
 	@mkdir -p $(EDITOR_APP)/Contents/MacOS
 	@cp editor/Info.plist $(EDITOR_APP)/Contents/Info.plist
 	@cp $(EDITOR) $(EDITOR_APP)/Contents/MacOS/Brush
+	@codesign -s - -f $(EDITOR_APP)/Contents/MacOS/Brush
 	./$(EDITOR_APP)/Contents/MacOS/Brush
 else
-run-editor: $(EDITOR)
+run-editor: $(EDITOR) $(SANDBOX)
 	./$(EDITOR)
 endif
 
