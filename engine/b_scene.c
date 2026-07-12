@@ -117,15 +117,17 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
             .color = {(unsigned char)ir, (unsigned char)ig, (unsigned char)ib, 255},
         };
       }
-    } else if ((n = sscanf(p, "model %255s %f %f %f %f %f %f %f %f %f", w2,
-                           &x, &y, &z, &rx, &ry, &rz, &sx, &sy, &sz)) >= 7) {
+    } else if ((n = sscanf(p, "model %255s %f %f %f %f %f %f %f %f %f %31s",
+                           w2, &x, &y, &z, &rx, &ry, &rz, &sx, &sy, &sz,
+                           w1)) >= 7) {
       if (temp.modelCount < BRUSH_SCENE_MAX_MODELS) {
         BrushSceneModelInstance *mi = &temp.models[temp.modelCount++];
         memset(mi, 0, sizeof(*mi));
         CopyField(mi->path, sizeof(mi->path), w2);
         mi->pos = (Vector3){x, y, z};
         mi->rot = (Vector3){rx, ry, rz};
-        mi->scale = (n == 10) ? (Vector3){sx, sy, sz} : (Vector3){1, 1, 1};
+        mi->scale = (n >= 10) ? (Vector3){sx, sy, sz} : (Vector3){1, 1, 1};
+        if (n == 11) CopyField(mi->material, sizeof(mi->material), w1);
       }
     } else if (sscanf(p, "light %f %f %f %f %f %f %f %d", &x, &y, &z, &r, &g,
                       &b, &radius, &flicker) == 8) {
@@ -183,12 +185,13 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
             k->material[0] ? k->material : "-");
   }
   if (s->modelCount > 0)
-    fprintf(f, "\n# model  path  x y z  rx ry rz  sx sy sz\n");
+    fprintf(f, "\n# model  path  x y z  rx ry rz  sx sy sz  material\n");
   for (int i = 0; i < s->modelCount; i++) {
     const BrushSceneModelInstance *mi = &s->models[i];
-    fprintf(f, "model %s  %g %g %g  %g %g %g  %g %g %g\n", mi->path,
+    fprintf(f, "model %s  %g %g %g  %g %g %g  %g %g %g  %s\n", mi->path,
             mi->pos.x, mi->pos.y, mi->pos.z, mi->rot.x, mi->rot.y, mi->rot.z,
-            mi->scale.x, mi->scale.y, mi->scale.z);
+            mi->scale.x, mi->scale.y, mi->scale.z,
+            mi->material[0] ? mi->material : "-");
   }
   fprintf(f, "\n# light  x y z  r g b (linear)  radius  flicker\n");
   for (int i = 0; i < s->lightCount; i++) {
@@ -308,9 +311,11 @@ void BrushSceneResolveMaterials(BrushScene *s) {
   }
 }
 
-bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
+// Build submit props from a material table entry (shared by blocks and
+// placed models).
+static bool MaterialProps(const BrushScene *s, const char *name,
                           BrushMaterialProps *out) {
-  int mi = BrushSceneFindMaterial(s, k->material);
+  int mi = BrushSceneFindMaterial(s, name);
   if (mi < 0) return false;
   const BrushSceneMaterial *m = &s->materials[mi];
   if (m->albedoTex.id == 0 && m->normalTex.id == 0 && m->displacementTex.id == 0 && m->aoTex.id == 0) return false;
@@ -328,6 +333,17 @@ bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
       .aoStrength = m->aoStrength,
   };
   return true;
+}
+
+bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
+                          BrushMaterialProps *out) {
+  return MaterialProps(s, k->material, out);
+}
+
+bool BrushSceneModelProps(const BrushScene *s,
+                          const BrushSceneModelInstance *m,
+                          BrushMaterialProps *out) {
+  return MaterialProps(s, m->material, out);
 }
 
 // --- Persisted render settings -------------------------------------------------

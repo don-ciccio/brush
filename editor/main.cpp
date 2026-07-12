@@ -1251,7 +1251,10 @@ int main(int argc, char **argv) {
             BrushSceneModelInstance *mi = &g_scene.models[i];
             if (mi->model.meshCount == 0) continue;
             Matrix mxf = BrushModelInstanceMatrix(mi);
-            BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE);
+            BrushMaterialProps mprops;
+            bool hasMMat = BrushSceneModelProps(&g_scene, mi, &mprops);
+            BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE,
+                                hasMMat ? &mprops : NULL);
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, mxf, WHITE);
         }
 
@@ -1652,6 +1655,24 @@ int main(int argc, char **argv) {
                         snprintf(mi->path, sizeof(mi->path), "%s", g_assetFiles[i]);
                         BrushSceneResolveMaterials(&g_scene);
                         mchanged = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            // Optional material (same library as blocks): triplanar wrap.
+            const char *mmatPreview = mi->material[0] ? mi->material : "(model's own)";
+            if (ImGui::BeginCombo("Material", mmatPreview)) {
+                if (ImGui::Selectable("(model's own)", mi->material[0] == '\0') &&
+                    mi->material[0] != '\0') {
+                    mi->material[0] = '\0';
+                    g_dirty = true;
+                }
+                for (int i = 0; i < g_scene.materialCount; i++) {
+                    const char *mn = g_scene.materials[i].name;
+                    bool sel = (strcmp(mi->material, mn) == 0);
+                    if (ImGui::Selectable(mn, sel) && !sel) {
+                        snprintf(mi->material, sizeof(mi->material), "%s", mn);
+                        g_dirty = true;
                     }
                 }
                 ImGui::EndCombo();

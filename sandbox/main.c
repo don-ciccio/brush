@@ -733,7 +733,10 @@ static void SandboxDraw(void *user) {
     BrushSceneModelInstance *mi = &s->scene.models[i];
     if (mi->model.meshCount == 0) continue;
     Matrix xf = BrushModelInstanceMatrix(mi);
-    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &mi->model, xf, WHITE);
+    BrushMaterialProps mprops;
+    bool hasMat = BrushSceneModelProps(&s->scene, mi, &mprops);
+    BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, xf, WHITE,
+                        hasMat ? &mprops : NULL);
     BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, xf, WHITE);
   }
 

@@ -299,32 +299,51 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
 // for exactly this draw (the model's own transform is saved/restored). Mesh
 // commands (model == NULL) draw a raw mesh+material directly. Material props
 // temporarily retarget the model's texture maps (shared unit-cube pattern).
+// Per-draw material props retarget the texture maps of EVERY material on
+// the model, not just index 0: glTF loads prepend raylib's default material
+// at 0, so real meshes reference materials 1..N — overriding only [0] would
+// silently do nothing for them.
+#define DRAWCMD_MAX_MATERIALS 8
+
 static void DrawCmd(const BrushDrawCmd *cmd) {
   ApplyMaterialProps(cmd);
   if (cmd->model == NULL) {
     DrawMesh(cmd->mesh, *cmd->material, cmd->transform);
     return;
   }
-  Material *mat = &cmd->model->materials[0];
-  Texture2D savedAlbedo = mat->maps[MATERIAL_MAP_DIFFUSE].texture;
-  Texture2D savedNormal = mat->maps[MATERIAL_MAP_NORMAL].texture;
-  Texture2D savedOcclusion = mat->maps[MATERIAL_MAP_OCCLUSION].texture;
-  Texture2D savedHeight = mat->maps[MATERIAL_MAP_HEIGHT].texture;
+  int matCount = cmd->model->materialCount;
+  if (matCount > DRAWCMD_MAX_MATERIALS) matCount = DRAWCMD_MAX_MATERIALS;
+  Texture2D savedAlbedo[DRAWCMD_MAX_MATERIALS];
+  Texture2D savedNormal[DRAWCMD_MAX_MATERIALS];
+  Texture2D savedOcclusion[DRAWCMD_MAX_MATERIALS];
+  Texture2D savedHeight[DRAWCMD_MAX_MATERIALS];
   if (cmd->hasProps) {
-    if (cmd->props.albedo.id != 0)
-      mat->maps[MATERIAL_MAP_DIFFUSE].texture = cmd->props.albedo;
-    mat->maps[MATERIAL_MAP_NORMAL].texture = cmd->props.normal;
-    mat->maps[MATERIAL_MAP_OCCLUSION].texture = cmd->props.ao;
-    mat->maps[MATERIAL_MAP_HEIGHT].texture = cmd->props.displacement;
+    for (int i = 0; i < matCount; i++) {
+      Material *mat = &cmd->model->materials[i];
+      savedAlbedo[i] = mat->maps[MATERIAL_MAP_DIFFUSE].texture;
+      savedNormal[i] = mat->maps[MATERIAL_MAP_NORMAL].texture;
+      savedOcclusion[i] = mat->maps[MATERIAL_MAP_OCCLUSION].texture;
+      savedHeight[i] = mat->maps[MATERIAL_MAP_HEIGHT].texture;
+      if (cmd->props.albedo.id != 0)
+        mat->maps[MATERIAL_MAP_DIFFUSE].texture = cmd->props.albedo;
+      mat->maps[MATERIAL_MAP_NORMAL].texture = cmd->props.normal;
+      mat->maps[MATERIAL_MAP_OCCLUSION].texture = cmd->props.ao;
+      mat->maps[MATERIAL_MAP_HEIGHT].texture = cmd->props.displacement;
+    }
   }
   Matrix saved = cmd->model->transform;
   cmd->model->transform = cmd->transform;
   DrawModel(*cmd->model, (Vector3){0, 0, 0}, 1.0f, cmd->tint);
   cmd->model->transform = saved;
-  mat->maps[MATERIAL_MAP_DIFFUSE].texture = savedAlbedo;
-  mat->maps[MATERIAL_MAP_NORMAL].texture = savedNormal;
-  mat->maps[MATERIAL_MAP_OCCLUSION].texture = savedOcclusion;
-  mat->maps[MATERIAL_MAP_HEIGHT].texture = savedHeight;
+  if (cmd->hasProps) {
+    for (int i = 0; i < matCount; i++) {
+      Material *mat = &cmd->model->materials[i];
+      mat->maps[MATERIAL_MAP_DIFFUSE].texture = savedAlbedo[i];
+      mat->maps[MATERIAL_MAP_NORMAL].texture = savedNormal[i];
+      mat->maps[MATERIAL_MAP_OCCLUSION].texture = savedOcclusion[i];
+      mat->maps[MATERIAL_MAP_HEIGHT].texture = savedHeight[i];
+    }
+  }
 }
 
 static int CompareFarToNear(const void *a, const void *b) {

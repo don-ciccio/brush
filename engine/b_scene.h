@@ -76,6 +76,7 @@ typedef struct BrushSceneModelInstance {
   Vector3 pos;
   Vector3 rot;   // Euler degrees, same convention as blocks
   Vector3 scale; // per-axis; (1,1,1) default
+  char material[BRUSH_SCENE_NAME_MAX]; // "" = the model's own textures
   Model model;   // resolved at runtime (meshCount 0 until then), not saved
 } BrushSceneModelInstance;
 
@@ -154,6 +155,13 @@ void BrushSceneUnloadMaterials(BrushScene *s);
 // Fill `out` with the submit-ready props for a block's material. False if
 // the block has no material (or the name is unresolved) — submit plain.
 bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
+                          BrushMaterialProps *out);
+
+// Same, for a placed model's optional material (triplanar projection wraps
+// the mesh — good for rocks/organic props). False = draw the model plain
+// (its own embedded textures, if any).
+bool BrushSceneModelProps(const BrushScene *s,
+                          const BrushSceneModelInstance *m,
                           BrushMaterialProps *out);
 
 // --- Persisted render settings ("post" lines) --------------------------------

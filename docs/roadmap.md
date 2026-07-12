@@ -175,9 +175,12 @@ F. ~~Model assets~~ — DONE (2026-07): ref-counted model registry in
    inspector (mesh swap combo), picking via per-instance body maps,
    drag-from-Assets-panel into the viewport (raycast placement), .glb/.obj
    OS-drop import into assets/models; packs into game.pak (ship .glb —
-   .gltf external buffers bypass the pak hooks). STILL TODO: materials on
-   models (own normal maps need per-material props), cooked shape caching
-   per (path,scale), frustum culling for instances.
+   .gltf external buffers bypass the pak hooks). Model instances can wear a
+   library material (triplanar wrap — `model ... [material]`, Inspector
+   combo; the per-draw override retargets EVERY material slot, raylib's
+   index-0 default included); models without one draw their own embedded
+   textures. STILL TODO: embedded normal-map detection (per-material
+   props), cooked shape caching per (path,scale), instance frustum cull.
 G. **Terrain texture painting**: splat-weight overlay riding the sculpt
    tile machinery (same rebake/undo/save), 4-way blend in the terrain
    path, paint brush in the editor sculpt mode.
