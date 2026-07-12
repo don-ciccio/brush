@@ -1572,10 +1572,32 @@ int main(int argc, char **argv) {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        float w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        float w = (ImGui::GetContentRegionAvail().x -
+                   ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
         if (ImGui::Button("+ Block", ImVec2(w, 0))) AddBlockEntity();
         ImGui::SameLine();
         if (ImGui::Button("+ Light", ImVec2(w, 0))) AddLightEntity();
+        ImGui::SameLine();
+        // Models are file-backed: the button is the quick-add path (a picker
+        // over the project's model files, placed in front of the camera);
+        // dragging from the Assets panel into the viewport stays the
+        // precise-placement flow, like Unity/Unreal/Godot.
+        if (ImGui::Button("+ Model", ImVec2(w, 0)))
+            ImGui::OpenPopup("##addmodel");
+        if (ImGui::BeginPopup("##addmodel")) {
+            int shown = 0;
+            for (int i = 0; i < g_assetFileCount; i++) {
+                if (!IsModelAsset(g_assetFiles[i])) continue;
+                shown++;
+                if (ImGui::Selectable(GetFileName(g_assetFiles[i]))) {
+                    AddModelEntityAt(g_assetFiles[i], SpawnPointInFront());
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            if (shown == 0)
+                ImGui::TextDisabled("No models — drop .glb files\nonto the window to import.");
+            ImGui::EndPopup();
+        }
         ImGui::End();
 
         // === Inspector =======================================================
