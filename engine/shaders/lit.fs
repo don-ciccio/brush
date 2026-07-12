@@ -55,6 +55,10 @@ uniform sampler2D uLayerAlbedo3;
 uniform sampler2D uLayerNormal1;
 uniform sampler2D uLayerNormal2;
 uniform sampler2D uLayerNormal3;
+uniform sampler2D uLayerHeight;  // displacement of the ONE POM terrain layer
+uniform int   uPomLayer;         // splat slot that gets POM (-1 = none)
+uniform float uPomTile;          // that layer's tile
+uniform float uPomScale;         // that layer's displacement scale
 uniform vec2 uSplatOrigin; // chunk world origin (xz)
 uniform float uSplatSize;  // chunk world size (m)
 uniform float uSplatRes;   // splat texture resolution per side
@@ -373,18 +377,34 @@ void main()
         // the cheap single XZ projection.
         bool steep = (geoN.y < 0.85);
         vec3 wp = fragPosition;
-        vec3 a = SampleLayer(texture0, uLayerTiles.x, wp, triW, steep) * sw.r;
-        if (uLayerCount > 1) a += SampleLayer(uLayerAlbedo1, uLayerTiles.y, wp, triW, steep) * sw.g;
-        if (uLayerCount > 2) a += SampleLayer(uLayerAlbedo2, uLayerTiles.z, wp, triW, steep) * sw.b;
-        if (uLayerCount > 3) a += SampleLayer(uLayerAlbedo3, uLayerTiles.w, wp, triW, steep) * sw.a;
+
+        // Terrain-layer POM (e.g. a paving road): ray-march the ONE flagged
+        // layer's displacement on FLAT ground (paved roads aren't cliffs) and
+        // shift its sample position. Distance-faded; the other layers stay put.
+        vec3 wpPom = wp;
+        if (uPomLayer >= 0 && !steep) {
+            float pomFade = 1.0 - smoothstep(12.0, 24.0, length(viewPos - fragPosition));
+            if (pomFade > 0.0) {
+                vec2 uv = wp.xz / uPomTile;                 // planar-XZ tile UV
+                vec3 vts = vec3(V.x, V.z, V.y);             // world XZ tangent frame
+                vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uPomScale);
+                wpPom.xz = wp.xz + (pomUV - uv) * uPomTile * pomFade;
+            }
+        }
+        #define WP(i) ((uPomLayer == (i)) ? wpPom : wp)
+        vec3 a = SampleLayer(texture0, uLayerTiles.x, WP(0), triW, steep) * sw.r;
+        if (uLayerCount > 1) a += SampleLayer(uLayerAlbedo1, uLayerTiles.y, WP(1), triW, steep) * sw.g;
+        if (uLayerCount > 2) a += SampleLayer(uLayerAlbedo2, uLayerTiles.z, WP(2), triW, steep) * sw.b;
+        if (uLayerCount > 3) a += SampleLayer(uLayerAlbedo3, uLayerTiles.w, WP(3), triW, steep) * sw.a;
         albedo = a; // vertex colour/tint intentionally excluded
 
         if (uHasNormalMap > 0.5) {
-            splatBump = SampleLayerBump(texture2, uLayerTiles.x, wp, triW, uLayerSwizzled.x, steep) * sw.r;
-            if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, wp, triW, uLayerSwizzled.y, steep) * sw.g;
-            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, wp, triW, uLayerSwizzled.z, steep) * sw.b;
-            if (uLayerCount > 3) splatBump += SampleLayerBump(uLayerNormal3, uLayerTiles.w, wp, triW, uLayerSwizzled.w, steep) * sw.a;
+            splatBump = SampleLayerBump(texture2, uLayerTiles.x, WP(0), triW, uLayerSwizzled.x, steep) * sw.r;
+            if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, WP(1), triW, uLayerSwizzled.y, steep) * sw.g;
+            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, WP(2), triW, uLayerSwizzled.z, steep) * sw.b;
+            if (uLayerCount > 3) splatBump += SampleLayerBump(uLayerNormal3, uLayerTiles.w, WP(3), triW, uLayerSwizzled.w, steep) * sw.a;
         }
+        #undef WP
     }
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 

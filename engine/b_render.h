@@ -163,8 +163,11 @@ void BrushRenderSubmitEx(BrushLayer layer, Model *model, Matrix transform,
 typedef struct BrushTerrainLayer {
   Texture2D albedo;
   Texture2D normal;    // id 0 = flat
+  Texture2D displacement; // id 0 = none (only used if parallax)
   float tile;          // world metres per texture repeat
+  float heightScale;   // parallax displacement scale
   bool normalSwizzled; // DXT5nm-cooked normal map
+  bool parallax;       // ray-march this layer's displacement (POM) on flat ground
 } BrushTerrainLayer;
 
 typedef struct BrushSplatDraw {

@@ -46,6 +46,7 @@ typedef struct BrushRenderState {
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
+  int locPomLayer, locPomTile, locPomScale;
   float specDefault; // uSpecStrength for draws without material props
   float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
@@ -118,6 +119,9 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerHeightOn = GetShaderLocation(g_r.lit, "uLayerHeightOn");
   g_r.locLayerHeightStart = GetShaderLocation(g_r.lit, "uLayerHeightStart");
   g_r.locLayerHeightFull = GetShaderLocation(g_r.lit, "uLayerHeightFull");
+  g_r.locPomLayer = GetShaderLocation(g_r.lit, "uPomLayer");
+  g_r.locPomTile = GetShaderLocation(g_r.lit, "uPomTile");
+  g_r.locPomScale = GetShaderLocation(g_r.lit, "uPomScale");
   // Splat samplers live on FIXED texture units chosen to dodge raylib's
   // material binds (0=diffuse, 2=normal) and the shadow cascades (10..12):
   // splat=1, layer albedos 1..3 = 3,4,5, layer normals 1..3 = 6,7,8.
@@ -131,6 +135,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
     u = 6; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal1"), &u, SHADER_UNIFORM_INT);
     u = 7; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal2"), &u, SHADER_UNIFORM_INT);
     u = 8; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal3"), &u, SHADER_UNIFORM_INT);
+    u = 9; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerHeight"), &u, SHADER_UNIFORM_INT);
   }
   g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
   g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
@@ -382,6 +387,18 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
       rlEnableTexture(sp->layers[i].normal.id);
     }
   }
+  // POM: the first layer flagged for parallax WITH a displacement map gets its
+  // height bound to the one free unit (9). Only one layer POMs (4x is absurd).
+  int pomLayer = -1;
+  for (int i = 0; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++)
+    if (sp->layers[i].parallax && sp->layers[i].displacement.id != 0) {
+      pomLayer = i;
+      break;
+    }
+  if (pomLayer >= 0) {
+    rlActiveTextureSlot(9);
+    rlEnableTexture(sp->layers[pomLayer].displacement.id);
+  }
   rlActiveTextureSlot(0);
 
   float on = 1.0f;
@@ -419,6 +436,11 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNrm, SHADER_UNIFORM_FLOAT);
+  float pomTile = pomLayer >= 0 ? tiles[pomLayer] : 1.0f;
+  float pomScale = pomLayer >= 0 ? sp->layers[pomLayer].heightScale : 0.05f;
+  SetShaderValue(g_r.lit, g_r.locPomLayer, &pomLayer, SHADER_UNIFORM_INT);
+  SetShaderValue(g_r.lit, g_r.locPomTile, &pomTile, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locPomScale, &pomScale, SHADER_UNIFORM_FLOAT);
   // Matte terrain: override the prop-default specular ApplyMaterialProps set
   // (runs before this) so grass/dirt don't get a plasticky sun sheen.
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.terrainSpec,

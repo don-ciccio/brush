@@ -433,8 +433,11 @@ int BrushSceneTerrainLayers(const BrushScene *s,
     if (m->albedoTex.id == 0) continue;
     out[i].albedo = m->albedoTex;
     out[i].normal = m->normalTex;
+    out[i].displacement = m->displacementTex;
     out[i].tile = (m->tile > 0.01f) ? m->tile : 1.0f;
+    out[i].heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
     out[i].normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
+    out[i].parallax = m->parallax;
     count = i + 1;
   }
   return count;
