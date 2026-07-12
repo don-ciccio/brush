@@ -28,7 +28,10 @@ the placement/scene/editor surface already shipped.
   means `uHasNormalMap = 0`, so a model that SHIPS its own normal map never
   gets normal-mapped even once tangents exist.
 
-## Phase P1 — Correct rendering (tangents + embedded normals)
+> **Status (2026-07-12):** P1, P2, P3 DONE and headless-verified (commits
+> 813400a, a5f4792, 3b1ee95). P2.3 (async cook) and all of P4 remain deferred.
+
+## Phase P1 — Correct rendering (tangents + embedded normals) — DONE
 
 ### P1.1 Indexed tangent generation
 Replace the unindexed-only guard with a correct per-vertex generator
@@ -58,7 +61,7 @@ downloaded assets).
 **Proof**: a glTF rock/prop with a packed normal map lights with surface
 detail (F2 normals view shows per-texel normals, not faceted geometry).
 
-## Phase P2 — Shape caching (cook once, share)
+## Phase P2 — Shape caching (cook once, share) — DONE (P2.3 deferred)
 
 The redesign that lets N instances of one model share one BVH:
 
@@ -97,7 +100,7 @@ first-time unique cooks, worth hiding for scenes with many distinct props.
 K bodies; collision still exact (character stands on each); scene-load
 frame time flat vs. today's per-instance spike.
 
-## Phase P3 — Instance culling
+## Phase P3 — Instance culling — DONE
 
 ### P3.1 Per-model bounds
 Cache each model's local AABB (`GetModelBoundingBox` at load) in the
