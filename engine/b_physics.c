@@ -276,17 +276,54 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh, Matrix transfo
     return BrushPhysicsAddStaticShape(pw, shape, userData, tag);
 }
 
-int BrushPhysicsAddStaticModel(BrushPhysics *pw, const Model *model,
-                               Matrix transform, int userData,
-                               const char *tag, JPH_BodyID *out, int outCap) {
-    if (!pw || !pw->bodyInterface || model == NULL) return 0;
-    int count = 0;
-    for (int i = 0; i < model->meshCount && count < outCap; i++) {
-        JPH_BodyID id = BrushPhysicsAddStaticMesh(pw, model->meshes[i],
-                                                  transform, userData, tag);
-        if (id != BRUSH_BODY_INVALID) out[count++] = id;
+JPH_BodyID BrushPhysicsAddStaticShapeAt(BrushPhysics *pw, JPH_Shape *base,
+                                        Vector3 position, Vector3 rotationEuler,
+                                        Vector3 scale, int userData,
+                                        const char *tag) {
+    if (!pw || !pw->bodyInterface || !base) return BRUSH_BODY_INVALID;
+
+    // Clamp degenerate instance scales away from 0 (Jolt asserts on ~0 scale).
+    const float eps = 1e-4f;
+    Vector3 s = scale;
+    if (fabsf(s.x) < eps) s.x = (s.x < 0.0f) ? -eps : eps;
+    if (fabsf(s.y) < eps) s.y = (s.y < 0.0f) ? -eps : eps;
+    if (fabsf(s.z) < eps) s.z = (s.z < 0.0f) ? -eps : eps;
+
+    // Unit scale uses the shared base directly; otherwise wrap it (the wrapper
+    // takes its own +1 on the base, so the base outlives this body).
+    bool unit = fabsf(s.x - 1.0f) < eps && fabsf(s.y - 1.0f) < eps &&
+                fabsf(s.z - 1.0f) < eps;
+    JPH_ScaledShape *scaled = NULL;
+    const JPH_Shape *shape = base;
+    if (!unit) {
+        JPH_Vec3 js = { s.x, s.y, s.z };
+        scaled = JPH_ScaledShape_Create(base, &js);
+        shape = (const JPH_Shape *)scaled;
     }
-    return count;
+
+    JPH_RVec3 pos = { position.x, position.y, position.z };
+    // Euler XYZ order — must match BrushEulerXYZ (b_scene) / BrushModelInstance-
+    // Matrix, or the collider diverges from the rendered model.
+    Matrix rm = MatrixMultiply(MatrixMultiply(MatrixRotateX(rotationEuler.x * DEG2RAD),
+                                              MatrixRotateY(rotationEuler.y * DEG2RAD)),
+                               MatrixRotateZ(rotationEuler.z * DEG2RAD));
+    Quaternion q = QuaternionFromMatrix(rm);
+    JPH_Quat rot = { q.x, q.y, q.z, q.w };
+    JPH_BodyCreationSettings *bodySettings = JPH_BodyCreationSettings_Create3(
+        shape, &pos, &rot, JPH_MotionType_Static, BRUSH_PHYS_LAYER_STATIC);
+    JPH_BodyCreationSettings_SetUserData(bodySettings, (uint64_t)userData);
+    JPH_BodyID bodyID = JPH_BodyInterface_CreateAndAddBody(
+        pw->bodyInterface, bodySettings, JPH_Activation_DontActivate);
+    JPH_BodyCreationSettings_Destroy(bodySettings);
+
+    // The body holds its own reference on `shape`. Drop our ScaledShape ref (if
+    // any) — the body keeps it alive; the cached BASE is never touched here.
+    if (scaled) JPH_Shape_Destroy((JPH_Shape *)scaled);
+
+    if (bodyID == BRUSH_BODY_INVALID)
+        TraceLog(LOG_WARNING, "JoltC: Failed to place static shape '%s'",
+                 tag ? tag : "unnamed");
+    return bodyID;
 }
 
 JPH_BodyID BrushPhysicsAddTriggerBox(BrushPhysics *pw, Vector3 position, Vector3 size, int userData, const char *tag) {

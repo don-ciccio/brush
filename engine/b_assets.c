@@ -25,6 +25,8 @@
 
 #include <rlgl.h>
 
+#include "b_physics.h" // model collision-shape cache (cook + JPH_Shape refs)
+
 #define STB_DXT_IMPLEMENTATION
 #define STB_DXT_STATIC
 #include "../external/stb/stb_dxt.h"
@@ -990,11 +992,81 @@ Model BrushAssetsModel(const char *path) {
   return e->model;
 }
 
+// --- Model collision-shape cache ----------------------------------------------
+// One cooked base shape per (path, meshIndex), shared by every instance of the
+// model. Cooked in the model's LOCAL space (its base transform baked, instance
+// transform not) so callers place it per instance via
+// BrushPhysicsAddStaticShapeAt. Model lifetime: freed when the model unloads or
+// at shutdown. Bodies hold their own Jolt refs, so removing a body never
+// invalidates the cache. A cached NULL means "known uncookable" (won't retry).
+
+#define BRUSH_ASSETS_MAX_SHAPES 256
+
+typedef struct ShapeEntry {
+  char path[BRUSH_ASSETS_PATH_MAX];
+  int meshIndex;
+  JPH_Shape *shape; // NULL = negative-cached
+} ShapeEntry;
+
+static ShapeEntry g_shapes[BRUSH_ASSETS_MAX_SHAPES];
+static int g_shapeCount = 0;
+
+JPH_Shape *BrushAssetsModelShape(const char *path, int meshIndex) {
+  if (path == NULL || path[0] == '\0' || meshIndex < 0) return NULL;
+
+  for (int i = 0; i < g_shapeCount; i++)
+    if (g_shapes[i].meshIndex == meshIndex &&
+        strcmp(g_shapes[i].path, path) == 0)
+      return g_shapes[i].shape; // borrowed (NULL = known uncookable)
+
+  ModelEntry *me = NULL;
+  for (int i = 0; i < g_modelCount; i++)
+    if (strcmp(g_models[i].path, path) == 0) {
+      me = &g_models[i];
+      break;
+    }
+  if (me == NULL || me->model.meshCount == 0) {
+    TraceLog(LOG_WARNING, "ASSETS: collision shape requested for non-resident model %s", path);
+    return NULL;
+  }
+  if (meshIndex >= me->model.meshCount) return NULL;
+  if (g_shapeCount >= BRUSH_ASSETS_MAX_SHAPES) {
+    TraceLog(LOG_WARNING, "ASSETS: shape cache full (%d)", BRUSH_ASSETS_MAX_SHAPES);
+    return NULL;
+  }
+
+  // Bake the model's own base transform (glTF axis/node conversion) so the
+  // shape is shared across instances; the instance transform is applied later
+  // by the body/ScaledShape. Runs once per unique mesh (the expensive cook).
+  JPH_Shape *shape = BrushPhysicsCookMeshShape(me->model.meshes[meshIndex],
+                                               me->model.transform);
+  TraceLog(LOG_INFO, "ASSETS: cooked collision shape %s[mesh %d] (%d tris)",
+           path, meshIndex, me->model.meshes[meshIndex].triangleCount);
+  ShapeEntry *e = &g_shapes[g_shapeCount++];
+  memset(e, 0, sizeof(*e));
+  strncpy(e->path, path, sizeof(e->path) - 1);
+  e->meshIndex = meshIndex;
+  e->shape = shape;
+  return shape;
+}
+
+static void ReleaseModelShapes(const char *path) {
+  for (int i = 0; i < g_shapeCount;) {
+    if (strcmp(g_shapes[i].path, path) == 0) {
+      if (g_shapes[i].shape) BrushPhysicsReleaseShape(g_shapes[i].shape);
+      g_shapes[i] = g_shapes[--g_shapeCount]; // swap-remove
+    } else {
+      i++;
+    }
+  }
+}
+
 void BrushAssetsReleaseModel(const char *path) {
   if (path == NULL || path[0] == '\0') return;
   for (int i = 0; i < g_modelCount; i++) {
     if (strcmp(g_models[i].path, path) != 0) continue;
     if (--g_models[i].refs > 0) return;
+    ReleaseModelShapes(g_models[i].path); // free cooked shapes (Jolt still up)
     if (g_models[i].model.meshCount > 0) UnloadModel(g_models[i].model);
     TraceLog(LOG_DEBUG, "ASSETS: unloaded model %s", g_models[i].path);
     g_models[i] = g_models[--g_modelCount]; // swap-remove
@@ -1032,6 +1104,11 @@ void BrushAssetsShutdown(void) {
   for (int i = 0; i < g_texCount; i++)
     if (g_tex[i].tex.id != 0) UnloadTexture(g_tex[i].tex);
   g_texCount = 0;
+  // Free cooked collision shapes first — the caller must run this before
+  // BrushPhysicsCleanup (JPH_Shutdown), or destroying a shape here is unsafe.
+  for (int i = 0; i < g_shapeCount; i++)
+    if (g_shapes[i].shape) BrushPhysicsReleaseShape(g_shapes[i].shape);
+  g_shapeCount = 0;
   for (int i = 0; i < g_modelCount; i++)
     if (g_models[i].model.meshCount > 0) UnloadModel(g_models[i].model);
   g_modelCount = 0;

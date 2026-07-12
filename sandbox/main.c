@@ -237,14 +237,19 @@ static void ApplySceneColliders(Sandbox *s) {
   for (int i = 0; i < s->modelBodyCount; i++)
     BrushPhysicsRemoveBody(&s->phys, s->modelBodies[i]);
   s->modelBodyCount = 0;
+  int cap = (int)(sizeof(s->modelBodies) / sizeof(s->modelBodies[0]));
   for (int i = 0; i < s->scene.modelCount; i++) {
     BrushSceneModelInstance *mi = &s->scene.models[i];
     if (mi->model.meshCount == 0) continue; // unresolved: no collision
-    s->modelBodyCount += BrushPhysicsAddStaticModel(
-        &s->phys, &mi->model, BrushModelInstanceMatrix(mi), i, "model",
-        s->modelBodies + s->modelBodyCount,
-        (int)(sizeof(s->modelBodies) / sizeof(s->modelBodies[0])) -
-            s->modelBodyCount);
+    // One shared cooked shape per mesh (BrushAssetsModelShape), placed per
+    // instance — N copies of a model cook one BVH, not N.
+    for (int m = 0; m < mi->model.meshCount && s->modelBodyCount < cap; m++) {
+      JPH_Shape *base = BrushAssetsModelShape(mi->path, m);
+      if (base == NULL) continue;
+      JPH_BodyID id = BrushPhysicsAddStaticShapeAt(&s->phys, base, mi->pos,
+                                                   mi->rot, mi->scale, i, "model");
+      if (id != BRUSH_BODY_INVALID) s->modelBodies[s->modelBodyCount++] = id;
+    }
   }
 }
 
@@ -352,6 +357,31 @@ static void SandboxInit(void *user) {
     }
     BrushSceneSave(&s->scene, s->scenePath);
   }
+  // Harness: BRUSH_TEST_MODELS=K appends K copies of one .glb in a grid to
+  // prove shape caching — the log should show ONE "cooked collision shape" for
+  // the model regardless of K, and K instances all collide.
+  const char *tm = getenv("BRUSH_TEST_MODELS");
+  if (tm != NULL) {
+    int k = atoi(tm);
+    if (k < 1) k = 16;
+    const char *tmPath = getenv("BRUSH_TEST_MODELS_PATH");
+    if (tmPath == NULL) tmPath = "assets/models/rock_0.glb";
+    Model shared = BrushAssetsModel(tmPath); // +1 ref, shared registry entry
+    int side = (int)ceilf(sqrtf((float)k));
+    for (int n = 0; n < k && s->scene.modelCount < BRUSH_SCENE_MAX_MODELS; n++) {
+      BrushSceneModelInstance *mi = &s->scene.models[s->scene.modelCount++];
+      memset(mi, 0, sizeof(*mi));
+      strncpy(mi->path, tmPath, sizeof(mi->path) - 1);
+      mi->model = shared;
+      float fx = spx + ((float)(n % side) - (side - 1) * 0.5f) * 3.0f;
+      float fz = spz - (float)(n / side) * 3.0f; // row 0 sits at the spawn
+      mi->pos = (Vector3){fx, BrushWorldGroundHeight(s->world, fx, fz), fz};
+      mi->rot = (Vector3){0, (float)(n * 37 % 360), 0};
+      mi->scale = (Vector3){0.5f, 0.5f, 0.5f};
+    }
+    TraceLog(LOG_INFO, "TEST: appended %d copies of %s", k, tmPath);
+  }
+
   ApplySceneColliders(s);
   BrushSceneApplyRenderSettings(&s->scene); // scene carries its look
   ApplyTerrainLayers(s);
@@ -886,13 +916,15 @@ static void SandboxShutdown(void *user) {
   BrushWorldDestroy(s->world);
   UnloadTexture(s->groundTex); // world doesn't own the game-supplied texture
   BrushCharacterCleanup(&s->body, &s->phys);
-  BrushPhysicsCleanup(&s->phys);
   BrushAnimatorUnload(&s->animator);
   UnloadModel(s->unitCube);
-
   UnloadModel(s->mannequin);
+  // Assets (model registry) can hold cooked Jolt collision shapes, so release
+  // them BEFORE tearing down the physics world — freeing a shape after
+  // JPH_Shutdown is unsafe.
   BrushSceneUnloadMaterials(&s->scene);
   BrushAssetsShutdown();
+  BrushPhysicsCleanup(&s->phys);
 }
 
 int main(int argc, char **argv) {

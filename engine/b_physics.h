@@ -58,14 +58,6 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh,
                                      Matrix transform, int userData,
                                      const char *tag);
 
-// Every mesh of a model as static trimesh colliders (one body per mesh,
-// exact collision). `transform` is the full instance matrix — include the
-// model's own base transform (see BrushModelInstanceMatrix in b_scene.h).
-// Writes up to `outCap` body ids to `out`; returns how many were created.
-int BrushPhysicsAddStaticModel(BrushPhysics *pw, const Model *model,
-                               Matrix transform, int userData,
-                               const char *tag, JPH_BodyID *out, int outCap);
-
 // Cook a static triangle-mesh shape without touching the physics world.
 // THREAD-SAFE (after BrushPhysicsInit): mesh-shape cooking is the expensive
 // part of AddStaticMesh, so streaming workers can run it off the main
@@ -79,6 +71,17 @@ void BrushPhysicsReleaseShape(JPH_Shape *shape);
 // the caller's shape reference — do not release it afterwards.
 JPH_BodyID BrushPhysicsAddStaticShape(BrushPhysics *pw, JPH_Shape *shape,
                                       int userData, const char *tag);
+
+// Place a SHARED base shape (cooked in the model's local space, i.e. with the
+// model's base transform baked but NOT the instance transform) as a static
+// body at an instance's position/rotation/scale. Non-unit scale wraps the base
+// in a Jolt ScaledShape; unit scale uses it directly. Does NOT consume `base`
+// — the body takes its own reference, so one cooked shape backs many instances.
+// Composition matches BrushModelInstanceMatrix (base·scale·rot·translate).
+JPH_BodyID BrushPhysicsAddStaticShapeAt(BrushPhysics *pw, JPH_Shape *base,
+                                        Vector3 position, Vector3 rotationEuler,
+                                        Vector3 scale, int userData,
+                                        const char *tag);
 
 // Sensor volume: overlaps report but never collide.
 JPH_BodyID BrushPhysicsAddTriggerBox(BrushPhysics *pw, Vector3 position,

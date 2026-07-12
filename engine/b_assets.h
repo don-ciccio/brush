@@ -105,8 +105,21 @@ bool BrushAssetsIsSwizzledNormal(Texture2D tex);
 // (warned once, negative-cached).
 Model BrushAssetsModel(const char *path);
 
-// Release one reference; the last release unloads GPU/CPU data.
+// Release one reference; the last release unloads GPU/CPU data (and any
+// cooked collision shapes cached for this model — see BrushAssetsModelShape).
 void BrushAssetsReleaseModel(const char *path);
+
+// Cooked static collision shape for one mesh of a resident model, cached and
+// shared across every instance of that model. Cooked in the model's LOCAL
+// space (the model's base transform baked in, the instance transform NOT), so
+// callers place it per instance with BrushPhysicsAddStaticShapeAt. First
+// request cooks (the expensive BVH build); later requests return the same
+// shape. The returned reference is BORROWED — do not destroy it; it lives
+// until the model unloads. NULL if the model isn't resident or the mesh is
+// uncookable. Forward-declared JPH_Shape to avoid pulling joltc into every
+// includer.
+typedef struct JPH_Shape JPH_Shape;
+JPH_Shape *BrushAssetsModelShape(const char *path, int meshIndex);
 
 // --- Release packaging (.pak) --------------------------------------------------
 // Mount a pak archive (tools/packager output) as the top of the lookup

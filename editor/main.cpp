@@ -506,9 +506,16 @@ static void RebuildAllColliders() {
     for (int i = 0; i < g_scene.modelCount; i++) {
         BrushSceneModelInstance *mi = &g_scene.models[i];
         if (mi->model.meshCount == 0) continue;
-        g_modelBodyN[i] = BrushPhysicsAddStaticModel(
-            &g_phys, &mi->model, BrushModelInstanceMatrix(mi), i, "model",
-            g_modelBodies[i], MODEL_BODIES_PER_INSTANCE);
+        // Shared cooked shape per mesh, placed at this instance's transform.
+        int n = 0;
+        for (int m = 0; m < mi->model.meshCount && n < MODEL_BODIES_PER_INSTANCE; m++) {
+            JPH_Shape *base = BrushAssetsModelShape(mi->path, m);
+            if (base == NULL) continue;
+            JPH_BodyID id = BrushPhysicsAddStaticShapeAt(
+                &g_phys, base, mi->pos, mi->rot, mi->scale, i, "model");
+            if (id != BRUSH_BODY_INVALID) g_modelBodies[i][n++] = id;
+        }
+        g_modelBodyN[i] = n;
     }
 }
 
