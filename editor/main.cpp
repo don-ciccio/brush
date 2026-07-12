@@ -2006,22 +2006,32 @@ int main(int argc, char **argv) {
                         }
             }
 
-            // Auto-slope: ground STEEPER than 'start' blends toward the
-            // chosen layer, fully replacing the paint by 'full'. Applies
-            // under your brush strokes; needs actual slopes to be visible.
-            if (TerrainSlotCombo("Auto-slope", &g_scene.autoSlopeLayer))
+            // Auto-slope: one layer auto-applied to steep ground (the
+            // classic "rock on cliffs"). Applied AFTER the height bands, so
+            // it wins on cliffs regardless of altitude. Steepness is the
+            // surface angle: 0 deg = flat, 90 deg = vertical wall.
+            ImGui::SeparatorText("Auto-slope (steep ground)");
+            if (TerrainSlotCombo("Layer##slope", &g_scene.autoSlopeLayer))
                 layersChanged = true;
             if (g_scene.autoSlopeLayer >= 0) {
                 bool a = false;
-                a |= ImGui::SliderFloat("Slope start", &g_scene.autoSlopeStart,
+                a |= ImGui::SliderFloat("Steeper than", &g_scene.autoSlopeStart,
                                         5.0f, 80.0f, "%.0f deg");
-                a |= ImGui::SliderFloat("Slope full", &g_scene.autoSlopeEnd,
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Ground steeper than this starts showing "
+                                      "the layer (0 deg flat, 90 deg wall).");
+                a |= ImGui::SliderFloat("Fully by", &g_scene.autoSlopeEnd,
                                         10.0f, 89.0f, "%.0f deg");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Steeper than this is fully the layer; "
+                                      "the two angles set the blend band.");
                 if (a) {
                     if (g_scene.autoSlopeEnd < g_scene.autoSlopeStart + 1.0f)
                         g_scene.autoSlopeEnd = g_scene.autoSlopeStart + 1.0f;
                     layersChanged = true;
                 }
+            } else {
+                ImGui::TextDisabled("Off — pick a layer for cliffs/steep faces.");
             }
             // Auto-height: one optional altitude band PER layer, so every
             // configured layer can be placed by height (grass low, rock
