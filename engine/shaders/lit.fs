@@ -42,6 +42,25 @@ uniform float uHeightScale;
 uniform float uHasAoMap;
 uniform float uAoStrength;
 
+// --- Terrain splat (docs/terrain-painting-plan.md) ---
+// Per-chunk RGBA8 weight texture blends up to 4 painted layers, sampled
+// planar-XZ at each layer's own tile scale. Layer 0's albedo/normal ride
+// texture0/texture2 (the material's maps); layers 1..3 sit on fixed units.
+uniform float uSplatEnabled;
+uniform sampler2D uSplatMap;
+uniform sampler2D uLayerAlbedo1;
+uniform sampler2D uLayerAlbedo2;
+uniform sampler2D uLayerAlbedo3;
+uniform sampler2D uLayerNormal1;
+uniform sampler2D uLayerNormal2;
+uniform sampler2D uLayerNormal3;
+uniform vec2 uSplatOrigin; // chunk world origin (xz)
+uniform float uSplatSize;  // chunk world size (m)
+uniform float uSplatRes;   // splat texture resolution per side
+uniform vec4 uLayerTiles;  // metres per repeat, per layer
+uniform vec4 uLayerSwizzled; // DXT5nm flag per layer
+uniform int uLayerCount;
+
 uniform vec3 uSunDir;        // points toward the sun
 uniform vec3 uSunColor;
 uniform vec3 uAmbient; // ambient fill color (linear)
@@ -136,6 +155,15 @@ vec3 TriplanarWeights(vec3 n) {
     return w / (w.x + w.y + w.z);
 }
 
+// Decode a sampled normal texel, DXT5nm-aware.
+vec3 DecodeNormal(vec4 s, float swizzled) {
+    if (swizzled > 0.5) {
+        vec2 xy = s.ag * 2.0 - 1.0;
+        return vec3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
+    }
+    return s.xyz * 2.0 - 1.0;
+}
+
 // Tangent-space normal fetch, DXT5nm-aware (see uNormalSwizzled).
 vec3 SampleNormalMap(vec2 uv) {
     vec4 s = texture(texture2, uv);
@@ -223,10 +251,48 @@ void main()
         tex = texture(texture0, uvMesh);
     }
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb;
+
+    // Terrain splat: weights from the per-chunk texture (texel-centre
+    // mapping — shared edge samples are identical across chunks, so
+    // bilinear filtering is seamless at borders), layers blended planar-XZ.
+    vec3 splatBump = vec3(0.0);
+    if (uSplatEnabled > 0.5) {
+        vec2 suv = ((fragPosition.xz - uSplatOrigin) / uSplatSize
+                        * (uSplatRes - 1.0) + 0.5) / uSplatRes;
+        vec4 sw = texture(uSplatMap, suv);
+        sw /= max(sw.r + sw.g + sw.b + sw.a, 1e-4);
+        vec2 p = fragPosition.xz;
+        vec3 a = texture(texture0, p / uLayerTiles.x).rgb * sw.r;
+        if (uLayerCount > 1) a += texture(uLayerAlbedo1, p / uLayerTiles.y).rgb * sw.g;
+        if (uLayerCount > 2) a += texture(uLayerAlbedo2, p / uLayerTiles.z).rgb * sw.b;
+        if (uLayerCount > 3) a += texture(uLayerAlbedo3, p / uLayerTiles.w).rgb * sw.a;
+        albedo = a; // vertex colour/tint intentionally excluded
+
+        // XZ-plane bump blend (uHasNormalMap = layer0 has a normal map;
+        // layers with none contribute flat).
+        if (uHasNormalMap > 0.5) {
+            vec3 tn0 = DecodeNormal(texture(texture2, p / uLayerTiles.x), uLayerSwizzled.x);
+            splatBump = vec3(tn0.x, 0.0, tn0.y) * sw.r;
+            if (uLayerCount > 1) {
+                vec3 tn1 = DecodeNormal(texture(uLayerNormal1, p / uLayerTiles.y), uLayerSwizzled.y);
+                splatBump += vec3(tn1.x, 0.0, tn1.y) * sw.g;
+            }
+            if (uLayerCount > 2) {
+                vec3 tn2 = DecodeNormal(texture(uLayerNormal2, p / uLayerTiles.z), uLayerSwizzled.z);
+                splatBump += vec3(tn2.x, 0.0, tn2.y) * sw.b;
+            }
+            if (uLayerCount > 3) {
+                vec3 tn3 = DecodeNormal(texture(uLayerNormal3, p / uLayerTiles.w), uLayerSwizzled.w);
+                splatBump += vec3(tn3.x, 0.0, tn3.y) * sw.a;
+            }
+        }
+    }
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 
     vec3 N = geoN;
-    if (uHasNormalMap > 0.5) {
+    if (uSplatEnabled > 0.5) {
+        N = normalize(geoN + splatBump * uNormalDepth);
+    } else if (uHasNormalMap > 0.5) {
         if (uTriplanar > 0.5) {
             // UDN blend in local space
             vec3 tnX = SampleNormalMap(uvX);

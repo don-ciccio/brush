@@ -56,6 +56,12 @@ typedef struct WorldChunk {
 
   bool needsRebake; // sculpted while mid-build: re-enqueue after finalize
                     // (main-thread only)
+
+  // Terrain paint: per-chunk layer weights (hmRes^2 RGBA8), composed from
+  // the weight tiles on the WORKER, uploaded as a texture at finalize.
+  unsigned char *splatPixels;
+  bool splatValid;    // pixels filled this bake (layers configured)
+  Texture2D splatTex; // GPU copy (kept across slot reuse, like the mesh)
 } WorldChunk;
 
 // Sparse sculpt tile: `tileRes`^2 delta samples on the heightmap grid.
@@ -66,6 +72,13 @@ typedef struct SculptTile {
   int tx, tz;
   float *d; // tileRes * tileRes deltas (metres)
 } SculptTile;
+
+// Sparse paint tile: same grid, same canonical ownership; RGBA8 layer
+// weights per sample (sum 255; absent tile = implicit full layer 0).
+typedef struct SplatTile {
+  int tx, tz;
+  unsigned char *w; // tileRes * tileRes * 4 weights
+} SplatTile;
 
 struct BrushChunkJobQueue; // fwd
 
@@ -89,9 +102,14 @@ struct BrushWorld {
   // strokes — the mutex covers the tile array and its data.
   SculptTile *tiles;
   int tileCount, tileCap;
+  SplatTile *wtiles; // paint weights (same mutex/keying as height tiles)
+  int wtileCount, wtileCap;
   int tileRes;         // hmRes - 1 samples per tile side
   float gridStep;      // metres between grid samples (chunkSize / (hmRes-1))
   pthread_mutex_t sculptMutex;
+
+  BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
+  int layerCount;
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -171,6 +189,63 @@ static float *SculptSampleRW(BrushWorld *w, long gx, long gz) {
   int lx = (int)(gx - (long)tx * w->tileRes);
   int lz = (int)(gz - (long)tz * w->tileRes);
   return &t->d[lz * w->tileRes + lx];
+}
+
+// ---- paint weight tiles (same locking + ownership as the height tiles) -----
+
+static SplatTile *SplatFindTile(BrushWorld *w, int tx, int tz) {
+  for (int i = 0; i < w->wtileCount; i++)
+    if (w->wtiles[i].tx == tx && w->wtiles[i].tz == tz) return &w->wtiles[i];
+  return NULL;
+}
+
+// New tiles start as the implicit default: full layer 0.
+static void SplatTileDefault(BrushWorld *w, SplatTile *t) {
+  int n = w->tileRes * w->tileRes;
+  for (int i = 0; i < n; i++) {
+    t->w[i * 4 + 0] = 255;
+    t->w[i * 4 + 1] = 0;
+    t->w[i * 4 + 2] = 0;
+    t->w[i * 4 + 3] = 0;
+  }
+}
+
+static SplatTile *SplatGetTile(BrushWorld *w, int tx, int tz, bool create) {
+  SplatTile *t = SplatFindTile(w, tx, tz);
+  if (t != NULL || !create) return t;
+  if (w->wtileCount == w->wtileCap) {
+    w->wtileCap = (w->wtileCap == 0) ? 16 : w->wtileCap * 2;
+    w->wtiles = (SplatTile *)MemRealloc(w->wtiles,
+                                        sizeof(SplatTile) * w->wtileCap);
+  }
+  t = &w->wtiles[w->wtileCount++];
+  t->tx = tx;
+  t->tz = tz;
+  t->w = (unsigned char *)MemAlloc((unsigned int)(w->tileRes * w->tileRes * 4));
+  SplatTileDefault(w, t);
+  return t;
+}
+
+// Weights at a global grid index (default = full layer 0).
+static void SplatWeightsAt(BrushWorld *w, long gx, long gz,
+                           unsigned char out[4]) {
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  SplatTile *t = SplatFindTile(w, tx, tz);
+  if (t == NULL) {
+    out[0] = 255; out[1] = out[2] = out[3] = 0;
+    return;
+  }
+  int lx = (int)(gx - (long)tx * w->tileRes);
+  int lz = (int)(gz - (long)tz * w->tileRes);
+  memcpy(out, &t->w[(lz * w->tileRes + lx) * 4], 4);
+}
+
+static unsigned char *SplatSampleRW(BrushWorld *w, long gx, long gz) {
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  SplatTile *t = SplatGetTile(w, tx, tz, true);
+  int lx = (int)(gx - (long)tx * w->tileRes);
+  int lz = (int)(gz - (long)tz * w->tileRes);
+  return &t->w[(lz * w->tileRes + lx) * 4];
 }
 
 // ---- terrain build (worker thread; no GL) ---------------------------------
@@ -337,6 +412,21 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
         chunk->heightmap[z * tr + x] +=
             SculptDeltaAt(w, baseGx + (x - 1), baseGz + (z - 1));
   }
+  // Paint weights -> per-chunk pixels (hmRes^2, NO apron: chunk-edge grid
+  // samples are canonically shared, so border texels match the neighbour's
+  // and bilinear filtering is seamless with texel-centre UVs).
+  chunk->splatValid = false;
+  if (w->layerCount > 0) {
+    int sr = w->cfg.hmRes;
+    if (chunk->splatPixels == NULL)
+      chunk->splatPixels = (unsigned char *)MemAlloc((unsigned int)(sr * sr * 4));
+    long bGx = (long)chunk->coord.x * w->tileRes;
+    long bGz = (long)chunk->coord.z * w->tileRes;
+    for (int z = 0; z < sr; z++)
+      for (int x = 0; x < sr; x++)
+        SplatWeightsAt(w, bGx + x, bGz + z, &chunk->splatPixels[(z * sr + x) * 4]);
+    chunk->splatValid = true;
+  }
   pthread_mutex_unlock(&w->sculptMutex);
 
   BuildMesh(w, chunk);
@@ -424,11 +514,15 @@ static WorldChunk *AcquireSlot(BrushWorld *w, BrushChunkCoord c) {
       float *hm = k->heightmap; // keep the allocated buffers for reuse
       Mesh mesh = k->mesh;
       bool up = k->meshUploaded;
+      unsigned char *sp = k->splatPixels;
+      Texture2D st = k->splatTex;
       memset(k, 0, sizeof(*k));
       k->coord = c;
       k->heightmap = hm;
       k->mesh = mesh;
       k->meshUploaded = up;
+      k->splatPixels = sp;
+      k->splatTex = st;
       k->terrainBody = BRUSH_BODY_INVALID;
       return k;
     }
@@ -459,6 +553,22 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
       UpdateMeshBuffer(chunk->mesh, 1, chunk->mesh.texcoords, sizeof(float) * vc * 2, 0);
       UpdateMeshBuffer(chunk->mesh, 2, chunk->mesh.normals, sizeof(float) * vc * 3, 0);
       UpdateMeshBuffer(chunk->mesh, 3, chunk->mesh.colors, sizeof(unsigned char) * vc * 4, 0);
+    }
+  }
+
+  if (IsWindowReady() && chunk->splatValid && chunk->splatPixels != NULL) {
+    int sr = w->cfg.hmRes;
+    if (chunk->splatTex.id == 0) {
+      Image img = {.data = chunk->splatPixels,
+                   .width = sr,
+                   .height = sr,
+                   .mipmaps = 1,
+                   .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+      chunk->splatTex = LoadTextureFromImage(img); // copies the pixels
+      SetTextureFilter(chunk->splatTex, TEXTURE_FILTER_BILINEAR);
+      SetTextureWrap(chunk->splatTex, TEXTURE_WRAP_CLAMP);
+    } else {
+      UpdateTexture(chunk->splatTex, chunk->splatPixels);
     }
   }
 
@@ -500,6 +610,14 @@ static void ReleaseChunk(BrushWorld *w, WorldChunk *chunk) {
 }
 
 static void DestroyChunkBuffers(WorldChunk *chunk) {
+  if (chunk->splatTex.id != 0) {
+    UnloadTexture(chunk->splatTex);
+    chunk->splatTex = (Texture2D){0};
+  }
+  if (chunk->splatPixels) {
+    MemFree(chunk->splatPixels);
+    chunk->splatPixels = NULL;
+  }
   if (chunk->meshUploaded) {
     UnloadMesh(chunk->mesh);
     chunk->meshUploaded = false;
@@ -644,7 +762,19 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
       float dot = (ccx * fx + ccz * fz) / cd;
       if (dot < -0.15f) continue; // clearly behind the camera
     }
-    BrushRenderSubmitMesh(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material, xf);
+    if (w->layerCount > 0 && chunk->splatTex.id != 0) {
+      BrushSplatDraw sd = {0};
+      sd.splat = chunk->splatTex;
+      sd.origin = ro; // render-space == splat UV space (mesh verts likewise)
+      sd.size = w->cfg.chunkSize;
+      sd.res = w->cfg.hmRes;
+      memcpy(sd.layers, w->layers, sizeof(sd.layers));
+      sd.layerCount = w->layerCount;
+      BrushRenderSubmitMeshSplat(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material,
+                                 xf, &sd);
+    } else {
+      BrushRenderSubmitMesh(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material, xf);
+    }
   }
 }
 
@@ -681,6 +811,8 @@ void BrushWorldDestroy(BrushWorld *w) {
   if (w->chunks) MemFree(w->chunks);
   for (int i = 0; i < w->tileCount; i++) MemFree(w->tiles[i].d);
   if (w->tiles) MemFree(w->tiles);
+  for (int i = 0; i < w->wtileCount; i++) MemFree(w->wtiles[i].w);
+  if (w->wtiles) MemFree(w->wtiles);
   pthread_mutex_destroy(&w->sculptMutex);
   // The material's diffuse texture is game-owned; don't unload it. Detach the
   // shared shader so UnloadMaterial doesn't free the engine's lit shader.
@@ -770,27 +902,90 @@ void BrushWorldSculpt(BrushWorld *w, BrushSculptOp op, Vector3 center,
                   center.z + radius);
 }
 
-bool BrushWorldSculptAny(const BrushWorld *w) { return w->tileCount > 0; }
+void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
+                     float strength, int layer) {
+  if (radius <= 0.0f || layer < 0 || layer >= BRUSH_TERRAIN_LAYERS) return;
+  float step = w->gridStep;
+  long g0x = (long)floorf((center.x - radius) / step);
+  long g1x = (long)ceilf((center.x + radius) / step);
+  long g0z = (long)floorf((center.z - radius) / step);
+  long g1z = (long)ceilf((center.z + radius) / step);
 
-// Blob layout (also the .terrain file format):
-//   u32 magic 'BSC1' | i32 tileRes | i32 count
+  pthread_mutex_lock(&w->sculptMutex);
+  for (long gz = g0z; gz <= g1z; gz++) {
+    for (long gx = g0x; gx <= g1x; gx++) {
+      float wx = (float)gx * step, wz = (float)gz * step;
+      float dx = wx - center.x, dz = wz - center.z;
+      float dist = sqrtf(dx * dx + dz * dz);
+      if (dist >= radius) continue;
+      float t = dist / radius;
+      float fall = 1.0f - t * t * (3.0f - 2.0f * t); // smoothstep falloff
+
+      unsigned char *s = SplatSampleRW(w, gx, gz);
+      float f[4] = {(float)s[0], (float)s[1], (float)s[2], (float)s[3]};
+      f[layer] += strength * fall * 255.0f;
+      float sum = f[0] + f[1] + f[2] + f[3];
+      if (sum < 1.0f) { f[0] = 255.0f; sum = 255.0f; }
+      for (int i = 0; i < 4; i++) {
+        float v = f[i] * 255.0f / sum;
+        s[i] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v + 0.5f));
+      }
+    }
+  }
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  SculptMarkDirty(w, center.x - radius, center.z - radius, center.x + radius,
+                  center.z + radius);
+}
+
+void BrushWorldSetLayers(BrushWorld *w,
+                         const BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS],
+                         int count) {
+  if (count < 0) count = 0;
+  if (count > BRUSH_TERRAIN_LAYERS) count = BRUSH_TERRAIN_LAYERS;
+  BrushTerrainLayer next[BRUSH_TERRAIN_LAYERS] = {0};
+  for (int i = 0; i < count; i++) next[i] = layers[i];
+  if (count == w->layerCount &&
+      memcmp(next, w->layers, sizeof(next)) == 0)
+    return; // unchanged: no rebake storm
+  memcpy(w->layers, next, sizeof(next));
+  w->layerCount = count;
+  // Every resident chunk needs its splat pixels (re)baked.
+  SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
+}
+
+bool BrushWorldSculptAny(const BrushWorld *w) {
+  return w->tileCount > 0 || w->wtileCount > 0;
+}
+
+// Blob layout (also the .terrain file format). BSC2 appends the paint
+// weights after the height tiles; BSC1 files (heights only) still load.
+//   u32 magic 'BSC2' | i32 tileRes | i32 count
 //   i32 rangeT0x rangeT0z rangeT1x rangeT1z   (tile range the blob covers)
-//   count x { i32 tx, i32 tz, float[tileRes^2] }
-#define SCULPT_MAGIC 0x31435342u // "BSC1"
+//   count  x { i32 tx, i32 tz, float[tileRes^2] }          (height deltas)
+//   i32 wcount
+//   wcount x { i32 tx, i32 tz, u8[tileRes^2 * 4] }          (layer weights)
+#define SCULPT_MAGIC 0x31435342u  // "BSC1"
+#define SCULPT_MAGIC2 0x32435342u // "BSC2"
 
 static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
                                       int t1x, int t1z, int *outSize) {
   int n = w->tileRes * w->tileRes;
-  int count = 0;
+  int count = 0, wcount = 0;
   for (int i = 0; i < w->tileCount; i++) {
     SculptTile *t = &w->tiles[i];
     if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) count++;
   }
-  int size = (int)(sizeof(unsigned int) + 6 * sizeof(int) +
-                   (size_t)count * (2 * sizeof(int) + n * sizeof(float)));
+  for (int i = 0; i < w->wtileCount; i++) {
+    SplatTile *t = &w->wtiles[i];
+    if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) wcount++;
+  }
+  int size = (int)(sizeof(unsigned int) + 7 * sizeof(int) +
+                   (size_t)count * (2 * sizeof(int) + n * sizeof(float)) +
+                   (size_t)wcount * (2 * sizeof(int) + (size_t)n * 4));
   unsigned char *blob = (unsigned char *)MemAlloc((unsigned int)size);
   unsigned char *p = blob;
-  *(unsigned int *)p = SCULPT_MAGIC; p += 4;
+  *(unsigned int *)p = SCULPT_MAGIC2; p += 4;
   *(int *)p = w->tileRes; p += 4;
   *(int *)p = count; p += 4;
   *(int *)p = t0x; p += 4;
@@ -803,6 +998,14 @@ static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
     *(int *)p = t->tx; p += 4;
     *(int *)p = t->tz; p += 4;
     memcpy(p, t->d, sizeof(float) * (size_t)n); p += sizeof(float) * (size_t)n;
+  }
+  *(int *)p = wcount; p += 4;
+  for (int i = 0; i < w->wtileCount; i++) {
+    SplatTile *t = &w->wtiles[i];
+    if (t->tx < t0x || t->tx > t1x || t->tz < t0z || t->tz > t1z) continue;
+    *(int *)p = t->tx; p += 4;
+    *(int *)p = t->tz; p += 4;
+    memcpy(p, t->w, (size_t)n * 4); p += (size_t)n * 4;
   }
   if (outSize) *outSize = size;
   return blob;
@@ -823,7 +1026,9 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
                              int size) {
   if (blob == NULL || size < 28) return;
   const unsigned char *p = blob;
-  if (*(const unsigned int *)p != SCULPT_MAGIC) return;
+  unsigned int magic = *(const unsigned int *)p;
+  if (magic != SCULPT_MAGIC && magic != SCULPT_MAGIC2) return;
+  bool hasWeights = (magic == SCULPT_MAGIC2);
   p += 4;
   int tileRes = *(const int *)p; p += 4;
   int count = *(const int *)p; p += 4;
@@ -839,7 +1044,8 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
   int n = w->tileRes * w->tileRes;
 
   pthread_mutex_lock(&w->sculptMutex);
-  // Tiles created after the snapshot (inside its range) must return to zero.
+  // Tiles created after the snapshot (inside its range) must return to zero
+  // (weights: to the full-layer-0 default).
   for (int i = 0; i < w->tileCount; i++) {
     SculptTile *t = &w->tiles[i];
     if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z)
@@ -852,6 +1058,21 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
     memcpy(t->d, p, sizeof(float) * (size_t)n);
     p += sizeof(float) * (size_t)n;
   }
+  if (hasWeights) {
+    for (int i = 0; i < w->wtileCount; i++) {
+      SplatTile *t = &w->wtiles[i];
+      if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z)
+        SplatTileDefault(w, t);
+    }
+    int wcount = *(const int *)p; p += 4;
+    for (int i = 0; i < wcount; i++) {
+      int tx = *(const int *)p; p += 4;
+      int tz = *(const int *)p; p += 4;
+      SplatTile *t = SplatGetTile(w, tx, tz, true);
+      memcpy(t->w, p, (size_t)n * 4);
+      p += (size_t)n * 4;
+    }
+  }
   pthread_mutex_unlock(&w->sculptMutex);
 
   float tileWorld = w->gridStep * (float)w->tileRes;
@@ -862,9 +1083,18 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
 bool BrushWorldSculptSave(BrushWorld *w, const char *path) {
   pthread_mutex_lock(&w->sculptMutex);
   int t0x = 0, t0z = 0, t1x = -1, t1z = -1; // empty range when no tiles
-  for (int i = 0; i < w->tileCount; i++) {
+  bool first = true;
+  for (int i = 0; i < w->tileCount; i++) { // range spans BOTH overlays
     SculptTile *t = &w->tiles[i];
-    if (i == 0) { t0x = t1x = t->tx; t0z = t1z = t->tz; }
+    if (first) { t0x = t1x = t->tx; t0z = t1z = t->tz; first = false; }
+    if (t->tx < t0x) t0x = t->tx;
+    if (t->tx > t1x) t1x = t->tx;
+    if (t->tz < t0z) t0z = t->tz;
+    if (t->tz > t1z) t1z = t->tz;
+  }
+  for (int i = 0; i < w->wtileCount; i++) {
+    SplatTile *t = &w->wtiles[i];
+    if (first) { t0x = t1x = t->tx; t0z = t1z = t->tz; first = false; }
     if (t->tx < t0x) t0x = t->tx;
     if (t->tx > t1x) t1x = t->tx;
     if (t->tz < t0z) t0z = t->tz;

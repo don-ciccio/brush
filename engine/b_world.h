@@ -40,6 +40,7 @@ extern "C" {
 #endif
 
 #include "b_physics.h"
+#include "b_render.h" // BrushTerrainLayer
 
 #include <raylib.h>
 #include <stdbool.h>
@@ -139,11 +140,31 @@ bool BrushWorldSculptLoad(BrushWorld *w, const char *path);
 // Undo support: snapshot every tile intersecting the world-XZ AABB into a
 // malloc'd blob (caller frees; NULL if none). Restore overwrites those tiles
 // from the blob and marks the area dirty. Snapshot at stroke start, push on
-// an undo stack, Restore to undo.
+// an undo stack, Restore to undo. Covers BOTH overlays (height + paint):
+// one cmd+Z stack for sculpting and painting.
 unsigned char *BrushWorldSculptSnapshot(BrushWorld *w, Vector2 minXZ,
                                         Vector2 maxXZ, int *outSize);
 void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
                              int size);
+
+// --- Terrain painting (docs/terrain-painting-plan.md) ------------------------
+// A SECOND sparse overlay: RGBA8 layer weights on the same grid/tiles as
+// the height deltas (weights always renormalise to sum 255; unpainted =
+// full layer 0). Painting rides the same dirty-chunk rebake; each chunk
+// bakes a small weight texture the lit shader blends the layers with.
+
+// Configure the (up to 4) paintable layers — usually the resolved textures
+// of material-library entries (see BrushSceneTerrainLayers). count 0
+// disables splat rendering entirely (the zero-asset checker look). Any
+// change re-bakes every resident chunk.
+void BrushWorldSetLayers(BrushWorld *w,
+                         const BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS],
+                         int count);
+
+// One paint dab: raise `layer` (0..3) inside the smoothstep brush and
+// renormalise the others. strength ~0..1 per application (flow).
+void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
+                     float strength, int layer);
 
 #ifdef __cplusplus
 }

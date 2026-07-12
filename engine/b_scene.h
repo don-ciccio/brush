@@ -114,6 +114,8 @@ typedef struct BrushScene {
   int modelCount;
   BrushScenePostSetting post[BRUSH_SCENE_MAX_POST];
   int postCount;
+  // Paintable terrain layer slots -> material-library names ("" = unset).
+  char terrainLayers[BRUSH_TERRAIN_LAYERS][BRUSH_SCENE_NAME_MAX];
 
   // Hot-reload bookkeeping (managed by Load/HotReload).
   char path[BRUSH_SCENE_PATH_MAX];
@@ -158,6 +160,13 @@ void BrushSceneUnloadMaterials(BrushScene *s);
 // the block has no material (or the name is unresolved) — submit plain.
 bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
                           BrushMaterialProps *out);
+
+// Resolve the scene's terrain_layer slots against the material library
+// into submit-ready layer sets. Returns the layer count (contiguous from
+// slot 0; the first unset/unresolved slot ends the list). Feed the result
+// to BrushWorldSetLayers after load/reload/re-import.
+int BrushSceneTerrainLayers(const BrushScene *s,
+                            BrushTerrainLayer out[BRUSH_TERRAIN_LAYERS]);
 
 // Same, for a placed model's optional material (triplanar projection wraps
 // the mesh — good for rocks/organic props). False = draw the model plain

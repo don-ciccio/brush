@@ -26,6 +26,8 @@ typedef struct BrushDrawCmd {
   float sortKey; // camera distance, used for transparent back-to-front
   BrushMaterialProps props; // per-draw material overrides (hasProps gates)
   bool hasProps;
+  BrushSplatDraw splat; // terrain layer blending (hasSplat gates)
+  bool hasSplat;
 } BrushDrawCmd;
 
 typedef struct BrushRenderState {
@@ -41,6 +43,8 @@ typedef struct BrushRenderState {
   int locNormalSwizzled;
   int locHasHeightMap, locHeightScale;
   int locHasAoMap, locAoStrength;
+  int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
+  int locLayerTiles, locLayerSwizzled, locLayerCount;
   float specDefault; // uSpecStrength for draws without material props
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
@@ -100,6 +104,27 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locHeightScale = GetShaderLocation(g_r.lit, "uHeightScale");
   g_r.locHasAoMap = GetShaderLocation(g_r.lit, "uHasAoMap");
   g_r.locAoStrength = GetShaderLocation(g_r.lit, "uAoStrength");
+  g_r.locSplatEnabled = GetShaderLocation(g_r.lit, "uSplatEnabled");
+  g_r.locSplatOrigin = GetShaderLocation(g_r.lit, "uSplatOrigin");
+  g_r.locSplatSize = GetShaderLocation(g_r.lit, "uSplatSize");
+  g_r.locSplatRes = GetShaderLocation(g_r.lit, "uSplatRes");
+  g_r.locLayerTiles = GetShaderLocation(g_r.lit, "uLayerTiles");
+  g_r.locLayerSwizzled = GetShaderLocation(g_r.lit, "uLayerSwizzled");
+  g_r.locLayerCount = GetShaderLocation(g_r.lit, "uLayerCount");
+  // Splat samplers live on FIXED texture units chosen to dodge raylib's
+  // material binds (0=diffuse, 2=normal) and the shadow cascades (10..12):
+  // splat=1, layer albedos 1..3 = 3,4,5, layer normals 1..3 = 6,7,8.
+  // Layer 0's albedo/normal ride the material's own diffuse/normal maps.
+  {
+    int u;
+    u = 1; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uSplatMap"), &u, SHADER_UNIFORM_INT);
+    u = 3; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo1"), &u, SHADER_UNIFORM_INT);
+    u = 4; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo2"), &u, SHADER_UNIFORM_INT);
+    u = 5; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo3"), &u, SHADER_UNIFORM_INT);
+    u = 6; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal1"), &u, SHADER_UNIFORM_INT);
+    u = 7; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal2"), &u, SHADER_UNIFORM_INT);
+    u = 8; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal3"), &u, SHADER_UNIFORM_INT);
+  }
   g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
   g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
   g_r.locPointRadius = GetShaderLocation(g_r.lit, "uPointRadius");
@@ -252,14 +277,25 @@ static void UploadPointLights(Vector3 camPos) {
 
 void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
                            Matrix transform) {
+  BrushRenderSubmitMeshSplat(layer, mesh, material, transform, NULL);
+}
+
+void BrushRenderSubmitMeshSplat(BrushLayer layer, Mesh mesh,
+                                Material *material, Matrix transform,
+                                const BrushSplatDraw *splat) {
   if (layer < 0 || layer >= BRUSH_LAYER_COUNT) return;
   int *count = &g_r.cmdCount[layer];
   if (*count >= BRUSH_MAX_DRAWS_PER_LAYER) return;
-  g_r.cmds[layer][*count] = (BrushDrawCmd){.model = NULL,
-                                           .mesh = mesh,
-                                           .material = material,
-                                           .transform = transform,
-                                           .tint = WHITE};
+  BrushDrawCmd *cmd = &g_r.cmds[layer][*count];
+  *cmd = (BrushDrawCmd){.model = NULL,
+                        .mesh = mesh,
+                        .material = material,
+                        .transform = transform,
+                        .tint = WHITE};
+  if (splat != NULL && splat->layerCount > 0 && splat->splat.id != 0) {
+    cmd->splat = *splat;
+    cmd->hasSplat = true;
+  }
   (*count)++;
 }
 
@@ -305,9 +341,68 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
 // silently do nothing for them.
 #define DRAWCMD_MAX_MATERIALS 8
 
+// Bind the splat weight texture + layer sets to their fixed units and point
+// the material's diffuse/normal at layer 0; uSplatEnabled gates the shader
+// branch and is reset after the draw so the state never leaks.
+static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
+                       Texture2D *savedAlbedo, Texture2D *savedNormal) {
+  const BrushSplatDraw *sp = &cmd->splat;
+  *savedAlbedo = mat->maps[MATERIAL_MAP_DIFFUSE].texture;
+  *savedNormal = mat->maps[MATERIAL_MAP_NORMAL].texture;
+  if (sp->layers[0].albedo.id != 0)
+    mat->maps[MATERIAL_MAP_DIFFUSE].texture = sp->layers[0].albedo;
+  mat->maps[MATERIAL_MAP_NORMAL].texture = sp->layers[0].normal;
+
+  const int albedoUnit[4] = {0, 3, 4, 5}, normalUnit[4] = {0, 6, 7, 8};
+  rlActiveTextureSlot(1);
+  rlEnableTexture(sp->splat.id);
+  for (int i = 1; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++) {
+    if (sp->layers[i].albedo.id != 0) {
+      rlActiveTextureSlot(albedoUnit[i]);
+      rlEnableTexture(sp->layers[i].albedo.id);
+    }
+    if (sp->layers[i].normal.id != 0) {
+      rlActiveTextureSlot(normalUnit[i]);
+      rlEnableTexture(sp->layers[i].normal.id);
+    }
+  }
+  rlActiveTextureSlot(0);
+
+  float on = 1.0f;
+  float origin[2] = {sp->origin.x, sp->origin.z};
+  float size = sp->size;
+  float res = (float)sp->res;
+  float tiles[4], swiz[4];
+  float hasNrm = (sp->layers[0].normal.id != 0) ? 1.0f : 0.0f;
+  for (int i = 0; i < 4; i++) {
+    tiles[i] = (i < sp->layerCount && sp->layers[i].tile > 0.01f)
+                   ? sp->layers[i].tile : 1.0f;
+    swiz[i] = (i < sp->layerCount && sp->layers[i].normalSwizzled) ? 1.0f : 0.0f;
+  }
+  int lc = sp->layerCount;
+  SetShaderValue(g_r.lit, g_r.locSplatEnabled, &on, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locSplatOrigin, origin, SHADER_UNIFORM_VEC2);
+  SetShaderValue(g_r.lit, g_r.locSplatSize, &size, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locSplatRes, &res, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locLayerTiles, tiles, SHADER_UNIFORM_VEC4);
+  SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
+  SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);
+  SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNrm, SHADER_UNIFORM_FLOAT);
+}
+
 static void DrawCmd(const BrushDrawCmd *cmd) {
   ApplyMaterialProps(cmd);
   if (cmd->model == NULL) {
+    if (cmd->hasSplat) {
+      Texture2D savedAlbedo, savedNormal;
+      ApplySplat(cmd, cmd->material, &savedAlbedo, &savedNormal);
+      DrawMesh(cmd->mesh, *cmd->material, cmd->transform);
+      cmd->material->maps[MATERIAL_MAP_DIFFUSE].texture = savedAlbedo;
+      cmd->material->maps[MATERIAL_MAP_NORMAL].texture = savedNormal;
+      float off = 0.0f;
+      SetShaderValue(g_r.lit, g_r.locSplatEnabled, &off, SHADER_UNIFORM_FLOAT);
+      return;
+    }
     DrawMesh(cmd->mesh, *cmd->material, cmd->transform);
     return;
   }

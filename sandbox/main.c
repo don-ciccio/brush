@@ -210,6 +210,15 @@ static void BuildGymScene(Sandbox *s, float gy) {
   s->scene.lightCount = 3;
 }
 
+// Push the scene's terrain_layer slots into the world (after load/reload/
+// re-import — the resolved textures may have changed).
+static void ApplyTerrainLayers(Sandbox *s) {
+  if (s->world == NULL) return;
+  BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
+  int n = BrushSceneTerrainLayers(&s->scene, layers);
+  BrushWorldSetLayers(s->world, layers, n);
+}
+
 // (Re)create the box colliders from the scene data — called after every
 // load/hot-reload so physics always matches the file.
 static void ApplySceneColliders(Sandbox *s) {
@@ -335,6 +344,36 @@ static void SandboxInit(void *user) {
   }
   ApplySceneColliders(s);
   BrushSceneApplyRenderSettings(&s->scene); // scene carries its look
+  ApplyTerrainLayers(s);
+
+  // Harness: BRUSH_TEST_PAINT paints layer dabs straddling the x=0 chunk
+  // border ahead of spawn — proves the weight overlay, per-chunk splat
+  // bake, and cross-chunk bilinear continuity headlessly. Uses the gym's
+  // material library as layers when the scene doesn't configure any.
+  if (getenv("BRUSH_TEST_PAINT") != NULL) {
+    if (BrushSceneTerrainLayers(&s->scene, (BrushTerrainLayer[4]){0}) == 0) {
+      snprintf(s->scene.terrainLayers[0], sizeof(s->scene.terrainLayers[0]), "grass");
+      snprintf(s->scene.terrainLayers[1], sizeof(s->scene.terrainLayers[1]), "rock");
+      snprintf(s->scene.terrainLayers[2], sizeof(s->scene.terrainLayers[2]), "dirt");
+      snprintf(s->scene.terrainLayers[3], sizeof(s->scene.terrainLayers[3]), "gravel");
+      ApplyTerrainLayers(s);
+    }
+    for (int i = 0; i < 25; i++)
+      BrushWorldPaint(s->world, (Vector3){0, 0, -14}, 7.0f, 0.25f, 1); // rock
+    for (int i = 0; i < 25; i++)
+      BrushWorldPaint(s->world, (Vector3){-4, 0, -8}, 4.0f, 0.25f, 2); // dirt
+
+    // Blob fidelity: save -> restore -> save must be byte-identical
+    // (BSC2 carries both overlays; BRUSH_TEST_PAINT_BLOB names the file).
+    const char *bp = getenv("BRUSH_TEST_PAINT_BLOB");
+    if (bp != NULL) {
+      char b2[512];
+      snprintf(b2, sizeof(b2), "%s.2", bp);
+      BrushWorldSculptSave(s->world, bp);
+      BrushWorldSculptLoad(s->world, bp);
+      BrushWorldSculptSave(s->world, b2);
+    }
+  }
 
 
   // Harness: BRUSH_TEST_TRIGGER drops a big sensor volume across the
@@ -646,10 +685,14 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
     if (BrushSceneHotReload(&s->scene)) {
       ApplySceneColliders(s);
       BrushSceneApplyRenderSettings(&s->scene);
+      ApplyTerrainLayers(s);
     }
     // Texture import cache: land background re-imports (edited source
     // images) and refresh the material table's texture handles.
-    if (BrushAssetsUpdate()) BrushSceneResolveMaterials(&s->scene);
+    if (BrushAssetsUpdate()) {
+      BrushSceneResolveMaterials(&s->scene);
+      ApplyTerrainLayers(s);
+    }
 
     // Harness: BRUSH_TEST_REIMPORT=<texture path> edits that texture's
     // .import sidecar mid-run — the watch must queue a background cook and

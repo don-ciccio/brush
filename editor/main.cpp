@@ -510,12 +510,21 @@ static void RebuildAllColliders() {
     }
 }
 
+// Push the scene's terrain_layer slots into the world (load/reload/re-import).
+static void ApplyTerrainLayers() {
+    if (g_world == NULL) return;
+    BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
+    int n = BrushSceneTerrainLayers(&g_scene, layers);
+    BrushWorldSetLayers(g_world, layers, n);
+}
+
 static void ReloadScene() {
     if (BrushSceneLoad(&g_scene, g_scenePath)) {
         g_dirty = false;
         g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
         RebuildAllColliders();
         BrushSceneApplyRenderSettings(&g_scene);
+        ApplyTerrainLayers();
         g_selectedType = ENTITY_NONE;
         g_selectedIdx = -1;
         AddEditorLog("Reloaded %s", g_scenePath);
@@ -988,6 +997,7 @@ static bool OpenProjectAt(const char *dir) {
         (Vector3){ g_scene.spawn.x, 0, g_scene.spawn.z });
 
     BrushWorldSculptLoad(g_world, g_terrainPath);
+    ApplyTerrainLayers();
 
     // Harness: scripted sculpt + save (headless end-to-end check of the
     // editor -> .terrain -> game pipeline).
@@ -1205,6 +1215,7 @@ int main(int argc, char **argv) {
         // source images and refresh the material table's handles.
         if (BrushAssetsUpdate()) {
             BrushSceneResolveMaterials(&g_scene);
+            ApplyTerrainLayers();
             // The Assets preview may hold the swapped-out texture: refresh
             // (release tolerates the stale id via the registry's prevId).
             if (g_assetPreviewPath[0] != '\0') {

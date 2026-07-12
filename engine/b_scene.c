@@ -91,6 +91,10 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         m->heightScale = 0.05f;
         m->aoStrength = 1.0f;
       }
+    } else if (sscanf(p, "terrain_layer %d %31s", &flicker, w1) == 2) {
+      if (flicker >= 0 && flicker < BRUSH_TERRAIN_LAYERS)
+        CopyField(temp.terrainLayers[flicker],
+                  sizeof(temp.terrainLayers[0]), w1);
     } else if (sscanf(p, "post %23s %f", w1, &x) == 2) {
       if (temp.postCount < BRUSH_SCENE_MAX_POST) {
         BrushScenePostSetting *ps = &temp.post[temp.postCount++];
@@ -205,6 +209,13 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
             l->light.color.y, l->light.color.z, l->light.radius,
             l->flicker ? 1 : 0);
   }
+  bool anyLayer = false;
+  for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
+    if (s->terrainLayers[i][0] != '\0') anyLayer = true;
+  if (anyLayer) fprintf(f, "\n# terrain_layer  slot  material\n");
+  for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
+    if (s->terrainLayers[i][0] != '\0')
+      fprintf(f, "terrain_layer %d %s\n", i, s->terrainLayers[i]);
   if (s->postCount > 0) fprintf(f, "\n# post  key value (render tunables)\n");
   for (int i = 0; i < s->postCount; i++)
     fprintf(f, "post %s %g\n", s->post[i].key, s->post[i].value);
@@ -342,6 +353,25 @@ static bool MaterialProps(const BrushScene *s, const char *name,
 bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
                           BrushMaterialProps *out) {
   return MaterialProps(s, k->material, out);
+}
+
+int BrushSceneTerrainLayers(const BrushScene *s,
+                            BrushTerrainLayer out[BRUSH_TERRAIN_LAYERS]) {
+  int count = 0;
+  for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+    out[i] = (BrushTerrainLayer){0};
+    if (count != i) continue; // contiguous from slot 0
+    int mi = BrushSceneFindMaterial(s, s->terrainLayers[i]);
+    if (mi < 0) continue;
+    const BrushSceneMaterial *m = &s->materials[mi];
+    if (m->albedoTex.id == 0) continue;
+    out[i].albedo = m->albedoTex;
+    out[i].normal = m->normalTex;
+    out[i].tile = (m->tile > 0.01f) ? m->tile : 1.0f;
+    out[i].normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
+    count = i + 1;
+  }
+  return count;
 }
 
 bool BrushSceneModelProps(const BrushScene *s,

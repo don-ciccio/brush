@@ -153,6 +153,33 @@ typedef struct BrushMaterialProps {
 void BrushRenderSubmitEx(BrushLayer layer, Model *model, Matrix transform,
                          Color tint, const BrushMaterialProps *props);
 
+// --- Terrain splat (painted layer blending — docs/terrain-painting-plan.md) --
+// Up to 4 paintable layers, each a material-library texture set. A chunk
+// submits its mesh with a per-chunk RGBA8 weight texture; the lit shader
+// blends the layers planar-XZ at each layer's own tile scale.
+#define BRUSH_TERRAIN_LAYERS 4
+
+typedef struct BrushTerrainLayer {
+  Texture2D albedo;
+  Texture2D normal;    // id 0 = flat
+  float tile;          // world metres per texture repeat
+  bool normalSwizzled; // DXT5nm-cooked normal map
+} BrushTerrainLayer;
+
+typedef struct BrushSplatDraw {
+  Texture2D splat;    // per-chunk weight texture (RGBA8 = layers 0..3)
+  Vector3 origin;     // chunk world origin (XZ used)
+  float size;         // chunk world size (metres)
+  int res;            // splat texture resolution per side
+  BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
+  int layerCount;
+} BrushSplatDraw;
+
+// BrushRenderSubmitMesh with splat blending for exactly this draw.
+void BrushRenderSubmitMeshSplat(BrushLayer layer, Mesh mesh,
+                                Material *material, Matrix transform,
+                                const BrushSplatDraw *splat);
+
 // Submit a raw mesh + material (e.g. streamed terrain chunks). The material's
 // shader should be BrushGetLitShader() to receive lighting/shadows. `material`
 // must outlive the frame (a pointer, not copied).

@@ -139,7 +139,7 @@ weight tiles unchanged).
 
 | Phase | Deliverable | Proof |
 |---|---|---|
-| **G1 engine** | weight tiles + BrushWorldPaint + apron-correct per-chunk splat texture + lit.fs splat branch + BrushWorldSetLayers + BSC2 blob/undo | BRUSH_TEST_PAINT harness paints a patch headless; screenshot shows blended layers across a chunk border |
+| **G1 engine** | ~~weight tiles + BrushWorldPaint + per-chunk splat texture + lit.fs splat branch + BrushWorldSetLayers + BSC2 blob/undo~~ DONE (no apron needed: shared-edge samples + texel-centre UVs are bilinear-seamless; layers sample planar-XZ in v1, triplanar deferred to G3) | BRUSH_TEST_PAINT painted across the x=0 chunk border seamlessly; BSC2 save->load->save byte-identical |
 | **G2 editor** | Paint tool + layer picker + Terrain layer slots (world.def lines) + snapshot-undo covering paint | paint in editor → Save → player shows identical terrain; cmd+Z reverts a stroke |
 | **G3 polish** | slope auto-mask, layer normal maps if deferred from G1, surface query | side-by-side screenshot with/without auto-rock on a cliff |
 
