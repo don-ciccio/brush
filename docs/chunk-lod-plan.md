@@ -122,7 +122,7 @@ Terrain beyond the last cascade cannot shadow anything visible.
 
 | Phase | Deliverable | Proof |
 |---|---|---|
-| **L1** | lodRadii config + per-chunk lod + LOD-res heightmap/mesh bake + skirts + finalize realloc path + collisionRadius gate | BRUSH_HILLS at rings {4,8,14}: screenshot shows unbroken terrain to ~900 m, no cracks at ring boundaries; log reports tris/chunk counts; fps ≥ baseline |
+| **L1** | ~~lodRadii config + per-chunk lod + LOD-res mesh bake + skirts + finalize resize (pendingMesh) path + collider-on-lod0 gate~~ DONE | rings {4,8,14}: 841 chunks (~900m) at 343k grid-tris vs 81/166k no-LOD (5× fewer than 841 full-res would cost); 15s sprint soak across ring crossings clean; horizon seamless, skirts hide seams. NOTE: kept full hmRes heightmap per chunk (ground queries/splat unchanged) — LOD reduces MESH triangles, not heightFn calls (that's a later opt). BRUSH_LOD_DBG logs the distribution. |
 | **L2** | LOD hysteresis + shadow radial gate + bake-budget tuning (finalize/queue) | walk 200 m straight (BRUSH_AUTO_MOVE): no fps dips beyond baseline noise; rebake counts logged per crossing |
 | **L3** (later) | edge-welded transitions replacing skirts; far-ring splat simplification (dominant-color); geomorphing if pops read badly; horizon occlusion cull | side-by-sides |
 

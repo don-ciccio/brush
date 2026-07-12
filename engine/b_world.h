@@ -67,6 +67,15 @@ typedef struct BrushWorldConfig {
   int meshRes;      // terrain vertices per chunk side (0 -> 33; 2 m cells)
   int hmRes;        // heightmap samples per chunk side (0 -> 65; 1 m cells)
 
+  // LOD rings (Chebyshev chunk radii): [0] = full-res ring, [1] = half-res,
+  // [2] = quarter-res. Distant chunks bake at ((meshRes-1) >> lod) + 1
+  // vertices/side, cutting triangle count so view distance isn't capped by
+  // it. Border skirts hide the inter-ring seams. Leave all 0 for a single
+  // full-res ring at loadRadius (unchanged legacy behaviour). When set, the
+  // OUTER radius overrides loadRadius; heightFn resolution, ground queries,
+  // splat, and colliders (near ring only) are unaffected.
+  int lodRadii[3];
+
   // Per-chunk terrain collider registered with this physics world (NULL -> no
   // terrain collision). Colliders stream in/out with their chunks.
   BrushPhysics *physics;

@@ -57,6 +57,16 @@ typedef struct WorldChunk {
   bool needsRebake; // sculpted while mid-build: re-enqueue after finalize
                     // (main-thread only)
 
+  // LOD: `lod` is what chunk->mesh was baked at (worker reads it in the
+  // bake); `desiredLod` is the ring the streaming update wants (main thread
+  // writes). They differ across a ring crossing -> rebake. A LOD change
+  // resizes the mesh, so the worker builds into `pendingMesh` (fresh CPU
+  // arrays) and finalize swaps + re-uploads (UpdateMeshBuffer can't resize).
+  int lod, desiredLod;
+  int gridTriCount; // grid triangles (excludes skirt) — collider cooks these
+  Mesh pendingMesh; // resized bake awaiting the main-thread GPU swap
+  bool hasPendingMesh;
+
   // Terrain paint: per-chunk layer weights (hmRes^2 RGBA8), composed from
   // the weight tiles on the WORKER, uploaded as a texture at finalize.
   unsigned char *splatPixels;
@@ -90,6 +100,9 @@ struct BrushWorld {
   int hmTexRes;  // hmRes + 2 (apron)
   int unloadRadius;
   int maxChunks;
+  int lodRadii[3];     // 0 in [0] -> single full-res ring (LOD disabled)
+  bool lodEnabled;
+  int collisionRadius; // chunks within this Chebyshev radius get colliders
 
   WorldChunk *chunks;
   int chunkCount;
@@ -147,6 +160,33 @@ static Vector3 WorldToRender(const BrushWorld *w, Vector3 wp) {
 
 static float Height(const BrushWorld *w, float wx, float wz) {
   return w->cfg.heightFn ? w->cfg.heightFn(w->cfg.heightUser, wx, wz) : 0.0f;
+}
+
+// ---- LOD ------------------------------------------------------------------
+
+// Mesh vertices per side for a LOD level: a grid subset of the full res, so
+// every LOD vertex lands exactly on a full-res grid sample. Requires
+// (meshRes-1) divisible by 2^lod (33 -> 33/17/9 for lod 0/1/2).
+static int LodMeshRes(const BrushWorld *w, int lod) {
+  int r = ((w->cfg.meshRes - 1) >> lod) + 1;
+  return r < 2 ? 2 : r;
+}
+
+// Desired LOD for a chunk offset from centre, with 1-chunk hysteresis on the
+// refine direction so a player hovering on a ring boundary doesn't thrash a
+// row of chunks between resolutions (coarsening is cheap, so it's immediate).
+static int DesiredLod(const BrushWorld *w, int dx, int dz, int cur) {
+  if (!w->lodEnabled) return 0;
+  int d = (abs(dx) > abs(dz)) ? abs(dx) : abs(dz);
+  int b0 = w->lodRadii[0], b1 = w->lodRadii[1];
+  int raw = (d <= b0) ? 0 : (d <= b1) ? 1 : 2;
+  if (raw > cur) return raw;              // coarsen now
+  if (raw < cur) {                        // refine only past a margin
+    if (cur == 1 && d <= b0 - 1) return 0;
+    if (cur == 2 && d <= b1 - 1) return 1;
+    return cur;                           // dead zone: hold
+  }
+  return cur;
 }
 
 // ---- sculpt overlay (tile store; callers hold sculptMutex) -----------------
@@ -317,46 +357,115 @@ static void SlopeColor(float ny, unsigned char *out) {
   out[3] = 255;
 }
 
+// Allocate CPU mesh arrays for `vc` vertices / `tc` triangles.
+static void AllocMeshArrays(Mesh *m, int vc, int tc) {
+  m->vertexCount = vc;
+  m->triangleCount = tc;
+  m->vertices = (float *)MemAlloc(sizeof(float) * vc * 3);
+  m->normals = (float *)MemAlloc(sizeof(float) * vc * 3);
+  m->texcoords = (float *)MemAlloc(sizeof(float) * vc * 2);
+  m->colors = (unsigned char *)MemAlloc(sizeof(unsigned char) * vc * 4);
+  m->indices = (unsigned short *)MemAlloc(sizeof(unsigned short) * tc * 3);
+}
+
+static void FreeMeshArrays(Mesh *m) {
+  if (m->vertices) MemFree(m->vertices);
+  if (m->normals) MemFree(m->normals);
+  if (m->texcoords) MemFree(m->texcoords);
+  if (m->colors) MemFree(m->colors);
+  if (m->indices) MemFree(m->indices);
+  *m = (Mesh){0};
+}
+
 // Build the displaced terrain mesh CPU-side. Vertices are LOCAL [0,size] with
 // Y = Height(world); normals from central differences of the same field. Edge
 // vertices land on exact shared world coords, so surface + normals are seamless
 // across borders. Texcoords tile in WORLD space.
+//
+// Resolution follows chunk->lod (a grid subset of the full res). The border
+// gets a downward SKIRT ring that hides the T-junction crack where a
+// higher-detail ring meets a coarser one — no cross-chunk stitching. Grid
+// triangles come first (chunk->gridTriCount, what the collider cooks), the
+// skirt triangles after.
 static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
-  const int R = w->cfg.meshRes;
+  const int R = LodMeshRes(w, chunk->lod);
   const float cell = w->cfg.chunkSize / (float)(R - 1);
-  // Normal epsilon = one heightmap texel: heights and their differences come
-  // from the chunk's own apron'd heightmap (built just before this) instead
-  // of re-calling heightFn 5x per vertex — with an expensive noise function
-  // that was most of the chunk build cost. The apron supplies the samples
-  // one texel OUTSIDE the chunk that edge normals need.
+  // Normal epsilon = one heightmap texel regardless of mesh cell, so even a
+  // coarse LOD mesh lights by the true fine-surface gradient. Heights come
+  // from the chunk's own apron'd heightmap (built just before this) — the
+  // apron supplies the samples one texel OUTSIDE the chunk that edge normals
+  // need, without re-calling the (expensive) heightFn.
   const float e = w->cfg.chunkSize / (float)(w->cfg.hmRes - 1);
   const float texScale = 1.0f / w->cfg.texMetresPerTile;
+  const float skirtDepth = cell + 2.0f; // hangs safely below the surface
   Vector3 o = ChunkOrigin(w, chunk->coord);
 
-  Mesh m = chunk->mesh;
-  if (m.vertices == NULL) {
-    m.vertexCount = R * R;
-    m.triangleCount = (R - 1) * (R - 1) * 2;
-    m.vertices = (float *)MemAlloc(sizeof(float) * m.vertexCount * 3);
-    m.normals = (float *)MemAlloc(sizeof(float) * m.vertexCount * 3);
-    m.texcoords = (float *)MemAlloc(sizeof(float) * m.vertexCount * 2);
-    m.colors = (unsigned char *)MemAlloc(sizeof(unsigned char) * m.vertexCount * 4);
-    m.indices =
-        (unsigned short *)MemAlloc(sizeof(unsigned short) * m.triangleCount * 3);
+  const int gridVC = R * R, skirtVC = 4 * R;
+  const int VC = gridVC + skirtVC;
+  const int gridTC = (R - 1) * (R - 1) * 2, skirtTC = 4 * (R - 1) * 2;
+  const int TC = gridTC + skirtTC;
+
+  // In-place fast path only when the uploaded buffers already match this
+  // size (same-LOD rebakes: sculpt/paint). A LOD change resizes -> build
+  // into pendingMesh; a fresh/mismatched slot buffer -> (re)alloc mesh.
+  chunk->hasPendingMesh = false;
+  Mesh *dst;
+  if (chunk->meshUploaded) {
+    if (chunk->mesh.vertexCount == VC) {
+      dst = &chunk->mesh; // recycle GPU buffers via UpdateMeshBuffer
+    } else {
+      FreeMeshArrays(&chunk->pendingMesh);
+      AllocMeshArrays(&chunk->pendingMesh, VC, TC);
+      dst = &chunk->pendingMesh;
+      chunk->hasPendingMesh = true;
+    }
+  } else {
+    if (chunk->mesh.vertices == NULL || chunk->mesh.vertexCount != VC) {
+      FreeMeshArrays(&chunk->mesh);
+      AllocMeshArrays(&chunk->mesh, VC, TC);
+    }
+    dst = &chunk->mesh;
+  }
+  chunk->gridTriCount = gridTC;
+
+  // Indices: grid quads, then skirt quads per edge.
+  {
+    unsigned short *idx = dst->indices;
     int t = 0;
-    for (int j = 0; j < R - 1; j++) {
+    for (int j = 0; j < R - 1; j++)
       for (int i = 0; i < R - 1; i++) {
         unsigned short a = (unsigned short)(j * R + i);
         unsigned short b = (unsigned short)(j * R + i + 1);
         unsigned short c = (unsigned short)((j + 1) * R + i);
         unsigned short d = (unsigned short)((j + 1) * R + i + 1);
-        m.indices[t++] = a; m.indices[t++] = c; m.indices[t++] = b;
-        m.indices[t++] = b; m.indices[t++] = c; m.indices[t++] = d;
+        idx[t++] = a; idx[t++] = c; idx[t++] = b;
+        idx[t++] = b; idx[t++] = c; idx[t++] = d;
+      }
+    // Skirt vertex bases per edge: south, north, west, east.
+    int sBase[4] = {gridVC, gridVC + R, gridVC + 2 * R, gridVC + 3 * R};
+    for (int edge = 0; edge < 4; edge++) {
+      for (int k = 0; k < R - 1; k++) {
+        int gA, gB;
+        if (edge == 0)      { gA = k; gB = k + 1; }                       // south j=0
+        else if (edge == 1) { gA = (R - 1) * R + k; gB = gA + 1; }        // north
+        else if (edge == 2) { gA = k * R; gB = (k + 1) * R; }             // west i=0
+        else                { gA = k * R + (R - 1); gB = gA + R; }        // east
+        unsigned short sA = (unsigned short)(sBase[edge] + k);
+        unsigned short sB = (unsigned short)(sBase[edge] + k + 1);
+        // Outward winding differs by edge side so front faces point away
+        // from the chunk (skirts on both neighbours cover the crack).
+        if (edge == 0 || edge == 3) {
+          idx[t++] = (unsigned short)gA; idx[t++] = sA; idx[t++] = (unsigned short)gB;
+          idx[t++] = (unsigned short)gB; idx[t++] = sA; idx[t++] = sB;
+        } else {
+          idx[t++] = (unsigned short)gA; idx[t++] = (unsigned short)gB; idx[t++] = sA;
+          idx[t++] = (unsigned short)gB; idx[t++] = sB; idx[t++] = sA;
+        }
       }
     }
-    chunk->mesh = m;
   }
 
+  // Grid vertices.
   float maxH = -1e30f;
   for (int j = 0; j < R; j++) {
     for (int i = 0; i < R; i++) {
@@ -369,23 +478,44 @@ static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
       float hU = SampleHeightApron(w, chunk, wx, wz + e);
       Vector3 n = Vector3Normalize((Vector3){hL - hR, 2.0f * e, hD - hU});
       int v = j * R + i;
-      chunk->mesh.vertices[v * 3 + 0] = lx;
-      chunk->mesh.vertices[v * 3 + 1] = h;
-      chunk->mesh.vertices[v * 3 + 2] = lz;
-      chunk->mesh.normals[v * 3 + 0] = n.x;
-      chunk->mesh.normals[v * 3 + 1] = n.y;
-      chunk->mesh.normals[v * 3 + 2] = n.z;
-      chunk->mesh.texcoords[v * 2 + 0] = wx * texScale;
-      chunk->mesh.texcoords[v * 2 + 1] = wz * texScale;
-      // With a ground texture, keep vertex colours neutral so the texture
-      // reads true; without one, shade by slope (green lowland / grey rock).
+      dst->vertices[v * 3 + 0] = lx;
+      dst->vertices[v * 3 + 1] = h;
+      dst->vertices[v * 3 + 2] = lz;
+      dst->normals[v * 3 + 0] = n.x;
+      dst->normals[v * 3 + 1] = n.y;
+      dst->normals[v * 3 + 2] = n.z;
+      dst->texcoords[v * 2 + 0] = wx * texScale;
+      dst->texcoords[v * 2 + 1] = wz * texScale;
       if (w->cfg.groundTex.id > 0) {
-        unsigned char *col = &chunk->mesh.colors[v * 4];
+        unsigned char *col = &dst->colors[v * 4];
         col[0] = col[1] = col[2] = col[3] = 255;
       } else {
-        SlopeColor(n.y, &chunk->mesh.colors[v * 4]);
+        SlopeColor(n.y, &dst->colors[v * 4]);
       }
       if (h > maxH) maxH = h;
+    }
+  }
+
+  // Skirt vertices: copy each border vertex, drop Y (normal/uv/colour kept
+  // so lighting doesn't crease at the skirt's top edge).
+  int sBase[4] = {gridVC, gridVC + R, gridVC + 2 * R, gridVC + 3 * R};
+  for (int edge = 0; edge < 4; edge++) {
+    for (int k = 0; k < R; k++) {
+      int g;
+      if (edge == 0)      g = k;                    // south
+      else if (edge == 1) g = (R - 1) * R + k;      // north
+      else if (edge == 2) g = k * R;                // west
+      else                g = k * R + (R - 1);      // east
+      int s = sBase[edge] + k;
+      dst->vertices[s * 3 + 0] = dst->vertices[g * 3 + 0];
+      dst->vertices[s * 3 + 1] = dst->vertices[g * 3 + 1] - skirtDepth;
+      dst->vertices[s * 3 + 2] = dst->vertices[g * 3 + 2];
+      dst->normals[s * 3 + 0] = dst->normals[g * 3 + 0];
+      dst->normals[s * 3 + 1] = dst->normals[g * 3 + 1];
+      dst->normals[s * 3 + 2] = dst->normals[g * 3 + 2];
+      dst->texcoords[s * 2 + 0] = dst->texcoords[g * 2 + 0];
+      dst->texcoords[s * 2 + 1] = dst->texcoords[g * 2 + 1];
+      memcpy(&dst->colors[s * 4], &dst->colors[g * 4], 4);
     }
   }
   chunk->maxY = maxH;
@@ -438,11 +568,16 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
 
   // Cook the Jolt collider here on the worker: the BVH build is the
   // expensive half of collider creation and needs no physics-world access.
-  // The main-thread finalize just wraps a body around it.
-  if (w->cfg.physics) {
+  // The main-thread finalize just wraps a body around it. ONLY full-res
+  // (lod 0) chunks get colliders — nothing simulates in the distant rings,
+  // so their BVH build and memory disappear. Cook GRID triangles only (the
+  // skirt curtains hang below the surface and must not be walkable).
+  if (w->cfg.physics && chunk->lod == 0) {
+    Mesh src = chunk->hasPendingMesh ? chunk->pendingMesh : chunk->mesh;
+    src.triangleCount = chunk->gridTriCount;
     Vector3 ro = WorldToRender(w, o);
     Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
-    chunk->pendingShape = BrushPhysicsCookMeshShape(chunk->mesh, xf);
+    chunk->pendingShape = BrushPhysicsCookMeshShape(src, xf);
   }
   chunk->valid = true;
 }
@@ -548,11 +683,21 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
   if (!chunk->valid) return false;
 
   if (IsWindowReady()) {
-    if (!chunk->meshUploaded) {
+    if (chunk->hasPendingMesh) {
+      // LOD resize: swap the new-sized bake in for the old GPU mesh.
+      // UnloadMesh frees the OLD GPU buffers AND the old CPU arrays.
+      if (chunk->meshUploaded) UnloadMesh(chunk->mesh);
+      else FreeMeshArrays(&chunk->mesh);
+      chunk->mesh = chunk->pendingMesh;
+      chunk->pendingMesh = (Mesh){0};
+      chunk->hasPendingMesh = false;
+      UploadMesh(&chunk->mesh, false);
+      chunk->meshUploaded = true;
+    } else if (!chunk->meshUploaded) {
       UploadMesh(&chunk->mesh, false);
       chunk->meshUploaded = true;
     } else {
-      // Recycle the GPU buffers in place.
+      // Same-size rebake (sculpt/paint): recycle the GPU buffers in place.
       int vc = chunk->mesh.vertexCount;
       UpdateMeshBuffer(chunk->mesh, 0, chunk->mesh.vertices, sizeof(float) * vc * 3, 0);
       UpdateMeshBuffer(chunk->mesh, 1, chunk->mesh.texcoords, sizeof(float) * vc * 2, 0);
@@ -592,9 +737,11 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
 
   atomic_store(&chunk->state, CHUNK_ACTIVE);
 
-  // Sculpted again while this bake was in flight: go straight back around.
-  if (chunk->needsRebake) {
+  // Sculpted or LOD-changed while this bake was in flight: straight back
+  // around (adopt the desired LOD now that the worker is idle for it).
+  if (chunk->needsRebake || chunk->desiredLod != chunk->lod) {
     chunk->needsRebake = false;
+    chunk->lod = chunk->desiredLod;
     QueueEnqueue(w->jobs, chunk);
   }
   return true;
@@ -610,11 +757,20 @@ static void ReleaseChunk(BrushWorld *w, WorldChunk *chunk) {
     BrushPhysicsReleaseShape(chunk->pendingShape);
     chunk->pendingShape = NULL;
   }
+  // A resized bake in flight owns fresh CPU arrays not yet swapped in.
+  if (chunk->hasPendingMesh) {
+    FreeMeshArrays(&chunk->pendingMesh);
+    chunk->hasPendingMesh = false;
+  }
   // Keep heightmap + mesh buffers allocated for slot reuse.
   chunk->state = CHUNK_EMPTY;
 }
 
 static void DestroyChunkBuffers(WorldChunk *chunk) {
+  if (chunk->hasPendingMesh) {
+    FreeMeshArrays(&chunk->pendingMesh);
+    chunk->hasPendingMesh = false;
+  }
   if (chunk->splatTex.id != 0) {
     UnloadTexture(chunk->splatTex);
     chunk->splatTex = (Texture2D){0};
@@ -649,9 +805,22 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
   if (cfg.hmRes <= 1) cfg.hmRes = 65;
   if (cfg.texMetresPerTile <= 0.0f) cfg.texMetresPerTile = 4.0f;
 
+  // LOD rings: valid only when strictly increasing and non-zero. The outer
+  // ring becomes the residency radius (LOD extends view distance without
+  // paying its triangle cost).
+  bool lodEnabled = (cfg.lodRadii[0] > 0 && cfg.lodRadii[1] > cfg.lodRadii[0] &&
+                     cfg.lodRadii[2] > cfg.lodRadii[1]);
+  if (lodEnabled) cfg.loadRadius = cfg.lodRadii[2];
+
   BrushWorld *w = (BrushWorld *)MemAlloc(sizeof(BrushWorld));
   memset(w, 0, sizeof(*w));
   w->cfg = cfg;
+  w->lodEnabled = lodEnabled;
+  w->lodRadii[0] = cfg.lodRadii[0];
+  w->lodRadii[1] = cfg.lodRadii[1];
+  w->lodRadii[2] = cfg.lodRadii[2];
+  // Colliders only on the full-res ring (== lod 0); nothing simulates farther.
+  w->collisionRadius = lodEnabled ? cfg.lodRadii[0] : cfg.loadRadius;
   w->hmTexRes = cfg.hmRes + 2;
   w->tileRes = cfg.hmRes - 1;
   w->gridStep = cfg.chunkSize / (float)(cfg.hmRes - 1);
@@ -721,28 +890,73 @@ void BrushWorldUpdate(BrushWorld *w, Vector3 focus) {
   BrushChunkCoord center = ChunkOf(w, focus.x, focus.z);
   w->center = center;
 
-  // 1) Ensure the load ring is resident.
+  // 1) Ensure the load ring is resident (new chunks bake at their ring LOD).
   for (int dz = -w->cfg.loadRadius; dz <= w->cfg.loadRadius; dz++)
     for (int dx = -w->cfg.loadRadius; dx <= w->cfg.loadRadius; dx++) {
       BrushChunkCoord c = {center.x + dx, center.z + dz};
       if (ChunkResident(w, c)) continue;
       WorldChunk *slot = AcquireSlot(w, c);
-      if (slot) QueueEnqueue(w->jobs, slot);
+      if (slot) {
+        slot->lod = slot->desiredLod = DesiredLod(w, dx, dz, 0);
+        QueueEnqueue(w->jobs, slot);
+      }
     }
 
-  // 2) Finalize a bounded number of CPU-ready chunks (main-thread GPU upload).
+  // 2) Re-LOD resident chunks whose ring changed as the focus moved. ACTIVE
+  //    chunks re-enter the bake queue at their new LOD; mid-build chunks get
+  //    flagged and go around after finalize (adopts desiredLod there). The
+  //    old mesh keeps drawing until the new one lands (no blink).
+  if (w->lodEnabled) {
+    for (int i = 0; i < w->chunkCount; i++) {
+      WorldChunk *c = &w->chunks[i];
+      ChunkState s = atomic_load(&c->state);
+      if (s == CHUNK_EMPTY) continue;
+      int dx = c->coord.x - center.x, dz = c->coord.z - center.z;
+      int want = DesiredLod(w, dx, dz, c->lod);
+      if (want == c->desiredLod && want == c->lod) continue;
+      c->desiredLod = want;
+      if (s == CHUNK_ACTIVE && want != c->lod) {
+        c->lod = want;
+        QueueEnqueue(w->jobs, c);
+      } else if (want != c->lod) {
+        c->needsRebake = true;
+      }
+    }
+  }
+
+  // 3) Finalize a bounded number of CPU-ready chunks (main-thread GPU upload).
   const int MAX_FINALIZE = 6;
   int done = 0;
   for (int i = 0; i < w->chunkCount && done < MAX_FINALIZE; i++)
     if (FinalizeChunk(w, &w->chunks[i])) done++;
 
-  // 3) Unload outside the (larger) unload ring; hysteresis avoids border thrash.
+  // 4) Unload outside the (larger) unload ring; hysteresis avoids border thrash.
   for (int i = 0; i < w->chunkCount; i++) {
     WorldChunk *c = &w->chunks[i];
     if (c->state != CHUNK_ACTIVE && c->state != CHUNK_CPU_READY) continue;
     int dx = c->coord.x - center.x, dz = c->coord.z - center.z;
     if (abs(dx) > w->unloadRadius || abs(dz) > w->unloadRadius)
       ReleaseChunk(w, c);
+  }
+
+  // Diagnostic: LOD distribution + triangle budget (BRUSH_LOD_DBG).
+  if (getenv("BRUSH_LOD_DBG") != NULL) {
+    static int frame = 0;
+    if (++frame % 120 == 0) {
+      int perLod[3] = {0}, active = 0;
+      long gridTris = 0;
+      for (int i = 0; i < w->chunkCount; i++) {
+        WorldChunk *c = &w->chunks[i];
+        if (atomic_load(&c->state) != CHUNK_ACTIVE || !c->meshUploaded) continue;
+        active++;
+        if (c->lod >= 0 && c->lod < 3) perLod[c->lod]++;
+        gridTris += c->gridTriCount;
+      }
+      TraceLog(LOG_INFO,
+               "LODDBG active=%d  L0=%d L1=%d L2=%d  gridTris=%ld (%.2fk)",
+               active, perLod[0], perLod[1], perLod[2], gridTris,
+               gridTris / 1000.0);
+    }
   }
 }
 

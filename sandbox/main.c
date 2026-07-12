@@ -301,15 +301,21 @@ static void SandboxInit(void *user) {
   // are ready below. Created centered on the spawn. ---
   float (*heightFn)(void *, float, float) =
       (getenv("BRUSH_HILLS") != NULL) ? SandboxHeight : NULL;
-  s->world = BrushWorldCreate(
-      (BrushWorldConfig){.seed = 1337,
-                         .heightFn = heightFn,
-                         .chunkSize = 64.0f,
-                         .loadRadius = 4,
-                         .physics = &s->phys,
-                         .groundTex = s->groundTex,
-                         .texMetresPerTile = 64.0f}, // 32 squares/chunk -> 2 m
-      (Vector3){spx, 0, spz});
+  // LOD rings (BRUSH_NO_LOD disables): full res out to 4 chunks, half to 8,
+  // quarter to 14 -> ~900 m view at a fraction of the triangle budget.
+  BrushWorldConfig wcfg = {.seed = 1337,
+                           .heightFn = heightFn,
+                           .chunkSize = 64.0f,
+                           .loadRadius = 4,
+                           .physics = &s->phys,
+                           .groundTex = s->groundTex,
+                           .texMetresPerTile = 64.0f}; // 32 squares/chunk -> 2 m
+  if (getenv("BRUSH_NO_LOD") == NULL) {
+    wcfg.lodRadii[0] = 4;
+    wcfg.lodRadii[1] = 8;
+    wcfg.lodRadii[2] = 14;
+  }
+  s->world = BrushWorldCreate(wcfg, (Vector3){spx, 0, spz});
 
   // Terrain sculpt overlay (authored in the editor, saved beside the scene).
   BrushWorldSculptLoad(s->world, s->terrainPath);
