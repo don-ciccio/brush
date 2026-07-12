@@ -12,6 +12,7 @@
 
 #include "b_assets.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -98,9 +99,15 @@ static void ImportParamsDefaults(BrushTexImportParams *p, const char *srcPath) {
   p->mipmaps = true;
   // Filename convention: *_normal* sources default to the normal-map
   // profile so the sidecar starts correct.
+  // Case-insensitive filename heuristics (Rock_Normal.png, foo_HEIGHT.png).
+  char lower[128] = "";
   const char *name = GetFileName(srcPath);
-  p->isNormalMap = (name != NULL && strstr(name, "normal") != NULL);
-  bool isDisplacement = (name != NULL && (strstr(name, "height") != NULL || strstr(name, "disp") != NULL));
+  if (name != NULL) {
+    for (int i = 0; name[i] != '\0' && i < (int)sizeof(lower) - 1; i++)
+      lower[i] = (char)tolower((unsigned char)name[i]);
+  }
+  p->isNormalMap = (strstr(lower, "normal") != NULL);
+  bool isDisplacement = (strstr(lower, "height") != NULL || strstr(lower, "disp") != NULL);
   snprintf(p->compress, sizeof(p->compress), p->isNormalMap ? "bc3" : (isDisplacement ? "none" : "bc1"));
 }
 
@@ -852,6 +859,15 @@ Model BrushAssetsModel(const char *path) {
   extern Shader BrushGetLitShader(void);
   for (int i = 0; i < e->model.materialCount; i++)
     e->model.materials[i].shader = BrushGetLitShader();
+  // Tangents make normal maps work on the UV path; many exports omit them.
+  // Only for UNINDEXED meshes: raylib's GenMeshTangents walks vertices as
+  // loose triangles and computes garbage on indexed data. Indexed meshes
+  // without tangents fall back to geometric normals in the shader.
+  for (int i = 0; i < e->model.meshCount; i++)
+    if (e->model.meshes[i].tangents == NULL &&
+        e->model.meshes[i].texcoords != NULL &&
+        e->model.meshes[i].indices == NULL)
+      GenMeshTangents(&e->model.meshes[i]);
   TraceLog(LOG_INFO, "ASSETS: loaded model %s (%d meshes, %d materials)",
            path, e->model.meshCount, e->model.materialCount);
   return e->model;

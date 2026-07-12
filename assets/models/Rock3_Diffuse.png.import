@@ -1,0 +1,5 @@
+[params]
+max_size = 2048
+generate_mipmaps = true
+compress = bc1
+is_normal_map = false

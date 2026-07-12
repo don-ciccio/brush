@@ -64,6 +64,8 @@ typedef struct BrushSceneMaterial {
   float normalDepth; // normal map intensity (1 = authored)
   float heightScale; // displacement scale strength (default 0.05)
   float aoStrength;  // ambient occlusion strength (default 1.0)
+  bool uvProjection; // sample by the mesh's authored UVs instead of
+                     // triplanar (textures baked FOR a model, e.g. rocks)
   Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
 } BrushSceneMaterial;
 

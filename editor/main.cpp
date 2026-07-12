@@ -1843,6 +1843,12 @@ int main(int argc, char **argv) {
                     g_dirty = true;
                 if (ImGui::SliderFloat("Normal Depth", &m->normalDepth, 0.0f,
                                        3.0f)) g_dirty = true;
+                int proj = m->uvProjection ? 1 : 0;
+                if (ImGui::Combo("Projection", &proj,
+                                 "Triplanar (world wrap)\0Model UVs (authored)\0")) {
+                    m->uvProjection = (proj == 1);
+                    g_dirty = true;
+                }
                 if (ImGui::SliderFloat("Displacement Scale", &m->heightScale, 0.0f,
                                        0.2f, "%.3f")) g_dirty = true;
                 if (ImGui::SliderFloat("AO Strength", &m->aoStrength, 0.0f,

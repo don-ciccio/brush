@@ -11,6 +11,9 @@ material rock assets/textures/rock_color.png assets/textures/rock_normal.png 2.5
 material gravel assets/textures/gravel_color.png assets/textures/gravel_normal.png 2 0.3 1
 material dirt assets/textures/dirt_color.png assets/textures/dirt_normal.png 1.5 0.1 1
 material grass assets/textures/grass_color.png assets/textures/grass_normal.png 2 0.05 1
+material rock1 assets/models/Rock1_Diffuse.png assets/models/Rock_Normal.png - - 1 0.15 1 0.05 1 1
+material rock3 assets/models/Rock3_Diffuse.png assets/models/Rock_Normal.png - - 1 0.15 1 0.05 1 1
+material rock7 assets/models/Rock7_Diffuse.png assets/models/Rock_Normal.png - - 1 0.15 1 0.05 1 1
 
 # block  x y z  rx ry rz  sx sy sz  r g b  material
 block 0 1.5 -26  0 0 0  28.6 3 0.6  168 172 180  -
@@ -28,9 +31,9 @@ block 11.4584 0.851784 -17.9457  17.5651 -0 0  3 0.3 6.6  120 130 150  -
 block -7.21442 2.8671 -20.5179  0 0 0  2 1.11834 2  200 200 200  -
 
 # model  path  x y z  rx ry rz  sx sy sz
-model assets/models/rock_0.glb  -11.5 0 -17.5  0 25 0  0.45 0.45 0.45  rock
-model assets/models/rock_3.glb  -12.5 0 -19.3  0 140 0  0.3 0.3 0.3  rock
-model assets/models/rock_7.glb  11.8 0 -12.5  0 70 0  0.55 0.55 0.55  rock
+model assets/models/rock_0.glb  -11.5 0 -17.5  0 25 0  0.45 0.45 0.45  rock1
+model assets/models/rock_3.glb  -12.5 0 -19.3  0 140 0  0.3 0.3 0.3  rock3
+model assets/models/rock_7.glb  11.8 0 -12.5  0 70 0  0.55 0.55 0.55  rock7
 
 # light  x y z  r g b (linear)  radius  flicker
 light -4.6 2.4 -2.3  2.4 1.25 0.45  9 1
