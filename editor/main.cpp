@@ -149,7 +149,7 @@ struct EditorCamera {
 // ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
-enum EntityType { ENTITY_NONE, ENTITY_BLOCK, ENTITY_LIGHT, ENTITY_SPAWN };
+enum EntityType { ENTITY_NONE, ENTITY_BLOCK, ENTITY_LIGHT, ENTITY_SPAWN, ENTITY_MODEL };
 
 static BrushPhysics g_phys;
 static BrushScene g_scene;
@@ -159,6 +159,12 @@ static Model g_unitCube;
 static Model g_spawnMarker;
 
 static JPH_BodyID g_blockBodies[BRUSH_SCENE_MAX_BLOCKS];
+// One placed model = up to a few trimesh bodies (one per mesh). Kept per
+// instance so picking maps hits back and gizmo drags can remove just the
+// selected instance's bodies.
+#define MODEL_BODIES_PER_INSTANCE 4
+static JPH_BodyID g_modelBodies[BRUSH_SCENE_MAX_MODELS][MODEL_BODIES_PER_INSTANCE];
+static int g_modelBodyN[BRUSH_SCENE_MAX_MODELS];
 static int g_blockBodyCount = 0;
 
 static BrushTimeOfDay g_tod;
@@ -366,6 +372,11 @@ static bool IsImageAsset(const char *path) {
            IsFileExtension(path, ".bmp");
 }
 
+static bool IsModelAsset(const char *path) {
+    return IsFileExtension(path, ".glb") || IsFileExtension(path, ".gltf") ||
+           IsFileExtension(path, ".obj");
+}
+
 static void DrawFolderContents(const char* parentFolder, int& selAsset, BrushTexImportParams& impParams) {
     char parentPath[256];
     if (parentFolder[0] == '\0') {
@@ -423,6 +434,13 @@ static void DrawFolderContents(const char* parentFolder, int& selAsset, BrushTex
                     BrushAssetsGetImportParams(g_assetFiles[i], &impParams);
                 }
             }
+            // Model files drag into the viewport to place an instance.
+            if (IsModelAsset(path) && ImGui::BeginDragDropSource()) {
+                ImGui::SetDragDropPayload("BRUSH_MODEL", path,
+                                          strlen(path) + 1);
+                ImGui::TextUnformatted(GetFileName(path));
+                ImGui::EndDragDropSource();
+            }
         }
     }
 }
@@ -434,18 +452,19 @@ static void DrawFolderContents(const char* parentFolder, int& selAsset, BrushTex
 static int ImportTextureFiles(const char **paths, int count) {
     int imported = 0;
     for (int i = 0; i < count; i++) {
-        if (!IsFileExtension(paths[i], ".png") &&
-            !IsFileExtension(paths[i], ".jpg") &&
-            !IsFileExtension(paths[i], ".jpeg") &&
-            !IsFileExtension(paths[i], ".tga") &&
-            !IsFileExtension(paths[i], ".bmp")) {
-            AddEditorLog("Skipped (not an image): %s", GetFileName(paths[i]));
+        bool isImage = IsImageAsset(paths[i]);
+        bool isModel = IsModelAsset(paths[i]);
+        if (!isImage && !isModel) {
+            AddEditorLog("Skipped (not an image or model): %s",
+                         GetFileName(paths[i]));
             continue;
         }
         mkdir("assets", 0755);
-        mkdir("assets/textures", 0755);
+        mkdir(isModel ? "assets/models" : "assets/textures", 0755);
         char dst[512];
-        snprintf(dst, sizeof(dst), "assets/textures/%s", GetFileName(paths[i]));
+        snprintf(dst, sizeof(dst), "%s/%s",
+                 isModel ? "assets/models" : "assets/textures",
+                 GetFileName(paths[i]));
         int size = 0;
         unsigned char *data = LoadFileData(paths[i], &size);
         if (data == NULL) {
@@ -476,6 +495,18 @@ static void RebuildAllColliders() {
         BrushSceneBlock *k = &g_scene.blocks[i];
         g_blockBodies[g_blockBodyCount++] =
             BrushPhysicsAddStaticBox(&g_phys, k->pos, k->size, k->rot, i, "block");
+    }
+    for (int i = 0; i < BRUSH_SCENE_MAX_MODELS; i++) {
+        for (int j = 0; j < g_modelBodyN[i]; j++)
+            BrushPhysicsRemoveBody(&g_phys, g_modelBodies[i][j]);
+        g_modelBodyN[i] = 0;
+    }
+    for (int i = 0; i < g_scene.modelCount; i++) {
+        BrushSceneModelInstance *mi = &g_scene.models[i];
+        if (mi->model.meshCount == 0) continue;
+        g_modelBodyN[i] = BrushPhysicsAddStaticModel(
+            &g_phys, &mi->model, BrushModelInstanceMatrix(mi), i, "model",
+            g_modelBodies[i], MODEL_BODIES_PER_INSTANCE);
     }
 }
 
@@ -518,6 +549,23 @@ static void AddLightEntity() {
     AddEditorLog("Added light %d", g_selectedIdx);
 }
 
+// Place a model instance (Assets-panel drag or OS drop). Resolves through
+// the registry immediately so it draws this frame.
+static void AddModelEntityAt(const char *path, Vector3 pos) {
+    if (g_scene.modelCount >= BRUSH_SCENE_MAX_MODELS) return;
+    BrushSceneModelInstance *mi = &g_scene.models[g_scene.modelCount];
+    memset(mi, 0, sizeof(*mi));
+    snprintf(mi->path, sizeof(mi->path), "%s", path);
+    mi->pos = pos;
+    mi->scale = (Vector3){ 1, 1, 1 };
+    mi->model = BrushAssetsModel(mi->path);
+    g_selectedType = ENTITY_MODEL;
+    g_selectedIdx = g_scene.modelCount++;
+    RebuildAllColliders();
+    g_dirty = true;
+    AddEditorLog("Placed %s", GetFileName(path));
+}
+
 static void DeleteSelected() {
     if (g_selectedType == ENTITY_BLOCK && g_selectedIdx >= 0) {
         for (int i = g_selectedIdx; i < g_scene.blockCount - 1; i++)
@@ -530,6 +578,13 @@ static void DeleteSelected() {
             g_scene.lights[i] = g_scene.lights[i + 1];
         g_scene.lightCount--;
         AddEditorLog("Deleted light");
+    } else if (g_selectedType == ENTITY_MODEL && g_selectedIdx >= 0) {
+        BrushAssetsReleaseModel(g_scene.models[g_selectedIdx].path);
+        for (int i = g_selectedIdx; i < g_scene.modelCount - 1; i++)
+            g_scene.models[i] = g_scene.models[i + 1];
+        g_scene.modelCount--;
+        RebuildAllColliders();
+        AddEditorLog("Deleted model");
     } else {
         return;
     }
@@ -556,6 +611,16 @@ static void DuplicateSelected() {
         g_selectedIdx = g_scene.lightCount++;
         g_dirty = true;
         AddEditorLog("Duplicated light -> %d", g_selectedIdx);
+    } else if (g_selectedType == ENTITY_MODEL && g_selectedIdx >= 0 &&
+               g_scene.modelCount < BRUSH_SCENE_MAX_MODELS) {
+        BrushSceneModelInstance copy = g_scene.models[g_selectedIdx];
+        copy.pos.x += 1.5f;
+        copy.model = BrushAssetsModel(copy.path); // its own registry ref
+        g_scene.models[g_scene.modelCount] = copy;
+        g_selectedIdx = g_scene.modelCount++;
+        RebuildAllColliders();
+        g_dirty = true;
+        AddEditorLog("Duplicated model -> %d", g_selectedIdx);
     }
 }
 
@@ -567,6 +632,8 @@ static void FrameSelected() {
         g_camera.Frame(b->pos, r);
     } else if (g_selectedType == ENTITY_LIGHT && g_selectedIdx >= 0) {
         g_camera.Frame(g_scene.lights[g_selectedIdx].light.position, 1.5f);
+    } else if (g_selectedType == ENTITY_MODEL && g_selectedIdx >= 0) {
+        g_camera.Frame(g_scene.models[g_selectedIdx].pos, 2.5f);
     } else if (g_selectedType == ENTITY_SPAWN) {
         g_camera.Frame(g_scene.spawn, 1.5f);
     } else {
@@ -852,6 +919,8 @@ static bool CreateProject(const char *parent, const char *name, int tmpl,
     if (tmpl == TEMPLATE_GYM) {
         snprintf(dst, sizeof(dst), "%s/assets/textures", outDir);
         CopyTree(BrushEnginePath("assets/textures"), dst);
+        snprintf(dst, sizeof(dst), "%s/assets/models", outDir);
+        CopyTree(BrushEnginePath("assets/models"), dst);
         snprintf(dst, sizeof(dst), "%s/assets/gym.def", outDir);
         CopyFileRaw(BrushEnginePath("assets/gym.def"), dst);
         snprintf(dst, sizeof(dst), "%s/assets/gym.terrain", outDir);
@@ -1177,6 +1246,15 @@ int main(int argc, char **argv) {
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &g_unitCube, xf, k->color);
         }
 
+        // Placed model props (shared registry models, per-instance matrix).
+        for (int i = 0; i < g_scene.modelCount; i++) {
+            BrushSceneModelInstance *mi = &g_scene.models[i];
+            if (mi->model.meshCount == 0) continue;
+            Matrix mxf = BrushModelInstanceMatrix(mi);
+            BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE);
+            BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, mxf, WHITE);
+        }
+
         float tt = (float)GetTime();
         for (int i = 0; i < g_scene.lightCount; i++) {
             BrushSceneLight *l = &g_scene.lights[i];
@@ -1250,6 +1328,20 @@ int main(int argc, char **argv) {
                 DrawCubeWires(l->light.position, 0.35f, 0.35f, 0.35f, GOLD);
                 DrawSphereWires(l->light.position, l->light.radius, 12, 12,
                                 Fade(GOLD, 0.25f));
+            } else if (g_selectedType == ENTITY_MODEL && g_selectedIdx >= 0 &&
+                       g_selectedIdx < g_scene.modelCount) {
+                BrushSceneModelInstance *mi = &g_scene.models[g_selectedIdx];
+                if (mi->model.meshCount > 0) {
+                    BoundingBox bb = GetModelBoundingBox(mi->model);
+                    Vector3 c = Vector3Scale(Vector3Add(bb.min, bb.max), 0.5f);
+                    Vector3 sz = Vector3Subtract(bb.max, bb.min);
+                    rlPushMatrix();
+                    Matrix mxf = BrushModelInstanceMatrix(mi);
+                    rlMultMatrixf(MatrixToFloat(mxf));
+                    DrawCubeWires(c, sz.x * 1.02f, sz.y * 1.02f, sz.z * 1.02f,
+                                  GREEN);
+                    rlPopMatrix();
+                }
             } else if (g_selectedType == ENTITY_SPAWN) {
                 DrawCubeWires((Vector3){ g_scene.spawn.x, g_scene.spawn.y + 0.9f,
                                          g_scene.spawn.z }, 0.9f, 1.9f, 0.9f, SKYBLUE);
@@ -1428,6 +1520,24 @@ int main(int argc, char **argv) {
                 ImGui::EndPopup();
             }
         }
+        char modelsHdr[32];
+        snprintf(modelsHdr, sizeof(modelsHdr), "Models (%d)###models", g_scene.modelCount);
+        if (g_scene.modelCount > 0 &&
+            ImGui::CollapsingHeader(modelsHdr, ImGuiTreeNodeFlags_DefaultOpen))
+        for (int i = 0; i < g_scene.modelCount; i++) {
+            char label[160];
+            snprintf(label, sizeof(label), "  %s##m%d",
+                     GetFileName(g_scene.models[i].path), i);
+            bool sel = (g_selectedType == ENTITY_MODEL && g_selectedIdx == i);
+            if (ImGui::Selectable(label, sel)) { g_selectedType = ENTITY_MODEL; g_selectedIdx = i; }
+            if (ImGui::BeginPopupContextItem()) {
+                g_selectedType = ENTITY_MODEL; g_selectedIdx = i;
+                if (ImGui::MenuItem("Frame")) FrameSelected();
+                if (ImGui::MenuItem("Duplicate")) DuplicateSelected();
+                if (ImGui::MenuItem("Delete")) DeleteSelected();
+                ImGui::EndPopup();
+            }
+        }
         char lightsHdr[32];
         snprintf(lightsHdr, sizeof(lightsHdr), "Lights (%d)###lights", g_scene.lightCount);
         if (ImGui::CollapsingHeader(lightsHdr, ImGuiTreeNodeFlags_DefaultOpen))
@@ -1515,6 +1625,45 @@ int main(int argc, char **argv) {
                 }
                 ImGui::EndCombo();
             }
+        } else if (g_selectedType == ENTITY_MODEL && g_selectedIdx >= 0 &&
+                   g_selectedIdx < g_scene.modelCount) {
+            BrushSceneModelInstance *mi = &g_scene.models[g_selectedIdx];
+            ImGui::SeparatorText(TextFormat("Model %d", g_selectedIdx));
+            ImGui::TextDisabled("%s", mi->path);
+            float mpos[3] = { mi->pos.x, mi->pos.y, mi->pos.z };
+            float mrot[3] = { mi->rot.x, mi->rot.y, mi->rot.z };
+            float mscl[3] = { mi->scale.x, mi->scale.y, mi->scale.z };
+            bool mchanged = false;
+            if (ImGui::DragFloat3("Position", mpos, 0.1f)) {
+                mi->pos = (Vector3){ mpos[0], mpos[1], mpos[2] }; mchanged = true;
+            }
+            if (ImGui::DragFloat3("Rotation", mrot, 1.0f, -360.0f, 360.0f, "%.1f deg")) {
+                mi->rot = (Vector3){ mrot[0], mrot[1], mrot[2] }; mchanged = true;
+            }
+            if (ImGui::DragFloat3("Scale", mscl, 0.05f, 0.01f, 100.0f)) {
+                mi->scale = (Vector3){ mscl[0], mscl[1], mscl[2] }; mchanged = true;
+            }
+            // Swap the mesh file: ResolveMaterials handles ref bookkeeping.
+            if (ImGui::BeginCombo("Mesh", GetFileName(mi->path))) {
+                for (int i = 0; i < g_assetFileCount; i++) {
+                    if (!IsModelAsset(g_assetFiles[i])) continue;
+                    bool sel = (strcmp(mi->path, g_assetFiles[i]) == 0);
+                    if (ImGui::Selectable(GetFileName(g_assetFiles[i]), sel) && !sel) {
+                        snprintf(mi->path, sizeof(mi->path), "%s", g_assetFiles[i]);
+                        BrushSceneResolveMaterials(&g_scene);
+                        mchanged = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            static bool modelInspStale = false;
+            if (mchanged) { g_dirty = true; modelInspStale = true; }
+            if (modelInspStale && !ImGui::IsAnyItemActive()) {
+                RebuildAllColliders();
+                modelInspStale = false;
+            }
+            if (mi->model.meshCount == 0)
+                ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "mesh MISSING");
         } else if (g_selectedType == ENTITY_LIGHT && g_selectedIdx >= 0 &&
                    g_selectedIdx < g_scene.lightCount) {
             BrushSceneLight *l = &g_scene.lights[g_selectedIdx];
@@ -1852,6 +2001,11 @@ int main(int argc, char **argv) {
                     if (edited && BrushAssetsSetImportParams(path, &impParams))
                         AddEditorLog("Import settings saved: %s (re-importing)",
                                      GetFileName(path));
+                } else if (IsModelAsset(path)) {
+                    ImGui::TextDisabled("3D model");
+                    ImGui::TextWrapped(
+                        "Drag this file into the viewport to place it in "
+                        "the scene.");
                 } else {
                     ImGui::TextDisabled("No import options for this file type.");
                 }
@@ -1887,6 +2041,7 @@ int main(int argc, char **argv) {
             Texture2D finalTex = BrushPostGetFinalTexture(pp);
             ImGui::Image((ImTextureID)(intptr_t)finalTex.id, imgSize,
                          ImVec2(0, 1), ImVec2(1, 0)); // render textures are Y-flipped
+            bool imageDropTarget = ImGui::BeginDragDropTarget();
 
             // Map a panel mouse position into a full-window ray through the image.
             auto mouseToRay = [&](Vector2 mouse, Ray *out) -> bool {
@@ -1898,6 +2053,34 @@ int main(int argc, char **argv) {
                 *out = GetMouseRay(screen, g_camera.cam);
                 return true;
             };
+
+            // --- Drop a model from the Assets panel onto the scene -------------
+            // Raycast the drop point; land the instance where the cursor hits
+            // (or on a ground-plane fallback when nothing is under it).
+            if (imageDropTarget) {
+                if (const ImGuiPayload *payload =
+                        ImGui::AcceptDragDropPayload("BRUSH_MODEL")) {
+                    const char *droppedPath = (const char *)payload->Data;
+                    Ray ray;
+                    Vector3 spawn = { 0, 0, 0 };
+                    if (mouseToRay(GetMousePosition(), &ray)) {
+                        Vector3 hitPt;
+                        if (BrushPhysicsRaycastEx(&g_phys, ray.position,
+                                                  ray.direction, 1000.0f,
+                                                  &hitPt, NULL, NULL)) {
+                            spawn = hitPt;
+                        } else if (fabsf(ray.direction.y) > 0.0001f) {
+                            float t = -ray.position.y / ray.direction.y;
+                            if (t > 0)
+                                spawn = Vector3Add(
+                                    ray.position,
+                                    Vector3Scale(ray.direction, t));
+                        }
+                    }
+                    AddModelEntityAt(droppedPath, spawn);
+                }
+                ImGui::EndDragDropTarget();
+            }
 
             // --- Gizmo (select mode only) -------------------------------------
             if (g_mode == MODE_SELECT && g_selectedType != ENTITY_NONE) {
@@ -1914,6 +2097,15 @@ int main(int argc, char **argv) {
                     modelMat = MatrixTranslate(g_scene.lights[g_selectedIdx].light.position.x,
                                                g_scene.lights[g_selectedIdx].light.position.y,
                                                g_scene.lights[g_selectedIdx].light.position.z);
+                else if (g_selectedType == ENTITY_MODEL) {
+                    // Pure instance TRS for the gizmo (the model's base
+                    // transform stays out so decompose round-trips clean).
+                    BrushSceneModelInstance *mi = &g_scene.models[g_selectedIdx];
+                    modelMat = MatrixScale(mi->scale.x, mi->scale.y, mi->scale.z);
+                    modelMat = MatrixMultiply(modelMat, BrushEulerXYZ(mi->rot));
+                    modelMat = MatrixMultiply(modelMat,
+                                              MatrixTranslate(mi->pos.x, mi->pos.y, mi->pos.z));
+                }
                 else if (g_selectedType == ENTITY_SPAWN)
                     modelMat = MatrixTranslate(g_scene.spawn.x, g_scene.spawn.y, g_scene.spawn.z);
 
@@ -1922,8 +2114,10 @@ int main(int argc, char **argv) {
                 Matrix modelT = MatrixTranspose(modelMat);
 
                 ImGuizmo::Manipulate((float *)&viewT, (float *)&projT,
-                                     g_selectedType == ENTITY_BLOCK ? g_gizmoOp
-                                                                    : ImGuizmo::TRANSLATE,
+                                     (g_selectedType == ENTITY_BLOCK ||
+                                      g_selectedType == ENTITY_MODEL)
+                                         ? g_gizmoOp
+                                         : ImGuizmo::TRANSLATE,
                                      ImGuizmo::WORLD, (float *)&modelT);
 
                 // Collider policy during drags: the selected block's body is
@@ -1936,6 +2130,12 @@ int main(int argc, char **argv) {
                     g_blockBodies[g_selectedIdx] != BRUSH_BODY_INVALID) {
                     BrushPhysicsRemoveBody(&g_phys, g_blockBodies[g_selectedIdx]);
                     g_blockBodies[g_selectedIdx] = BRUSH_BODY_INVALID;
+                }
+                if (usingGizmo && !wasUsingGizmo && g_selectedType == ENTITY_MODEL) {
+                    for (int j = 0; j < g_modelBodyN[g_selectedIdx]; j++)
+                        BrushPhysicsRemoveBody(&g_phys,
+                                               g_modelBodies[g_selectedIdx][j]);
+                    g_modelBodyN[g_selectedIdx] = 0;
                 }
                 if (!usingGizmo && wasUsingGizmo) RebuildAllColliders();
                 wasUsingGizmo = usingGizmo;
@@ -1963,7 +2163,7 @@ int main(int argc, char **argv) {
                                 newPos = Vector3Add(hitPt, Vector3Scale(hitNorm, half));
                             } else if (g_selectedType == ENTITY_LIGHT) {
                                 newPos = Vector3Add(hitPt, Vector3Scale(hitNorm, 0.2f));
-                            } else {
+                            } else { // models + spawn sit on the surface
                                 newPos = hitPt;
                             }
                         }
@@ -1974,6 +2174,11 @@ int main(int argc, char **argv) {
                         b->pos = newPos;
                         if (g_gizmoOp == ImGuizmo::ROTATE) b->rot = newRot;
                         if (g_gizmoOp == ImGuizmo::SCALE) b->size = newScale;
+                    } else if (g_selectedType == ENTITY_MODEL) {
+                        BrushSceneModelInstance *mi = &g_scene.models[g_selectedIdx];
+                        mi->pos = newPos;
+                        if (g_gizmoOp == ImGuizmo::ROTATE) mi->rot = newRot;
+                        if (g_gizmoOp == ImGuizmo::SCALE) mi->scale = newScale;
                     } else if (g_selectedType == ENTITY_LIGHT) {
                         g_scene.lights[g_selectedIdx].light.position = newPos;
                     } else if (g_selectedType == ENTITY_SPAWN) {
@@ -2045,6 +2250,14 @@ int main(int argc, char **argv) {
                                 break;
                             }
                         }
+                        for (int i = 0; i < g_scene.modelCount && hitIdx < 0; i++)
+                            for (int j = 0; j < g_modelBodyN[i]; j++)
+                                if (g_modelBodies[i][j] == hitBody) {
+                                    closest = Vector3Distance(ray.position, hitPt);
+                                    hitType = ENTITY_MODEL;
+                                    hitIdx = i;
+                                    break;
+                                }
                     }
                     for (int i = 0; i < g_scene.lightCount; i++) {
                         Vector3 p = g_scene.lights[i].light.position;

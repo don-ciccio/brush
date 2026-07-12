@@ -45,6 +45,7 @@ extern "C" {
 #define BRUSH_SCENE_MAX_BLOCKS 256
 #define BRUSH_SCENE_MAX_LIGHTS 64
 #define BRUSH_SCENE_MAX_MATERIALS 32
+#define BRUSH_SCENE_MAX_MODELS 128
 #define BRUSH_SCENE_MAX_POST 48
 #define BRUSH_SCENE_PATH_MAX 512
 #define BRUSH_SCENE_NAME_MAX 32
@@ -65,6 +66,18 @@ typedef struct BrushSceneMaterial {
   float aoStrength;  // ambient occlusion strength (default 1.0)
   Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
 } BrushSceneMaterial;
+
+// A placed 3D model (static prop). The resolved Model comes from the
+// shared registry (b_assets) — instances share meshes/materials, so this
+// is for STATIC geometry; animated things own their models. Path is
+// project-relative, no spaces (the format is space-separated).
+typedef struct BrushSceneModelInstance {
+  char path[128]; // e.g. "assets/models/rock_0.glb"
+  Vector3 pos;
+  Vector3 rot;   // Euler degrees, same convention as blocks
+  Vector3 scale; // per-axis; (1,1,1) default
+  Model model;   // resolved at runtime (meshCount 0 until then), not saved
+} BrushSceneModelInstance;
 
 typedef struct BrushSceneBlock {
   Vector3 pos, size;
@@ -94,6 +107,8 @@ typedef struct BrushScene {
   int lightCount;
   BrushSceneMaterial materials[BRUSH_SCENE_MAX_MATERIALS];
   int materialCount;
+  BrushSceneModelInstance models[BRUSH_SCENE_MAX_MODELS];
+  int modelCount;
   BrushScenePostSetting post[BRUSH_SCENE_MAX_POST];
   int postCount;
 
@@ -113,6 +128,10 @@ bool BrushSceneSave(BrushScene *scene, const char *path);
 // editor gizmo, block rendering, and box colliders.
 Matrix BrushEulerXYZ(Vector3 degrees);
 Matrix BrushBlockGetModelMatrix(const BrushSceneBlock *k);
+// Full instance matrix for a placed model: the model's own base transform
+// (glTF axis conversion etc.) THEN scale/rot/translate. Render and physics
+// both use this — one chokepoint, like BrushBlockGetModelMatrix.
+Matrix BrushModelInstanceMatrix(const BrushSceneModelInstance *m);
 
 // Re-load if the file changed on disk since the last Load/HotReload. Returns
 // true when a reload happened (the game should re-apply colliders, and
@@ -123,12 +142,13 @@ bool BrushSceneHotReload(BrushScene *s);
 // Index of a material by name, -1 if absent/empty.
 int BrushSceneFindMaterial(const BrushScene *s, const char *name);
 
-// (Re-)acquire every material's textures from the asset registry, releasing
-// whatever was previously resolved. Load calls this; the editor calls it
-// again after changing a material's paths. Idempotent.
+// (Re-)acquire every material's textures AND every model instance from the
+// asset registry, releasing whatever was previously resolved. Load calls
+// this; the editor calls it again after edits. Idempotent.
 void BrushSceneResolveMaterials(BrushScene *s);
 
-// Release all resolved material textures (call before dropping a scene).
+// Release all resolved assets — material textures and models (call before
+// dropping a scene).
 void BrushSceneUnloadMaterials(BrushScene *s);
 
 // Fill `out` with the submit-ready props for a block's material. False if

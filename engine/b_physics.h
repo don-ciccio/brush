@@ -58,6 +58,14 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh,
                                      Matrix transform, int userData,
                                      const char *tag);
 
+// Every mesh of a model as static trimesh colliders (one body per mesh,
+// exact collision). `transform` is the full instance matrix — include the
+// model's own base transform (see BrushModelInstanceMatrix in b_scene.h).
+// Writes up to `outCap` body ids to `out`; returns how many were created.
+int BrushPhysicsAddStaticModel(BrushPhysics *pw, const Model *model,
+                               Matrix transform, int userData,
+                               const char *tag, JPH_BodyID *out, int outCap);
+
 // Cook a static triangle-mesh shape without touching the physics world.
 // THREAD-SAFE (after BrushPhysicsInit): mesh-shape cooking is the expensive
 // part of AddStaticMesh, so streaming workers can run it off the main

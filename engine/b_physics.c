@@ -276,6 +276,19 @@ JPH_BodyID BrushPhysicsAddStaticMesh(BrushPhysics *pw, Mesh mesh, Matrix transfo
     return BrushPhysicsAddStaticShape(pw, shape, userData, tag);
 }
 
+int BrushPhysicsAddStaticModel(BrushPhysics *pw, const Model *model,
+                               Matrix transform, int userData,
+                               const char *tag, JPH_BodyID *out, int outCap) {
+    if (!pw || !pw->bodyInterface || model == NULL) return 0;
+    int count = 0;
+    for (int i = 0; i < model->meshCount && count < outCap; i++) {
+        JPH_BodyID id = BrushPhysicsAddStaticMesh(pw, model->meshes[i],
+                                                  transform, userData, tag);
+        if (id != BRUSH_BODY_INVALID) out[count++] = id;
+    }
+    return count;
+}
+
 JPH_BodyID BrushPhysicsAddTriggerBox(BrushPhysics *pw, Vector3 position, Vector3 size, int userData, const char *tag) {
     if (!pw || !pw->bodyInterface) return BRUSH_BODY_INVALID;
 

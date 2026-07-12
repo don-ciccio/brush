@@ -91,6 +91,23 @@ bool BrushAssetsSetImportParams(const char *path,
 // (consumers must tell the lit shader to reconstruct Z from alpha/green).
 bool BrushAssetsIsSwizzledNormal(Texture2D tex);
 
+// --- Models -------------------------------------------------------------------
+// Ref-counted like textures, keyed by project-relative path. The registry
+// binds the engine lit shader to every material on load (raylib prepends
+// its default material at index 0 on glTF — bind ALL, never by index) and
+// hands out the SAME Model to every caller: static props only. Anything
+// with per-instance animation state (the player character) must load its
+// own copy outside the registry. Ship .glb — self-contained, and the only
+// form a release pak can serve (.gltf external buffers bypass the pak's
+// file hooks).
+
+// Acquire the model at `path` (+1 ref). meshCount == 0 = load failed
+// (warned once, negative-cached).
+Model BrushAssetsModel(const char *path);
+
+// Release one reference; the last release unloads GPU/CPU data.
+void BrushAssetsReleaseModel(const char *path);
+
 // --- Release packaging (.pak) --------------------------------------------------
 // Mount a pak archive (tools/packager output) as the top of the lookup
 // chain. The pak holds the project tree verbatim — logical asset paths

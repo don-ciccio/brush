@@ -809,6 +809,66 @@ bool BrushAssetsIsSwizzledNormal(Texture2D tex) {
   return false;
 }
 
+// --- Model registry --------------------------------------------------------------
+
+#define BRUSH_ASSETS_MAX_MODELS 64
+
+typedef struct ModelEntry {
+  char path[BRUSH_ASSETS_PATH_MAX];
+  Model model; // meshCount 0 = load failed (negative cache)
+  int refs;
+} ModelEntry;
+
+static ModelEntry g_models[BRUSH_ASSETS_MAX_MODELS];
+static int g_modelCount = 0;
+
+Model BrushAssetsModel(const char *path) {
+  if (path == NULL || path[0] == '\0') return (Model){0};
+
+  for (int i = 0; i < g_modelCount; i++) {
+    if (strcmp(g_models[i].path, path) == 0) {
+      g_models[i].refs++;
+      return g_models[i].model;
+    }
+  }
+
+  if (g_modelCount >= BRUSH_ASSETS_MAX_MODELS) {
+    TraceLog(LOG_WARNING, "ASSETS: model cache full (%d), can't load %s",
+             BRUSH_ASSETS_MAX_MODELS, path);
+    return (Model){0};
+  }
+
+  ModelEntry *e = &g_models[g_modelCount++];
+  memset(e, 0, sizeof(*e));
+  strncpy(e->path, path, sizeof(e->path) - 1);
+  e->refs = 1;
+  e->model = LoadModel(path); // pak-aware via the file-load hooks
+  if (e->model.meshCount == 0) {
+    TraceLog(LOG_WARNING, "ASSETS: missing/empty model %s", path);
+    return e->model;
+  }
+  // glTF loads prepend raylib's default material at index 0 (real materials
+  // shift to 1..N) — bind the lit shader to EVERY material, never by index.
+  extern Shader BrushGetLitShader(void);
+  for (int i = 0; i < e->model.materialCount; i++)
+    e->model.materials[i].shader = BrushGetLitShader();
+  TraceLog(LOG_INFO, "ASSETS: loaded model %s (%d meshes, %d materials)",
+           path, e->model.meshCount, e->model.materialCount);
+  return e->model;
+}
+
+void BrushAssetsReleaseModel(const char *path) {
+  if (path == NULL || path[0] == '\0') return;
+  for (int i = 0; i < g_modelCount; i++) {
+    if (strcmp(g_models[i].path, path) != 0) continue;
+    if (--g_models[i].refs > 0) return;
+    if (g_models[i].model.meshCount > 0) UnloadModel(g_models[i].model);
+    TraceLog(LOG_DEBUG, "ASSETS: unloaded model %s", g_models[i].path);
+    g_models[i] = g_models[--g_modelCount]; // swap-remove
+    return;
+  }
+}
+
 int BrushAssetsCookTree(const char *dir) {
   int cooked = 0;
   FilePathList fl = LoadDirectoryFilesEx(dir, NULL, true);
@@ -839,6 +899,9 @@ void BrushAssetsShutdown(void) {
   for (int i = 0; i < g_texCount; i++)
     if (g_tex[i].tex.id != 0) UnloadTexture(g_tex[i].tex);
   g_texCount = 0;
+  for (int i = 0; i < g_modelCount; i++)
+    if (g_models[i].model.meshCount > 0) UnloadModel(g_models[i].model);
+  g_modelCount = 0;
   if (g_pak != NULL) {
     fclose(g_pak);
     g_pak = NULL;

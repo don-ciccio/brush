@@ -72,6 +72,8 @@ typedef struct Sandbox {
   BrushScene scene;
   JPH_BodyID blockBodies[BRUSH_SCENE_MAX_BLOCKS];
   int blockBodyCount;
+  JPH_BodyID modelBodies[BRUSH_SCENE_MAX_MODELS * 2]; // ~1 body per mesh
+  int modelBodyCount;
   Model unitCube;
 
   // Project this player is running (see b_project.h): the process cwd is
@@ -218,6 +220,18 @@ static void ApplySceneColliders(Sandbox *s) {
     BrushSceneBlock *k = &s->scene.blocks[i];
     s->blockBodies[s->blockBodyCount++] =
         BrushPhysicsAddStaticBox(&s->phys, k->pos, k->size, k->rot, i, "block");
+  }
+  for (int i = 0; i < s->modelBodyCount; i++)
+    BrushPhysicsRemoveBody(&s->phys, s->modelBodies[i]);
+  s->modelBodyCount = 0;
+  for (int i = 0; i < s->scene.modelCount; i++) {
+    BrushSceneModelInstance *mi = &s->scene.models[i];
+    if (mi->model.meshCount == 0) continue; // unresolved: no collision
+    s->modelBodyCount += BrushPhysicsAddStaticModel(
+        &s->phys, &mi->model, BrushModelInstanceMatrix(mi), i, "model",
+        s->modelBodies + s->modelBodyCount,
+        (int)(sizeof(s->modelBodies) / sizeof(s->modelBodies[0])) -
+            s->modelBodyCount);
   }
 }
 
@@ -710,6 +724,17 @@ static void SandboxDraw(void *user) {
     BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &s->unitCube, xf, k->color,
                         hasMat ? &props : &checker);
     BrushRenderSubmit(BRUSH_LAYER_SHADOW, &s->unitCube, xf, k->color);
+  }
+
+  // Placed model props (world.def `model` lines): shared registry models,
+  // per-instance transforms; the matrix includes the model's own base
+  // transform (see BrushModelInstanceMatrix).
+  for (int i = 0; i < s->scene.modelCount; i++) {
+    BrushSceneModelInstance *mi = &s->scene.models[i];
+    if (mi->model.meshCount == 0) continue;
+    Matrix xf = BrushModelInstanceMatrix(mi);
+    BrushRenderSubmit(BRUSH_LAYER_OPAQUE, &mi->model, xf, WHITE);
+    BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, xf, WHITE);
   }
 
   // Scene lights, submitted per frame like draws. Flickering ones get two

@@ -27,6 +27,11 @@ block -9 0.75 -20  0 0 0  1.5 1.5 1.5  170 120 70  -
 block 11.4584 0.851784 -17.9457  17.5651 -0 0  3 0.3 6.6  120 130 150  -
 block -7.21442 2.8671 -20.5179  0 0 0  2 1.11834 2  200 200 200  -
 
+# model  path  x y z  rx ry rz  sx sy sz
+model assets/models/rock_0.glb  -11.5 0 -17.5  0 25 0  0.45 0.45 0.45
+model assets/models/rock_3.glb  -12.5 0 -19.3  0 140 0  0.3 0.3 0.3
+model assets/models/rock_7.glb  11.8 0 -12.5  0 70 0  0.55 0.55 0.55
+
 # light  x y z  r g b (linear)  radius  flicker
 light -4.6 2.4 -2.3  2.4 1.25 0.45  9 1
 light 4.6 2.4 -2.3  2.4 1.25 0.45  9 1

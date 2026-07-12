@@ -117,6 +117,16 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
             .color = {(unsigned char)ir, (unsigned char)ig, (unsigned char)ib, 255},
         };
       }
+    } else if ((n = sscanf(p, "model %255s %f %f %f %f %f %f %f %f %f", w2,
+                           &x, &y, &z, &rx, &ry, &rz, &sx, &sy, &sz)) >= 7) {
+      if (temp.modelCount < BRUSH_SCENE_MAX_MODELS) {
+        BrushSceneModelInstance *mi = &temp.models[temp.modelCount++];
+        memset(mi, 0, sizeof(*mi));
+        CopyField(mi->path, sizeof(mi->path), w2);
+        mi->pos = (Vector3){x, y, z};
+        mi->rot = (Vector3){rx, ry, rz};
+        mi->scale = (n == 10) ? (Vector3){sx, sy, sz} : (Vector3){1, 1, 1};
+      }
     } else if (sscanf(p, "light %f %f %f %f %f %f %f %d", &x, &y, &z, &r, &g,
                       &b, &radius, &flicker) == 8) {
       if (temp.lightCount < BRUSH_SCENE_MAX_LIGHTS) {
@@ -172,6 +182,14 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
             k->size.y, k->size.z, k->color.r, k->color.g, k->color.b,
             k->material[0] ? k->material : "-");
   }
+  if (s->modelCount > 0)
+    fprintf(f, "\n# model  path  x y z  rx ry rz  sx sy sz\n");
+  for (int i = 0; i < s->modelCount; i++) {
+    const BrushSceneModelInstance *mi = &s->models[i];
+    fprintf(f, "model %s  %g %g %g  %g %g %g  %g %g %g\n", mi->path,
+            mi->pos.x, mi->pos.y, mi->pos.z, mi->rot.x, mi->rot.y, mi->rot.z,
+            mi->scale.x, mi->scale.y, mi->scale.z);
+  }
   fprintf(f, "\n# light  x y z  r g b (linear)  radius  flicker\n");
   for (int i = 0; i < s->lightCount; i++) {
     const BrushSceneLight *l = &s->lights[i];
@@ -223,6 +241,17 @@ Matrix BrushBlockGetModelMatrix(const BrushSceneBlock *k) {
   return MatrixMultiply(xf, MatrixTranslate(k->pos.x, k->pos.y, k->pos.z));
 }
 
+Matrix BrushModelInstanceMatrix(const BrushSceneModelInstance *m) {
+  // The model's authored base transform (e.g. glTF axis conversion) applies
+  // FIRST, then the instance's scale/rotation/translation. The renderer's
+  // draw path REPLACES model.transform with the submitted matrix, so the
+  // base transform must be part of it or it would be lost.
+  Matrix xf = m->model.transform;
+  xf = MatrixMultiply(xf, MatrixScale(m->scale.x, m->scale.y, m->scale.z));
+  xf = MatrixMultiply(xf, BrushEulerXYZ(m->rot));
+  return MatrixMultiply(xf, MatrixTranslate(m->pos.x, m->pos.y, m->pos.z));
+}
+
 // --- Materials ---------------------------------------------------------------
 
 int BrushSceneFindMaterial(const BrushScene *s, const char *name) {
@@ -248,6 +277,15 @@ void BrushSceneUnloadMaterials(BrushScene *s) {
     s->materials[i].displacementTex = (Texture2D){0};
     s->materials[i].aoTex = (Texture2D){0};
   }
+  if (s->modelCount < 0 || s->modelCount > BRUSH_SCENE_MAX_MODELS) {
+    s->modelCount = 0;
+    return;
+  }
+  for (int i = 0; i < s->modelCount; i++) {
+    if (s->models[i].model.meshCount > 0)
+      BrushAssetsReleaseModel(s->models[i].path);
+    s->models[i].model = (Model){0};
+  }
 }
 
 void BrushSceneResolveMaterials(BrushScene *s) {
@@ -261,6 +299,12 @@ void BrushSceneResolveMaterials(BrushScene *s) {
     m->displacementTex = BrushAssetsTexture(m->displacement);
     m->aoTex = BrushAssetsTexture(m->ao);
     if (m->tile <= 0.01f) m->tile = 1.0f;
+  }
+  for (int i = 0; i < s->modelCount; i++) {
+    BrushSceneModelInstance *mi = &s->models[i];
+    mi->model = BrushAssetsModel(mi->path);
+    if (mi->scale.x == 0 && mi->scale.y == 0 && mi->scale.z == 0)
+      mi->scale = (Vector3){1, 1, 1};
   }
 }
 

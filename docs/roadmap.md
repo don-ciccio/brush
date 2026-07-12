@@ -165,9 +165,19 @@ E. ~~Materials + asset registry~~ — DONE (2026-07): b_assets ref-counted
    lines + per-block refs; `post` lines persist the render tunables the
    editor's Environment panel exposes (scene carries its look). Editor:
    Materials panel (paths/tile/spec/depth), Inspector material combo.
-F. **Model assets** (NEXT): `model <path> <pos rot scale>` entities in
-   world.def, glTF via a b_assets model cache, editor asset browser +
-   placement, collision through the existing worker-side mesh cooking.
+F. ~~Model assets~~ — DONE (2026-07): ref-counted model registry in
+   b_assets (lit shader bound to ALL materials — raylib's index-0 default
+   material gotcha; shared instances = static props only, animated things
+   own their models); `model <path> <pos> <rot> <scale>` world.def lines;
+   BrushModelInstanceMatrix = one render+physics chokepoint (model base
+   transform THEN instance TRS); per-mesh Jolt trimesh colliders via
+   BrushPhysicsAddStaticModel; editor: Models hierarchy, full gizmo +
+   inspector (mesh swap combo), picking via per-instance body maps,
+   drag-from-Assets-panel into the viewport (raycast placement), .glb/.obj
+   OS-drop import into assets/models; packs into game.pak (ship .glb —
+   .gltf external buffers bypass the pak hooks). STILL TODO: materials on
+   models (own normal maps need per-material props), cooked shape caching
+   per (path,scale), frustum culling for instances.
 G. **Terrain texture painting**: splat-weight overlay riding the sculpt
    tile machinery (same rebake/undo/save), 4-way blend in the terrain
    path, paint brush in the editor sculpt mode.
