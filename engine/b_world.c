@@ -968,6 +968,15 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
   if (fl > 1e-4f) { fx /= fl; fz /= fl; } else { fx = 0; fz = 1; }
   float half = w->cfg.chunkSize * 0.5f;
 
+  // Shadow casters only matter within the far cascade's reach (~220 m by
+  // default) — beyond that, terrain can't shadow anything the camera sees.
+  // With LOD extending residency to ~900 m, gating this keeps the depth
+  // passes from ballooning. BRUSH_SHADOW_DIST overrides (metres).
+  float shadowDist = 300.0f;
+  const char *sd = getenv("BRUSH_SHADOW_DIST");
+  if (sd != NULL) { float v = (float)atof(sd); if (v > 0) shadowDist = v; }
+  float shadowDist2 = shadowDist * shadowDist;
+
   for (int i = 0; i < w->chunkCount; i++) {
     WorldChunk *chunk = &w->chunks[i];
     // Draw ACTIVE chunks, and — during a sculpt rebake — chunks that are
@@ -978,10 +987,13 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
     Vector3 o = ChunkOrigin(w, chunk->coord);
     Vector3 ro = WorldToRender(w, o);
     Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
-    // Shadows are submitted UNCONDITIONALLY: the camera cull below is about
-    // the VIEW — terrain behind the camera still casts shadows into it when
-    // the sun is low behind you. The depth pass is cheap; missing casters pop.
-    BrushRenderSubmitMesh(BRUSH_LAYER_SHADOW, chunk->mesh, &w->material, xf);
+    // Shadow casters aren't view-culled (terrain behind the camera still
+    // casts into view when the sun is low behind you), but ARE distance-
+    // gated to the shadowed range — no cascade reaches the far LOD rings.
+    float scx = o.x + half - camera.position.x;
+    float scz = o.z + half - camera.position.z;
+    if (scx * scx + scz * scz <= shadowDist2)
+      BrushRenderSubmitMesh(BRUSH_LAYER_SHADOW, chunk->mesh, &w->material, xf);
 
     float ccx = o.x + half - camera.position.x;
     float ccz = o.z + half - camera.position.z;

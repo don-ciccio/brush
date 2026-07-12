@@ -123,7 +123,7 @@ Terrain beyond the last cascade cannot shadow anything visible.
 | Phase | Deliverable | Proof |
 |---|---|---|
 | **L1** | ~~lodRadii config + per-chunk lod + LOD-res mesh bake + skirts + finalize resize (pendingMesh) path + collider-on-lod0 gate~~ DONE | rings {4,8,14}: 841 chunks (~900m) at 343k grid-tris vs 81/166k no-LOD (5× fewer than 841 full-res would cost); 15s sprint soak across ring crossings clean; horizon seamless, skirts hide seams. NOTE: kept full hmRes heightmap per chunk (ground queries/splat unchanged) — LOD reduces MESH triangles, not heightFn calls (that's a later opt). BRUSH_LOD_DBG logs the distribution. |
-| **L2** | LOD hysteresis + shadow radial gate + bake-budget tuning (finalize/queue) | walk 200 m straight (BRUSH_AUTO_MOVE): no fps dips beyond baseline noise; rebake counts logged per crossing |
+| **L2** | ~~LOD hysteresis + shadow radial gate + bake-budget tuning~~ DONE (hysteresis landed in L1; shadow casters distance-gated at 300m / BRUSH_SHADOW_DIST so the far rings don't feed the depth passes; MAX_FINALIZE=6 held through the sprint soak, no tuning needed) | near shadows intact at 59fps; sprint soak clean |
 | **L3** (later) | edge-welded transitions replacing skirts; far-ring splat simplification (dominant-color); geomorphing if pops read badly; horizon occlusion cull | side-by-sides |
 
 ## Gotchas to respect
