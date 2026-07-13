@@ -54,6 +54,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     char w1[256], w2[256], w3[256], w4[256], w5[256];
 
     if (sscanf(p, "version %d", &version) == 1) {
+      temp.version = version;
       if (version < 1 || version > 3)
         TraceLog(LOG_WARNING,
                  "BRUSH scene: %s is version %d (engine reads 1-3)", path,

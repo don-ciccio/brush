@@ -364,9 +364,11 @@ static void SandboxInit(void *user) {
   // install the worker scatter hooks into the world config BEFORE create so the
   // initial ring scatters foliage on frame 1 (as with the splat layers above).
   s->foliage = BrushFoliageCreate();
-  // Bootstrap a default grass layer if the scene carries none (an older
-  // world.def, or a fresh world) — kept in the scene so a save persists it.
-  if (s->scene.foliageCount == 0) {
+  // Bootstrap a default grass layer if the scene carries none AND predates the
+  // foliage-aware format (v2 gym.def, older world.def, or a fresh v0 world) —
+  // kept in the scene so a save persists it. A v3+ scene with 0 layers means
+  // the author deliberately cleared foliage, so honour that (match the editor).
+  if (s->scene.foliageCount == 0 && s->scene.version < 3) {
     BrushSceneFoliageLayer *fl = &s->scene.foliage[s->scene.foliageCount++];
     memset(fl, 0, sizeof(*fl));
     snprintf(fl->name, sizeof(fl->name), "grass");

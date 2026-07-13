@@ -140,6 +140,9 @@ typedef struct BrushSceneFoliageLayer {
 } BrushSceneFoliageLayer;
 
 typedef struct BrushScene {
+  int version; // scene-file format version read on load (0 = none/fresh). v3+
+               // is foliage-aware, so a v3 scene with 0 layers means the author
+               // deliberately has no foliage (don't bootstrap a default).
   Vector3 spawn;
   float timeHours; // starting clock (b_tod), <0 = not specified
 
