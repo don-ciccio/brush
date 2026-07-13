@@ -83,33 +83,27 @@ void main() {
 
     // Shrink distant instances to cut overdraw (100% -> 35% between 100..250 m).
     float sizeScale = mix(1.0, 0.35, clamp((instDist - 100.0) / 150.0, 0.0, 1.0));
-    vec3 localPos = vertexPosition * (sizeScale * heightScale);
+    // Fade/shrink by HEIGHT only: scaling all axes would slide the base verts
+    // toward the model origin as the camera distance changes, making the grass
+    // look like it drifts. Shrinking Y keeps the base footprint planted.
+    vec3 localPos = vertexPosition;
+    localPos.y *= sizeScale * heightScale;
     vec4 worldPos = instanceTransform * vec4(localPos, 1.0);
 
-    // Wind sway, scaled by height^2 so the base stays planted and tips move most.
-    float hf = vertexColor.a;
-    float hf2 = hf * hf;
-    float phase = baseWorld.x * 0.4 + baseWorld.z * 0.3 + uTime * 1.2;
-    float totalWind = fastSin(phase) * 0.4 * uWindStrength;
-    float bendX = uWindDirection.x * totalWind * 0.4;
-    float bendZ = uWindDirection.y * totalWind * 0.4;
-    float finalBendX = clamp(-bendX * hf2, -1.2, 1.2);
-    float finalBendZ = clamp(bendZ * hf2, -1.2, 1.2);
-
-    // Small-angle rotational bend about Z then X, applied to the offset from base.
-    vec3 offset = worldPos.xyz - baseWorld.xyz;
-    float cosZ = 1.0 - 0.5 * finalBendX * finalBendX;
-    float sinZ = finalBendX;
-    vec3 rotated;
-    rotated.x = offset.x * cosZ - offset.y * sinZ;
-    rotated.y = offset.x * sinZ + offset.y * cosZ;
-    rotated.z = offset.z;
-    float cosX = 1.0 - 0.5 * finalBendZ * finalBendZ;
-    float sinX = finalBendZ;
-    float ry = rotated.y;
-    rotated.y = ry * cosX - rotated.z * sinX;
-    rotated.z = ry * sinX + rotated.z * cosX;
-    worldPos.xyz = baseWorld.xyz + rotated;
+    // Wind: lean each vertex horizontally in the wind direction by an amount
+    // proportional to its height above the instance base — 0 at the base (so the
+    // clump stays planted) growing toward the tips, and it scales with the
+    // model's own size. A per-instance phase makes neighbours ripple. This is a
+    // pure bend, NOT a rotation about the origin, so wide patch meshes don't
+    // shear/swing — the base never moves, which is what keeps grass from
+    // appearing to drift as the camera moves.
+    float h = max(worldPos.y - baseWorld.y, 0.0);
+    float phase = baseWorld.x * 0.22 + baseWorld.z * 0.22 + uTime * 1.3;
+    float gust = fastSin(phase) * uWindStrength;
+    float lean = gust * 0.15 * h;
+    worldPos.x += uWindDirection.x * lean;
+    worldPos.z += uWindDirection.y * lean;
+    worldPos.y -= abs(lean) * 0.2; // slight droop as the blade bends over
 
     fragPosition = worldPos.xyz;
     fragTexCoord = vertexTexCoord;
