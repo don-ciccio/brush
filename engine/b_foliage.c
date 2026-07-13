@@ -290,6 +290,49 @@ void BrushFoliageSetCleanup(BrushFoliageSet *set) {
 
 // --- LOD mesh builders (main thread) ----------------------------------------
 
+// Deep-copy a loaded model mesh and bake the WIND HEIGHT FACTOR into vertex
+// colour alpha (0 at the mesh base, 1 at the top). The wind shader gates its
+// sway by alpha^2, so without this a model's alpha (1 everywhere by default)
+// makes the whole clump rotate about its origin and bob in the air. RGB is
+// preserved (or white if the model had no vertex colours). Uploaded, owned.
+static Mesh BakeWindMesh(Mesh source) {
+  Mesh m = {0};
+  m.vertexCount = source.vertexCount;
+  m.triangleCount = source.triangleCount;
+  int vc = source.vertexCount;
+  m.vertices = (float *)MemAlloc(sizeof(float) * vc * 3);
+  memcpy(m.vertices, source.vertices, sizeof(float) * vc * 3);
+  if (source.texcoords) {
+    m.texcoords = (float *)MemAlloc(sizeof(float) * vc * 2);
+    memcpy(m.texcoords, source.texcoords, sizeof(float) * vc * 2);
+  }
+  if (source.normals) {
+    m.normals = (float *)MemAlloc(sizeof(float) * vc * 3);
+    memcpy(m.normals, source.normals, sizeof(float) * vc * 3);
+  }
+  if (source.indices) {
+    m.indices = (unsigned short *)MemAlloc(sizeof(unsigned short) * source.triangleCount * 3);
+    memcpy(m.indices, source.indices, sizeof(unsigned short) * source.triangleCount * 3);
+  }
+  float minY = 1e9f, maxY = -1e9f;
+  for (int i = 0; i < vc; i++) {
+    float y = source.vertices[i * 3 + 1];
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  float range = (maxY > minY) ? (maxY - minY) : 1.0f;
+  m.colors = (unsigned char *)MemAlloc(sizeof(unsigned char) * vc * 4);
+  for (int i = 0; i < vc; i++) {
+    m.colors[i * 4 + 0] = source.colors ? source.colors[i * 4 + 0] : 255;
+    m.colors[i * 4 + 1] = source.colors ? source.colors[i * 4 + 1] : 255;
+    m.colors[i * 4 + 2] = source.colors ? source.colors[i * 4 + 2] : 255;
+    float h = (source.vertices[i * 3 + 1] - minY) / range; // 0 base .. 1 top
+    m.colors[i * 4 + 3] = (unsigned char)(h * 255.0f + 0.5f);
+  }
+  UploadMesh(&m, false);
+  return m;
+}
+
 Mesh BrushFoliageBuildLODMesh(Mesh source, float keepRatio) {
   Mesh lod = {0};
   lod.vertexCount = source.vertexCount;
@@ -597,9 +640,10 @@ Shader BrushFoliageLoadShader(void) {
 typedef struct BrushFoliageLayer {
   BrushFoliageLayerConfig cfg;
   int meshCount;   // model variants (>=1; a meadow mixes several meshes)
-  Mesh nearMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // shared/caller-owned; NOT freed
+  Mesh nearMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // wind-baked copy (models) or tuft
   Mesh farMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];  // decimated LOD, owned
   bool hasFar[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  bool ownsNear[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // true = our baked copy (free it)
   Material material[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   BrushFoliageDrawBatch nearB, farB; // per-model visible buffers (main thread)
   int lastNear, lastFar; // visible counts from the last draw (editor stats)
@@ -683,11 +727,18 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   if (mc > BRUSH_FOLIAGE_MODELS_PER_LAYER) mc = BRUSH_FOLIAGE_MODELS_PER_LAYER;
   L->meshCount = mc;
   for (int m = 0; m < mc; m++) {
-    Mesh src = (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0)
-                   ? cfg->meshes[m] : f->defaultTuft;
-    L->nearMesh[m] = src;
+    bool custom = (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0);
+    // Model meshes need the wind height factor baked in (owned copy); the
+    // procedural tuft already has it and is system-owned.
+    if (custom) {
+      L->nearMesh[m] = BakeWindMesh(cfg->meshes[m]);
+      L->ownsNear[m] = true;
+    } else {
+      L->nearMesh[m] = f->defaultTuft;
+      L->ownsNear[m] = false;
+    }
     if (L->cfg.farKeepRatio < 0.999f) {
-      L->farMesh[m] = BrushFoliageBuildLODMesh(src, L->cfg.farKeepRatio);
+      L->farMesh[m] = BrushFoliageBuildLODMesh(L->nearMesh[m], L->cfg.farKeepRatio);
       L->hasFar[m] = true;
     } else {
       L->hasFar[m] = false;
@@ -720,6 +771,7 @@ void BrushFoliageClearLayers(BrushFoliage *f) {
     BrushFoliageLayer *L = &f->layers[i];
     for (int m = 0; m < L->meshCount; m++) {
       if (L->hasFar[m]) UnloadMesh(L->farMesh[m]);
+      if (L->ownsNear[m]) UnloadMesh(L->nearMesh[m]); // our baked model copy
       // Shader + albedo are system/caller-owned; detach before UnloadMaterial.
       L->material[m].shader = (Shader){0};
       L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};

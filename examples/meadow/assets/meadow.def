@@ -1,14 +1,37 @@
-# Meadow — an example scene showing the instanced-foliage system with real
-# grass models (a multi-model palette + per-variant scale). See docs/foliage-plan.md.
-#
-# The "grass" layer mixes three Quaternius grass meshes at their own scales
-# (Grass1 5x, Grass4 2.5x, Grass_5 6.2x); "poppies" sprinkles a flower.
-version 2
-spawn 0 0.5 6
-time 12
+# brush world definition (see engine/b_scene.h)
+version 3
 
-# foliage  name model albedo  density drawD lodD  scale jitter hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)  grow avoid avoidThr  modelScale0
-foliage grass assets/models/Grass1.glb - 0.5 72 26 1 0.4 -0.02 42 1 0.4  1.7 1.8 1.4  0 0 0  0 0 0  -1 -1 0.5  5
+spawn 0 0.5 6
+time 12.0748
+
+# block  x y z  rx ry rz  sx sy sz  r g b  material
+
+# light  x y z  r g b (linear)  radius  flicker
+
+# post  key value (render tunables)
+post exposure 0.85
+post bloom_threshold 1.5
+post bloom_intensity 0.32
+post sharpen 1
+post sharpen_amount 0.1
+post ssao 1
+post ssao_radius 0.5
+post ssao_strength 0.5
+post dof 1
+post dof_range 120
+post dof_strength 0.25
+post godrays 1
+post godrays_density 0.04
+post godrays_exposure 0.7
+post volfog 0
+post volfog_density 0.12
+post volfog_ground 0
+post volfog_top 3
+post volfog_coverage 0.44
+post shadow_softness 4
+
+# foliage  name model albedo  density drawD lodD  scale jitter hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)  growLayer avoidLayer avoidThreshold
+foliage grass assets/models/Grass1.glb - 0.5 72 26 1 0.4 -0.02 42 0.25 0.4 1.7 1.8 1.4 0 0 0 0 0 0 -1 -1 0.5 5
 foliage_model assets/models/Grass4.glb 2.5
 foliage_model assets/models/Grass_5.glb 6.2
-foliage poppies assets/models/RedPoppy.glb - 0.12 55 22 1 0.2 0 42 0.7 0.4  1 1 1  0 0 0  0 0 0  -1 -1 0.5  1.5
+foliage poppies assets/models/RedPoppy.glb - 0.12 55 22 1 0.2 0 42 0.7 0.4 1 1 1 0 0 0 0 0 0 -1 -1 0.5 1.5
