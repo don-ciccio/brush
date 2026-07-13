@@ -48,6 +48,7 @@ typedef struct BrushRenderState {
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
   int locPomLayer, locPomTile, locPomScale;
+  int locHeightBlendLayer, locHeightBlendSharp;
   float specDefault; // uSpecStrength for draws without material props
   float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
@@ -128,6 +129,8 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locPomLayer = GetShaderLocation(g_r.lit, "uPomLayer");
   g_r.locPomTile = GetShaderLocation(g_r.lit, "uPomTile");
   g_r.locPomScale = GetShaderLocation(g_r.lit, "uPomScale");
+  g_r.locHeightBlendLayer = GetShaderLocation(g_r.lit, "uHeightBlendLayer");
+  g_r.locHeightBlendSharp = GetShaderLocation(g_r.lit, "uHeightBlendSharp");
   // Splat samplers live on FIXED texture units chosen to dodge raylib's
   // material binds (0=diffuse, 2=normal) and the shadow cascades (10..12):
   // splat=1, layer albedos 1..3 = 3,4,5, layer normals 1..3 = 6,7,8.
@@ -395,20 +398,25 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
       rlEnableTexture(sp->layers[i].normal.id);
     }
   }
-  // POM: the first layer flagged for parallax WITH a displacement map gets its
-  // height bound to the one free unit (9). Only one layer POMs (4x is absurd).
-  int pomLayer = -1;
-  if (g_r.pomQuality > 0)
-    for (int i = 0; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++)
-      if (sp->layers[i].parallax && sp->layers[i].displacement.id != 0) {
-        pomLayer = i;
-        break;
-      }
-  if (pomLayer >= 0) {
+  // ONE "special" layer (first with a displacement map that wants POM and/or
+  // height-blend, e.g. paving) binds its height to the one free unit (9); its
+  // height then drives both POM and the height-based edge blend.
+  int specialLayer = -1;
+  for (int i = 0; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++)
+    if (sp->layers[i].displacement.id != 0 &&
+        (sp->layers[i].parallax || sp->layers[i].heightBlend)) {
+      specialLayer = i;
+      break;
+    }
+  if (specialLayer >= 0) {
     rlActiveTextureSlot(9);
-    rlEnableTexture(sp->layers[pomLayer].displacement.id);
+    rlEnableTexture(sp->layers[specialLayer].displacement.id);
   }
   rlActiveTextureSlot(0);
+  int pomLayer = (specialLayer >= 0 && g_r.pomQuality > 0 &&
+                  sp->layers[specialLayer].parallax) ? specialLayer : -1;
+  int hbLayer = (specialLayer >= 0 && sp->layers[specialLayer].heightBlend)
+                    ? specialLayer : -1;
 
   float on = 1.0f;
   float origin[2] = {sp->origin.x, sp->origin.z};
@@ -445,11 +453,16 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNrm, SHADER_UNIFORM_FLOAT);
-  float pomTile = pomLayer >= 0 ? tiles[pomLayer] : 1.0f;
-  float pomScale = pomLayer >= 0 ? sp->layers[pomLayer].heightScale : 0.05f;
+  // The bound height (unit 9) belongs to specialLayer; its tile drives both POM
+  // and the height-blend sampling.
+  float pomTile = specialLayer >= 0 ? tiles[specialLayer] : 1.0f;
+  float pomScale = specialLayer >= 0 ? sp->layers[specialLayer].heightScale : 0.05f;
+  float hbSharp = hbLayer >= 0 ? sp->layers[hbLayer].blendSharp : 0.2f;
   SetShaderValue(g_r.lit, g_r.locPomLayer, &pomLayer, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locPomTile, &pomTile, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locPomScale, &pomScale, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHeightBlendLayer, &hbLayer, SHADER_UNIFORM_INT);
+  SetShaderValue(g_r.lit, g_r.locHeightBlendSharp, &hbSharp, SHADER_UNIFORM_FLOAT);
   float pomSh = (g_r.pomQuality >= 2) ? 1.0f : 0.0f;
   SetShaderValue(g_r.lit, g_r.locParallaxShadow, &pomSh, SHADER_UNIFORM_FLOAT);
   // Matte terrain: override the prop-default specular ApplyMaterialProps set

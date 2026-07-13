@@ -63,9 +63,9 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     } else if (sscanf(p, "time %f", &x) == 1) {
       temp.timeHours = x;
     } else if ((n = sscanf(p,
-                           "material %31s %255s %255s %255s %255s %f %f %f %f %f %d %d",
+                           "material %31s %255s %255s %255s %255s %f %f %f %f %f %d %d %d %f",
                            w1, w2, w3, w4, w5, &x, &y, &z, &h, &a,
-                           &flicker, &ir)) >= 10) {
+                           &flicker, &ir, &ig, &b)) >= 10) {
       if (temp.materialCount < BRUSH_SCENE_MAX_MATERIALS) {
         BrushSceneMaterial *m = &temp.materials[temp.materialCount++];
         memset(m, 0, sizeof(*m));
@@ -80,7 +80,9 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         m->heightScale = h;
         m->aoStrength = a;
         m->uvProjection = (n >= 11 && flicker != 0);
-        m->parallax = (n >= 12 && ir != 0); // 12th field, optional
+        m->parallax = (n >= 12 && ir != 0);        // 12th field, optional
+        m->heightBlend = (n >= 13 && ig != 0);     // 13th field, optional
+        m->blendSharp = (n >= 14 && b > 0.0f) ? b : 0.2f; // 14th, default 0.2
       }
     } else if (sscanf(p, "material %31s %255s %255s %f %f %f", w1, w2, w3, &x,
                       &y, &z) == 6) {
@@ -225,11 +227,12 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     fprintf(f, "\n# material  name  albedo  normal  displacement  ao  tile spec depth scale aoStrength\n");
   for (int i = 0; i < s->materialCount; i++) {
     const BrushSceneMaterial *m = &s->materials[i];
-    fprintf(f, "material %s %s %s %s %s %g %g %g %g %g %d %d\n", m->name,
+    fprintf(f, "material %s %s %s %s %s %g %g %g %g %g %d %d %d %g\n", m->name,
             m->albedo[0] ? m->albedo : "-", m->normal[0] ? m->normal : "-",
             m->displacement[0] ? m->displacement : "-", m->ao[0] ? m->ao : "-",
             m->tile, m->spec, m->normalDepth, m->heightScale, m->aoStrength,
-            m->uvProjection ? 1 : 0, m->parallax ? 1 : 0);
+            m->uvProjection ? 1 : 0, m->parallax ? 1 : 0,
+            m->heightBlend ? 1 : 0, m->blendSharp > 0.0f ? m->blendSharp : 0.2f);
   }
   fprintf(f, "\n# block  x y z  rx ry rz  sx sy sz  r g b  material\n");
   for (int i = 0; i < s->blockCount; i++) {
@@ -438,6 +441,8 @@ int BrushSceneTerrainLayers(const BrushScene *s,
     out[i].heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
     out[i].normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
     out[i].parallax = m->parallax;
+    out[i].heightBlend = m->heightBlend;
+    out[i].blendSharp = (m->blendSharp > 0.0f) ? m->blendSharp : 0.2f;
     count = i + 1;
   }
   return count;

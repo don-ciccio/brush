@@ -60,6 +60,8 @@ uniform sampler2D uLayerHeight;  // displacement of the ONE POM terrain layer
 uniform int   uPomLayer;         // splat slot that gets POM (-1 = none)
 uniform float uPomTile;          // that layer's tile
 uniform float uPomScale;         // that layer's displacement scale
+uniform int   uHeightBlendLayer; // splat slot that height-blends its edge (-1 = none)
+uniform float uHeightBlendSharp; // transition band (smaller = crisper)
 uniform vec2 uSplatOrigin; // chunk world origin (xz)
 uniform float uSplatSize;  // chunk world size (m)
 uniform float uSplatRes;   // splat texture resolution per side
@@ -412,6 +414,28 @@ void main()
                                uAutoSlope.x == 2.0 ? 1.0 : 0.0,
                                uAutoSlope.x == 3.0 ? 1.0 : 0.0);
             sw = mix(sw, slopeW, f * autoMask);
+        }
+
+        // Height-based blend: reshape the flagged layer's weight by its own
+        // height so its border with the surrounding terrain follows the relief
+        // (raised stones persist, grass fills the grout) — a crisp, organic
+        // edge instead of a linear fade or a straight cut. Only in the
+        // transition band; the road's paintFade sets the band width.
+        if (uHeightBlendLayer >= 0) {
+            float wL = sw[uHeightBlendLayer];
+            if (wL > 0.002 && wL < 0.998) {
+                float hp = texture(uLayerHeight, fragPosition.xz / uPomTile).r;
+                float depth = max(uHeightBlendSharp, 0.02);
+                float mA = wL + hp;          // this layer: weight + surface height
+                float mB = 1.0 - wL;         // everyone else, treated as flat
+                float mx = max(mA, mB);
+                float a = max(mA - mx + depth, 0.0);
+                float b = max(mB - mx + depth, 0.0);
+                float newWL = a / (a + b + 1e-5);
+                float others = 1.0 - wL;
+                sw *= (others > 1e-4) ? (1.0 - newWL) / others : 0.0;
+                sw[uHeightBlendLayer] = newWL;
+            }
         }
 
         // Steep surfaces get full triplanar per layer; flat ground keeps

@@ -168,6 +168,8 @@ typedef struct BrushTerrainLayer {
   float heightScale;   // parallax displacement scale
   bool normalSwizzled; // DXT5nm-cooked normal map
   bool parallax;       // ray-march this layer's displacement (POM) on flat ground
+  bool heightBlend;    // height-based edge blend vs the neighbouring layers
+  float blendSharp;    // height-blend transition band (smaller = crisper)
 } BrushTerrainLayer;
 
 typedef struct BrushSplatDraw {

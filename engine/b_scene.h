@@ -68,6 +68,8 @@ typedef struct BrushSceneMaterial {
   bool uvProjection; // sample by the mesh's authored UVs instead of
                      // triplanar (textures baked FOR a model, e.g. rocks)
   bool parallax;     // ray-march the displacement map (POM) — needs a height map
+  bool heightBlend;  // height-based edge blend vs neighbouring terrain layers
+  float blendSharp;  // height-blend transition band (smaller = crisper, ~0.2)
   Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
 } BrushSceneMaterial;
 

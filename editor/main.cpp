@@ -2122,6 +2122,20 @@ int main(int argc, char **argv) {
                 if (m->parallax && m->displacementTex.id == 0)
                     ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
                                        "  needs a Displacement map to show");
+                if (ImGui::Checkbox("Height Blend", &m->heightBlend)) matEdited = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("For terrain layers (roads): blend this layer's edge "
+                                      "by its height so raised features (stones) persist and "
+                                      "the neighbour fills the recesses — a crisp interlocking "
+                                      "edge instead of a straight fade. Needs a Displacement map.");
+                if (m->heightBlend) {
+                    if (m->blendSharp <= 0.0f) m->blendSharp = 0.2f;
+                    if (ImGui::SliderFloat("Blend Sharpness", &m->blendSharp, 0.02f, 0.6f,
+                                           "%.2f")) matEdited = true;
+                    if (m->displacementTex.id == 0)
+                        ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
+                                           "  needs a Displacement map to show");
+                }
                 if (ImGui::SliderFloat("AO Strength", &m->aoStrength, 0.0f,
                                        1.0f)) matEdited = true;
                 if (reresolve) BrushSceneResolveMaterials(&g_scene);
