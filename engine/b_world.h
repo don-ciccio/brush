@@ -94,9 +94,39 @@ typedef struct BrushWorldConfig {
   // are shader-side and can still be set after create without a pop).
   BrushTerrainLayer layers[BRUSH_TERRAIN_LAYERS];
   int layerCount;
+
+  // Per-chunk subsystem hook (instanced foliage). `chunkBake` runs on the
+  // WORKER during the chunk build, once the final heightmap is composed, and
+  // returns an OPAQUE handle for this chunk (pure CPU — no GL). The world
+  // stores it as pending and publishes it atomically with the mesh, swapping it
+  // live in the main-thread finalize; the previous handle is released via
+  // `chunkFree`. `chunkFree` also runs when a chunk unloads. `heightAt` samples
+  // this chunk's just-baked surface (world XZ -> Y), so the hook needn't know
+  // the heightmap layout. NULL `chunkBake` = no per-chunk subsystem.
+  void *(*chunkBake)(void *user, BrushChunkCoord coord, Vector3 origin,
+                     float size, float (*heightAt)(void *hctx, float wx, float wz),
+                     void *hctx);
+  void (*chunkFree)(void *user, void *handle);
+  void *chunkUser;
 } BrushWorldConfig;
 
 typedef struct BrushWorld BrushWorld;
+
+// A drawable active chunk, for a per-chunk subsystem's per-frame draw (foliage
+// gather). `handle` is what chunkBake returned; `maxY` is the chunk's highest
+// terrain point (for horizon culling). Positions are RENDER space.
+typedef struct BrushWorldChunkView {
+  BrushChunkCoord coord;
+  Vector3 origin; // render-space chunk origin (XZ)
+  float size;
+  float maxY;
+  void *handle;
+} BrushWorldChunkView;
+
+// Fill `out` (capacity `max`) with every drawable chunk that has a subsystem
+// handle. Returns the count. Call per frame from the scene-draw callback.
+int BrushWorldGetActiveChunks(const BrushWorld *w, BrushWorldChunkView *out,
+                              int max);
 
 // Create the world, start the worker, and block until the initial ring around
 // `spawn` is fully resident (avoids terrain pop-in on the first frame).

@@ -63,6 +63,7 @@ typedef struct Sandbox {
   float stepSmooth, prevStepSmooth;
 
   BrushWorld *world; // chunk-streamed terrain (flat by default)
+  BrushFoliage *foliage; // instanced grass streamed over the world
   Texture2D groundTex;
 
   // Blockout gym: pure DATA in a world.def scene (assets/gym.def) — blocks,
@@ -350,7 +351,25 @@ static void SandboxInit(void *user) {
   // initial ring bakes textured — otherwise ApplyTerrainLayers below dirties
   // every chunk and the terrain texture pops in ~1s after launch.
   wcfg.layerCount = BrushSceneTerrainLayers(&s->scene, wcfg.layers);
+
+  // Instanced grass: build the system + one layer, then install the worker
+  // scatter hooks into the world config BEFORE create so the initial ring
+  // scatters foliage on frame 1 (same reason as the splat layers above).
+  s->foliage = BrushFoliageCreate();
+  BrushFoliageLayerConfig grass = {.density = 1.2f,
+                                   .drawDistance = 68.0f,
+                                   .lodDistance = 26.0f,
+                                   .scale = 1.0f,
+                                   .scaleJitter = 0.35f,
+                                   .heightOffset = -0.04f,
+                                   .maxSlopeDeg = 42.0f,
+                                   .windStrength = 1.0f,
+                                   .farKeepRatio = 0.4f};
+  BrushFoliageAddLayer(s->foliage, &grass);
+  BrushFoliageInstallHooks(s->foliage, &wcfg);
+
   s->world = BrushWorldCreate(wcfg, (Vector3){spx, 0, spz});
+  BrushFoliageAttach(s->foliage, s->world);
 
   // Terrain sculpt overlay (authored in the editor, saved beside the scene).
   BrushWorldSculptLoad(s->world, s->terrainPath);
@@ -801,6 +820,7 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
 
   // Stream chunks around the player (main-thread GPU finalize happens here).
   BrushWorldUpdate(s->world, s->renderPos);
+  BrushFoliageUpdate(s->foliage, (float)GetTime(), 1.0f);
 
   BrushOrbitCamUpdate(&s->camera, s->renderPos, s->vel, dt);
 
@@ -978,7 +998,10 @@ static void SandboxShutdown(void *user) {
   Sandbox *s = user;
   // World holds per-chunk terrain colliders in the physics world, so it must
   // tear down (stop the worker, remove bodies) before the physics world does.
+  // Destroy the world FIRST (it calls the foliage free hook on every chunk),
+  // then the foliage system that owns the shared shader/meshes.
   BrushWorldDestroy(s->world);
+  BrushFoliageDestroy(s->foliage);
   UnloadTexture(s->groundTex); // world doesn't own the game-supplied texture
   BrushCharacterCleanup(&s->body, &s->phys);
   BrushAnimatorUnload(&s->animator);

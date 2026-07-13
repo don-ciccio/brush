@@ -74,6 +74,15 @@ typedef struct BrushRenderState {
   bool shadowsEnabled;
   bool editorMode;
 
+  // Custom scene-draw hook + per-frame lighting snapshot for the bridge
+  // (BrushRenderApplySceneLighting reads these; set at the top of Execute).
+  void (*sceneDrawCb)(void *user, Camera3D camera);
+  void *sceneDrawUser;
+  Vector3 curCamPos;
+  float curLinearize;
+  float curShadowStrength;
+  bool curShadowsOn;
+
   BrushDrawCmd cmds[BRUSH_LAYER_COUNT][BRUSH_MAX_DRAWS_PER_LAYER];
   int cmdCount[BRUSH_LAYER_COUNT];
 
@@ -552,6 +561,9 @@ void BrushRenderExecute(Camera3D camera) {
   float shadowStrength = st * st * (3.0f - 2.0f * st);
   bool shadowsOn = g_r.shadowsEnabled && g_r.shadow.ready &&
                    shadowCount > 0 && shadowStrength > 0.001f;
+  g_r.curCamPos = camera.position;
+  g_r.curShadowsOn = shadowsOn;
+  g_r.curShadowStrength = shadowsOn ? shadowStrength : 0.0f;
   float shOff = 0.0f;
   SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOff, SHADER_UNIFORM_FLOAT);
   if (shadowsOn) {
@@ -594,6 +606,7 @@ void BrushRenderExecute(Camera3D camera) {
   bool usePost = g_r.postEnabled && g_r.post.ready &&
                  g_r.layerView == BRUSH_VIEW_FINAL;
   float linearize = usePost ? 1.0f : 0.0f;
+  g_r.curLinearize = linearize;
   SetShaderValue(g_r.lit, g_r.locLinearize, &linearize, SHADER_UNIFORM_FLOAT);
   if (usePost) BrushPostBeginScene(&g_r.post);
 
@@ -609,6 +622,9 @@ void BrushRenderExecute(Camera3D camera) {
   // OPAQUE — the color pass (albedo * (ambient + diffuse) + specular).
   for (int i = 0; i < g_r.cmdCount[BRUSH_LAYER_OPAQUE]; i++)
     DrawCmd(&g_r.cmds[BRUSH_LAYER_OPAQUE][i]);
+
+  // Custom opaque geometry (instanced foliage) — same depth buffer as terrain.
+  if (g_r.sceneDrawCb) g_r.sceneDrawCb(g_r.sceneDrawUser, camera);
 
   // SKY — after opaque so the far-plane dome is early-Z rejected everywhere
   // geometry already wrote depth (only visible sky pixels pay for clouds).
@@ -709,6 +725,37 @@ void BrushRenderSetPomQuality(int quality) {
   g_r.pomQuality = quality < 0 ? 0 : (quality > 2 ? 2 : quality);
 }
 int BrushRenderGetPomQuality(void) { return g_r.pomQuality; }
+
+void BrushRenderSetSceneCallback(void (*cb)(void *user, Camera3D camera),
+                                 void *user) {
+  g_r.sceneDrawCb = cb;
+  g_r.sceneDrawUser = user;
+}
+
+void BrushRenderApplySceneLighting(Shader s) {
+  SetShaderValue(s, GetShaderLocation(s, "uSunDir"), &g_r.sunDir, SHADER_UNIFORM_VEC3);
+  SetShaderValue(s, GetShaderLocation(s, "uSunColor"), &g_r.sunColor, SHADER_UNIFORM_VEC3);
+  SetShaderValue(s, GetShaderLocation(s, "uAmbient"), &g_r.ambient, SHADER_UNIFORM_VEC3);
+  float vp[3] = {g_r.curCamPos.x, g_r.curCamPos.y, g_r.curCamPos.z};
+  SetShaderValue(s, GetShaderLocation(s, "viewPos"), vp, SHADER_UNIFORM_VEC3);
+  SetShaderValue(s, GetShaderLocation(s, "uLinearize"), &g_r.curLinearize, SHADER_UNIFORM_FLOAT);
+
+  // CSM: same cascade matrices + shadow-map texture slots the lit shader uses
+  // this frame (the depth maps are already bound to those slots by Execute).
+  float shEnabled = g_r.curShadowsOn ? 1.0f : 0.0f;
+  SetShaderValue(s, GetShaderLocation(s, "uShadowEnabled"), &shEnabled, SHADER_UNIFORM_FLOAT);
+  if (g_r.curShadowsOn) {
+    const char *vpNames[3] = {"lightVP0", "lightVP1", "lightVP2"};
+    const char *smNames[3] = {"shadowMap0", "shadowMap1", "shadowMap2"};
+    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++) {
+      SetShaderValueMatrix(s, GetShaderLocation(s, vpNames[c]), g_r.shadow.lightVP[c]);
+      int slot = g_r.shadow.slot + c;
+      SetShaderValue(s, GetShaderLocation(s, smNames[c]), &slot, SHADER_UNIFORM_INT);
+    }
+    SetShaderValue(s, GetShaderLocation(s, "uCascadeFar"), g_r.shadow.splitFar, SHADER_UNIFORM_VEC3);
+    SetShaderValue(s, GetShaderLocation(s, "uShadowStrength"), &g_r.curShadowStrength, SHADER_UNIFORM_FLOAT);
+  }
+}
 
 BrushLayerView BrushRenderGetLayerView(void) { return g_r.layerView; }
 

@@ -72,6 +72,13 @@ typedef struct WorldChunk {
   unsigned char *splatPixels;
   bool splatValid;    // pixels filled this bake (layers configured)
   Texture2D splatTex; // GPU copy (kept across slot reuse, like the mesh)
+
+  // Per-chunk subsystem handle (instanced foliage). `pendingHandle` is baked on
+  // the worker and swapped into `handle` at finalize, exactly like pendingMesh
+  // (foliage-plan.md §4). `handle` is immutable between finalizes and the ONLY
+  // thing the per-frame draw reads.
+  void *handle;
+  void *pendingHandle;
 } WorldChunk;
 
 // Sparse sculpt tile: `tileRes`^2 delta samples on the heightmap grid.
@@ -353,6 +360,14 @@ static float SampleHeightApron(const BrushWorld *w, const WorldChunk *c,
   return Lerp(Lerp(h00, h10, fx), Lerp(h01, h11, fx), fz);
 }
 
+// Binds SampleHeightApron to one chunk so a per-chunk subsystem (foliage) can
+// sample this chunk's just-baked surface without knowing the heightmap layout.
+typedef struct { const BrushWorld *w; const WorldChunk *c; } ChunkHeightCtx;
+static float ChunkHeightAt(void *ctx, float wx, float wz) {
+  ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
+  return SampleHeightApron(h->w, h->c, wx, wz);
+}
+
 // Vertex colour by slope: green lowland fading to grey rock on steep faces.
 // Zero-asset default shading (the lit shader multiplies albedo by this).
 static void SlopeColor(float ny, unsigned char *out) {
@@ -610,6 +625,18 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
     chunk->pendingShape = BrushPhysicsCookMeshShape(src, xf);
   }
+
+  // Per-chunk subsystem (foliage): scatter into a pending handle from the
+  // just-composed heightmap. Pure CPU. Freed/swapped on the main thread at
+  // finalize; a stale pending (double rebake before finalize) is released here.
+  if (w->cfg.chunkBake) {
+    if (chunk->pendingHandle && w->cfg.chunkFree)
+      w->cfg.chunkFree(w->cfg.chunkUser, chunk->pendingHandle);
+    ChunkHeightCtx hc = {w, chunk};
+    chunk->pendingHandle = w->cfg.chunkBake(w->cfg.chunkUser, chunk->coord, o,
+                                            w->cfg.chunkSize, ChunkHeightAt, &hc);
+  }
+
   chunk->valid = true;
 }
 
@@ -766,6 +793,16 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
     chunk->pendingShape = NULL;
   }
 
+  // Publish the worker-baked subsystem handle (foliage): swap pending -> live
+  // and release the previous one, in lockstep with the mesh swap above. The
+  // old handle drew right up to this point; nothing reads it after the swap.
+  if (chunk->pendingHandle) {
+    if (chunk->handle && w->cfg.chunkFree)
+      w->cfg.chunkFree(w->cfg.chunkUser, chunk->handle);
+    chunk->handle = chunk->pendingHandle;
+    chunk->pendingHandle = NULL;
+  }
+
   atomic_store(&chunk->state, CHUNK_ACTIVE);
 
   // Sculpted or LOD-changed while this bake was in flight: straight back
@@ -792,6 +829,17 @@ static void ReleaseChunk(BrushWorld *w, WorldChunk *chunk) {
   if (chunk->hasPendingMesh) {
     FreeMeshArrays(&chunk->pendingMesh);
     chunk->hasPendingMesh = false;
+  }
+  // Release the subsystem handles (foliage re-scatters on slot reuse).
+  if (w->cfg.chunkFree) {
+    if (chunk->pendingHandle) {
+      w->cfg.chunkFree(w->cfg.chunkUser, chunk->pendingHandle);
+      chunk->pendingHandle = NULL;
+    }
+    if (chunk->handle) {
+      w->cfg.chunkFree(w->cfg.chunkUser, chunk->handle);
+      chunk->handle = NULL;
+    }
   }
   // Keep heightmap + mesh buffers allocated for slot reuse.
   chunk->state = CHUNK_EMPTY;
@@ -992,6 +1040,23 @@ void BrushWorldUpdate(BrushWorld *w, Vector3 focus) {
                gridTris / 1000.0);
     }
   }
+}
+
+int BrushWorldGetActiveChunks(const BrushWorld *w, BrushWorldChunkView *out,
+                              int max) {
+  int n = 0;
+  for (int i = 0; i < w->chunkCount && n < max; i++) {
+    WorldChunk *c = (WorldChunk *)&w->chunks[i];
+    if (atomic_load(&c->state) == CHUNK_EMPTY) continue;
+    if (!c->meshUploaded || c->handle == NULL) continue;
+    out[n].coord = c->coord;
+    out[n].origin = WorldToRender(w, ChunkOrigin(w, c->coord));
+    out[n].size = w->cfg.chunkSize;
+    out[n].maxY = c->maxY;
+    out[n].handle = c->handle;
+    n++;
+  }
+  return n;
 }
 
 void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {

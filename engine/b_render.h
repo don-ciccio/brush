@@ -206,6 +206,21 @@ void BrushRenderSubmitMesh(BrushLayer layer, Mesh mesh, Material *material,
 // submission lists afterwards.
 void BrushRenderExecute(Camera3D camera);
 
+// --- Custom scene draw (instanced foliage, debris, ...) ---------------------
+// Registered callback invoked DURING the opaque pass, inside the same
+// BeginMode3D as the terrain — the one place a system can draw custom geometry
+// (e.g. DrawMeshInstanced with its own shader) into the HDR scene target, so it
+// depth-tests against terrain and picks up post/fog for free. NULL clears it.
+void BrushRenderSetSceneCallback(void (*cb)(void *user, Camera3D camera),
+                                 void *user);
+
+// Push THIS frame's scene lighting onto an arbitrary shader `s` (sun dir/color,
+// ambient, viewPos, the sRGB->linear flag, and the CSM cascades + shadow map
+// slots). A custom-shader draw (foliage) calls this so it lights and shadows
+// identically to the lit terrain. Valid only from inside the scene callback
+// (the per-frame values are captured at the top of BrushRenderExecute).
+void BrushRenderApplySceneLighting(Shader s);
+
 // Parallax-occlusion-mapping quality (global gate for the material + terrain
 // POM paths): 0 = off, 1 = POM, 2 = POM + soft self-shadow. Defaults from
 // BRUSH_POM (2). A quality preset / settings menu drives this.
