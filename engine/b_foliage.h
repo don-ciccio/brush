@@ -37,6 +37,14 @@ extern "C" {
 // meshes for variety — each instance randomly picks one).
 #define BRUSH_FOLIAGE_MODELS_PER_LAYER 4
 
+// Hard triangle budget for the FAR LOD mesh. farKeepRatio is a *relative* ratio,
+// which leaves a heavy imported model (thousands of tris) still heavy at
+// distance — the dominant cost when thousands of far clumps draw. Capping the
+// far mesh to a fixed budget makes dense high-poly model grass as cheap at range
+// as the low-poly procedural tuft, with no visible loss (distant grass reads as
+// texture). Light meshes already under the budget keep their authored ratio.
+#define BRUSH_FOLIAGE_FAR_MAX_TRIS 500
+
 // One bucket of the uniform spatial grid: a [offset, offset+count) slice of the
 // set's flat `gridIndices` array.
 typedef struct BrushFoliageGridCell {

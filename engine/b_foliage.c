@@ -717,7 +717,11 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     }
     L->nearMesh[m] = src;
     if (L->cfg.farKeepRatio < 0.999f) {
-      L->farMesh[m] = BrushFoliageBuildLODMesh(L->nearMesh[m], L->cfg.farKeepRatio);
+      // Cap the far mesh to a fixed triangle budget so a heavy imported model
+      // gets decimated much harder than its authored (relative) ratio would —
+      // the procedural tuft, already under budget, keeps its ratio unchanged.
+      L->farMesh[m] = BrushFoliageBuildLODMeshTarget(
+          L->nearMesh[m], L->cfg.farKeepRatio, BRUSH_FOLIAGE_FAR_MAX_TRIS);
       L->hasFar[m] = true;
     } else {
       L->hasFar[m] = false;
