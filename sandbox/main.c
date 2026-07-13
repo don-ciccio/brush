@@ -352,24 +352,63 @@ static void SandboxInit(void *user) {
   // every chunk and the terrain texture pops in ~1s after launch.
   wcfg.layerCount = BrushSceneTerrainLayers(&s->scene, wcfg.layers);
 
-  // Instanced grass: build the system + one layer, then install the worker
-  // scatter hooks into the world config BEFORE create so the initial ring
-  // scatters foliage on frame 1 (same reason as the splat layers above).
+  // Instanced grass: build the system from the scene's foliage layers, then
+  // install the worker scatter hooks into the world config BEFORE create so the
+  // initial ring scatters foliage on frame 1 (as with the splat layers above).
   s->foliage = BrushFoliageCreate();
-  BrushFoliageLayerConfig grass = {.density = 1.2f,
-                                   .drawDistance = 68.0f,
-                                   .lodDistance = 26.0f,
-                                   .scale = 1.0f,
-                                   .scaleJitter = 0.35f,
-                                   .heightOffset = -0.04f,
-                                   .maxSlopeDeg = 42.0f,
-                                   .windStrength = 1.0f,
-                                   .farKeepRatio = 0.4f};
-  BrushFoliageAddLayer(s->foliage, &grass);
+  // Bootstrap a default grass layer if the scene carries none (an older
+  // world.def, or a fresh world) — kept in the scene so a save persists it.
+  if (s->scene.foliageCount == 0) {
+    BrushSceneFoliageLayer *fl = &s->scene.foliage[s->scene.foliageCount++];
+    memset(fl, 0, sizeof(*fl));
+    snprintf(fl->name, sizeof(fl->name), "grass");
+    fl->density = 0.5f; // patches/m^2 (each is a ~120-blade clump)
+    fl->drawDistance = 68.0f;
+    fl->lodDistance = 26.0f;
+    fl->scale = 1.0f;
+    fl->scaleJitter = 0.35f;
+    fl->heightOffset = -0.04f;
+    fl->maxSlopeDeg = 42.0f;
+    fl->windStrength = 1.0f;
+    fl->farKeepRatio = 0.4f;
+    fl->tint = (Vector3){1, 1, 1};
+  }
+  for (int i = 0; i < s->scene.foliageCount; i++) {
+    const BrushSceneFoliageLayer *fl = &s->scene.foliage[i];
+    BrushFoliageLayerConfig c = {
+        .density = fl->density,
+        .drawDistance = fl->drawDistance,
+        .lodDistance = fl->lodDistance,
+        .scale = fl->scale,
+        .scaleJitter = fl->scaleJitter,
+        .heightOffset = fl->heightOffset,
+        .maxSlopeDeg = fl->maxSlopeDeg,
+        .windStrength = fl->windStrength,
+        .farKeepRatio = fl->farKeepRatio,
+        .tint = fl->tint,
+        .macroLow = fl->macroLow,
+        .macroHigh = fl->macroHigh,
+        .albedo = fl->albedoTex,
+        .growLayer = -1,
+        .avoidLayer = -1};
+    if (fl->modelRes.meshCount > 0) c.mesh = fl->modelRes.meshes[0];
+    BrushFoliageAddLayer(s->foliage, &c);
+  }
   BrushFoliageInstallHooks(s->foliage, &wcfg);
 
   s->world = BrushWorldCreate(wcfg, (Vector3){spx, 0, spz});
   BrushFoliageAttach(s->foliage, s->world);
+
+  // Harness: paint the foliage density mask — thicken one patch, carve another
+  // — to verify Phase A (multi-emit boost + carve-out + localized re-scatter).
+  if (getenv("BRUSH_TEST_FOLIAGE_PAINT") != NULL) {
+    for (int i = 0; i < 4; i++) {
+      // Thicken to ~3x around the spawn (character stands in dense grass)...
+      BrushWorldPaintFoliage(s->world, (Vector3){spx, 0, spz}, 8.0f, 0.9f, 0, false);
+      // ...and carve a bare patch just to the right.
+      BrushWorldPaintFoliage(s->world, (Vector3){spx + 14, 0, spz}, 5.0f, 0.9f, 0, true);
+    }
+  }
 
   // Terrain sculpt overlay (authored in the editor, saved beside the scene).
   BrushWorldSculptLoad(s->world, s->terrainPath);

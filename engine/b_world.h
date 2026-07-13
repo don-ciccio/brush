@@ -52,6 +52,16 @@ typedef struct BrushChunkCoord {
   int x, z;
 } BrushChunkCoord;
 
+// Bound samplers a per-chunk subsystem (foliage) uses during its worker bake to
+// read this chunk's just-composed, chunk-local surface + overlays — all
+// lock-free (the arrays are immutable for the bake's duration). World XZ in.
+typedef struct BrushChunkSamplers {
+  float (*heightAt)(void *ctx, float wx, float wz);       // terrain Y
+  float (*densityAt)(void *ctx, float wx, float wz, int foliageLayer); // paint multiplier (0..MAX_BOOST; 1 = base)
+  void  (*splatAt)(void *ctx, float wx, float wz, float outWeights[4]); // terrain layer weights 0..1 (incl. roads)
+  void *ctx;
+} BrushChunkSamplers;
+
 typedef struct BrushWorldConfig {
   unsigned int seed;
 
@@ -100,12 +110,11 @@ typedef struct BrushWorldConfig {
   // returns an OPAQUE handle for this chunk (pure CPU — no GL). The world
   // stores it as pending and publishes it atomically with the mesh, swapping it
   // live in the main-thread finalize; the previous handle is released via
-  // `chunkFree`. `chunkFree` also runs when a chunk unloads. `heightAt` samples
-  // this chunk's just-baked surface (world XZ -> Y), so the hook needn't know
-  // the heightmap layout. NULL `chunkBake` = no per-chunk subsystem.
+  // `chunkFree`. `chunkFree` also runs when a chunk unloads. The samplers read
+  // this chunk's just-baked, chunk-LOCAL overlays (lock-free), so the hook
+  // needn't know any tile layout. NULL `chunkBake` = no per-chunk subsystem.
   void *(*chunkBake)(void *user, BrushChunkCoord coord, Vector3 origin,
-                     float size, float (*heightAt)(void *hctx, float wx, float wz),
-                     void *hctx);
+                     float size, const struct BrushChunkSamplers *samplers);
   void (*chunkFree)(void *user, void *handle);
   void *chunkUser;
 } BrushWorldConfig;
@@ -127,6 +136,21 @@ typedef struct BrushWorldChunkView {
 // handle. Returns the count. Call per frame from the scene-draw callback.
 int BrushWorldGetActiveChunks(const BrushWorld *w, BrushWorldChunkView *out,
                               int max);
+
+// Mark EVERY resident chunk dirty so it re-bakes (mesh + splat + the chunkBake
+// subsystem hook). For live editor edits that change per-chunk generation —
+// e.g. re-scattering foliage after a layer's density/model changes. A few ms.
+void BrushWorldRebakeAll(BrushWorld *w);
+
+// --- Foliage density mask (paint where each foliage layer grows) ------------
+// Sparse per-layer density MULTIPLIER painted over the terrain (0 = none,
+// 1 = base, up to ~3 = thickened), riding the sculpt/splat tile machinery.
+// `layer` is a foliage-layer slot (0..3 paintable). `erase` subtracts. Marks
+// only the painted region dirty so those chunks re-scatter (localized, fast).
+#define BRUSH_FOLIAGE_PAINT_MAX 4
+#define BRUSH_FOLIAGE_MAX_BOOST 3.0f // painted density ceiling (x base)
+void BrushWorldPaintFoliage(BrushWorld *w, Vector3 center, float radius,
+                            float strength, int layer, bool erase);
 
 // Create the world, start the worker, and block until the initial ring around
 // `spawn` is fully resident (avoids terrain pop-in on the first frame).

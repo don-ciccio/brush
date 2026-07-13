@@ -72,6 +72,9 @@ typedef struct WorldChunk {
   unsigned char *splatPixels;
   bool splatValid;    // pixels filled this bake (layers configured)
   Texture2D splatTex; // GPU copy (kept across slot reuse, like the mesh)
+  unsigned char *maskPixels; // hmRes^2 * 4 foliage density (composed under lock,
+                             // then read lock-free by the scatter samplers)
+  bool maskValid;
 
   // Per-chunk subsystem handle (instanced foliage). `pendingHandle` is baked on
   // the worker and swapped into `handle` at finalize, exactly like pendingMesh
@@ -92,6 +95,15 @@ typedef struct SculptTile {
 
 // Sparse paint tile: same grid, same canonical ownership; RGBA8 layer
 // weights per sample (sum 255; absent tile = implicit full layer 0).
+// Sparse foliage density-mask tile: same grid/ownership as sculpt/splat; RGBA8
+// per sample = painted density multiplier for foliage layers 0..3. Byte value
+// b maps to multiplier (b/255)*MAX_BOOST; the neutral "1x base" is byte ~85.
+#define FOLIAGE_MASK_NEUTRAL 85 // ~= 255 / BRUSH_FOLIAGE_MAX_BOOST -> M = 1.0
+typedef struct FoliageMaskTile {
+  int tx, tz;
+  unsigned char *m; // tileRes * tileRes * 4
+} FoliageMaskTile;
+
 typedef struct SplatTile {
   int tx, tz;
   unsigned char *w; // tileRes * tileRes * 4 weights
@@ -124,6 +136,8 @@ struct BrushWorld {
   int tileCount, tileCap;
   SplatTile *wtiles; // paint weights (same mutex/keying as height tiles)
   int wtileCount, wtileCap;
+  FoliageMaskTile *fmtiles; // foliage density paint (same mutex/keying)
+  int fmtileCount, fmtileCap;
   int tileRes;         // hmRes - 1 samples per tile side
   float gridStep;      // metres between grid samples (chunkSize / (hmRes-1))
   pthread_mutex_t sculptMutex;
@@ -309,6 +323,54 @@ static unsigned char *SplatSampleRW(BrushWorld *w, long gx, long gz) {
   return &t->w[(lz * w->tileRes + lx) * 4];
 }
 
+// ---- foliage density-mask tiles (same locking + ownership) -----------------
+
+static FoliageMaskTile *FoliageMaskFind(BrushWorld *w, int tx, int tz) {
+  for (int i = 0; i < w->fmtileCount; i++)
+    if (w->fmtiles[i].tx == tx && w->fmtiles[i].tz == tz) return &w->fmtiles[i];
+  return NULL;
+}
+
+static FoliageMaskTile *FoliageMaskGet(BrushWorld *w, int tx, int tz, bool create) {
+  FoliageMaskTile *t = FoliageMaskFind(w, tx, tz);
+  if (t != NULL || !create) return t;
+  if (w->fmtileCount == w->fmtileCap) {
+    w->fmtileCap = (w->fmtileCap == 0) ? 16 : w->fmtileCap * 2;
+    w->fmtiles = (FoliageMaskTile *)MemRealloc(
+        w->fmtiles, sizeof(FoliageMaskTile) * w->fmtileCap);
+  }
+  t = &w->fmtiles[w->fmtileCount++];
+  t->tx = tx;
+  t->tz = tz;
+  int n = w->tileRes * w->tileRes;
+  t->m = (unsigned char *)MemAlloc((unsigned int)(n * 4));
+  memset(t->m, FOLIAGE_MASK_NEUTRAL, (unsigned int)(n * 4)); // = 1x base
+  return t;
+}
+
+// Painted density multiplier (0..MAX_BOOST) for a foliage layer at a global
+// grid index. Absent tile = neutral (M = 1 = base density).
+static float FoliageMaskAt(BrushWorld *w, long gx, long gz, int layer) {
+  if (layer < 0 || layer >= BRUSH_FOLIAGE_PAINT_MAX) return 1.0f;
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  FoliageMaskTile *t = FoliageMaskFind(w, tx, tz);
+  unsigned char b = FOLIAGE_MASK_NEUTRAL;
+  if (t != NULL) {
+    int lx = (int)(gx - (long)tx * w->tileRes);
+    int lz = (int)(gz - (long)tz * w->tileRes);
+    b = t->m[(lz * w->tileRes + lx) * 4 + layer];
+  }
+  return (float)b / 255.0f * BRUSH_FOLIAGE_MAX_BOOST;
+}
+
+static unsigned char *FoliageMaskRW(BrushWorld *w, long gx, long gz) {
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  FoliageMaskTile *t = FoliageMaskGet(w, tx, tz, true);
+  int lx = (int)(gx - (long)tx * w->tileRes);
+  int lz = (int)(gz - (long)tz * w->tileRes);
+  return &t->m[(lz * w->tileRes + lx) * 4];
+}
+
 // ---- terrain build (worker thread; no GL) ---------------------------------
 
 // Bilinear sample of a chunk's heightmap at a world XZ — the exact surface the
@@ -366,6 +428,38 @@ typedef struct { const BrushWorld *w; const WorldChunk *c; } ChunkHeightCtx;
 static float ChunkHeightAt(void *ctx, float wx, float wz) {
   ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
   return SampleHeightApron(h->w, h->c, wx, wz);
+}
+
+// Nearest chunk-local grid index (hmRes^2, no apron) for a world XZ.
+static int ChunkGridIndex(const BrushWorld *w, const WorldChunk *c, float wx,
+                          float wz) {
+  Vector3 o = ChunkOrigin(w, c->coord);
+  float step = w->cfg.chunkSize / (float)(w->cfg.hmRes - 1);
+  int ix = (int)((wx - o.x) / step + 0.5f);
+  int iz = (int)((wz - o.z) / step + 0.5f);
+  if (ix < 0) ix = 0; if (ix >= w->cfg.hmRes) ix = w->cfg.hmRes - 1;
+  if (iz < 0) iz = 0; if (iz >= w->cfg.hmRes) iz = w->cfg.hmRes - 1;
+  return iz * w->cfg.hmRes + ix;
+}
+
+static float ChunkDensityAt(void *ctx, float wx, float wz, int layer) {
+  ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
+  if (!h->c->maskValid || h->c->maskPixels == NULL || layer < 0 ||
+      layer >= BRUSH_FOLIAGE_PAINT_MAX)
+    return 1.0f; // unpainted -> base density
+  int i = ChunkGridIndex(h->w, h->c, wx, wz);
+  return (float)h->c->maskPixels[i * 4 + layer] / 255.0f * BRUSH_FOLIAGE_MAX_BOOST;
+}
+
+static void ChunkSplatAt(void *ctx, float wx, float wz, float out[4]) {
+  ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
+  if (!h->c->splatValid || h->c->splatPixels == NULL) {
+    out[0] = 1.0f; out[1] = out[2] = out[3] = 0.0f; // full base layer
+    return;
+  }
+  int i = ChunkGridIndex(h->w, h->c, wx, wz);
+  const unsigned char *px = &h->c->splatPixels[i * 4];
+  for (int k = 0; k < 4; k++) out[k] = (float)px[k] / 255.0f;
 }
 
 // Vertex colour by slope: green lowland fading to grey rock on steep faces.
@@ -608,6 +702,27 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
       }
     chunk->splatValid = true;
   }
+  // Foliage density mask -> per-chunk pixels (only where painting exists, so an
+  // unpainted world pays nothing). Composed under the lock like splat; the
+  // scatter samplers then read it lock-free. Same canonical-ownership grid.
+  chunk->maskValid = false;
+  if (w->fmtileCount > 0) {
+    int sr = w->cfg.hmRes;
+    if (chunk->maskPixels == NULL)
+      chunk->maskPixels = (unsigned char *)MemAlloc((unsigned int)(sr * sr * 4));
+    long bGx = (long)chunk->coord.x * w->tileRes;
+    long bGz = (long)chunk->coord.z * w->tileRes;
+    for (int z = 0; z < sr; z++)
+      for (int x = 0; x < sr; x++) {
+        unsigned char *px = &chunk->maskPixels[(z * sr + x) * 4];
+        for (int L = 0; L < BRUSH_FOLIAGE_PAINT_MAX; L++) {
+          float mm = FoliageMaskAt(w, bGx + x, bGz + z, L); // 0..MAX_BOOST
+          int b = (int)(mm / BRUSH_FOLIAGE_MAX_BOOST * 255.0f + 0.5f);
+          px[L] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
+        }
+      }
+    chunk->maskValid = true;
+  }
   pthread_mutex_unlock(&w->sculptMutex);
 
   BuildMesh(w, chunk);
@@ -633,8 +748,9 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     if (chunk->pendingHandle && w->cfg.chunkFree)
       w->cfg.chunkFree(w->cfg.chunkUser, chunk->pendingHandle);
     ChunkHeightCtx hc = {w, chunk};
+    BrushChunkSamplers samplers = {ChunkHeightAt, ChunkDensityAt, ChunkSplatAt, &hc};
     chunk->pendingHandle = w->cfg.chunkBake(w->cfg.chunkUser, chunk->coord, o,
-                                            w->cfg.chunkSize, ChunkHeightAt, &hc);
+                                            w->cfg.chunkSize, &samplers);
   }
 
   chunk->valid = true;
@@ -857,6 +973,10 @@ static void DestroyChunkBuffers(WorldChunk *chunk) {
   if (chunk->splatPixels) {
     MemFree(chunk->splatPixels);
     chunk->splatPixels = NULL;
+  }
+  if (chunk->maskPixels) {
+    MemFree(chunk->maskPixels);
+    chunk->maskPixels = NULL;
   }
   if (chunk->meshUploaded) {
     UnloadMesh(chunk->mesh);
@@ -1162,6 +1282,8 @@ void BrushWorldDestroy(BrushWorld *w) {
   if (w->tiles) MemFree(w->tiles);
   for (int i = 0; i < w->wtileCount; i++) MemFree(w->wtiles[i].w);
   if (w->wtiles) MemFree(w->wtiles);
+  for (int i = 0; i < w->fmtileCount; i++) MemFree(w->fmtiles[i].m);
+  if (w->fmtiles) MemFree(w->fmtiles);
   pthread_mutex_destroy(&w->sculptMutex);
   // The material's diffuse texture is game-owned; don't unload it. Detach the
   // shared shader so UnloadMaterial doesn't free the engine's lit shader.
@@ -1337,6 +1459,40 @@ void BrushWorldSetLayers(BrushWorld *w,
   w->layerCount = count;
   // Every resident chunk needs its splat pixels (re)baked.
   SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
+}
+
+void BrushWorldRebakeAll(BrushWorld *w) {
+  SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
+}
+
+void BrushWorldPaintFoliage(BrushWorld *w, Vector3 center, float radius,
+                            float strength, int layer, bool erase) {
+  if (radius <= 0.0f || layer < 0 || layer >= BRUSH_FOLIAGE_PAINT_MAX) return;
+  float step = w->gridStep;
+  long g0x = (long)floorf((center.x - radius) / step);
+  long g1x = (long)ceilf((center.x + radius) / step);
+  long g0z = (long)floorf((center.z - radius) / step);
+  long g1z = (long)ceilf((center.z + radius) / step);
+  float dir = erase ? -1.0f : 1.0f;
+
+  pthread_mutex_lock(&w->sculptMutex);
+  for (long gz = g0z; gz <= g1z; gz++)
+    for (long gx = g0x; gx <= g1x; gx++) {
+      float wx = (float)gx * step, wz = (float)gz * step;
+      float dx = wx - center.x, dz = wz - center.z;
+      float dist = sqrtf(dx * dx + dz * dz);
+      if (dist >= radius) continue;
+      float t = dist / radius;
+      float fall = 1.0f - t * t * (3.0f - 2.0f * t); // smoothstep
+      unsigned char *m = FoliageMaskRW(w, gx, gz);
+      float v = (float)m[layer] + dir * strength * fall * 255.0f;
+      m[layer] = (unsigned char)(v < 0 ? 0 : (v > 255 ? 255 : v + 0.5f));
+    }
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  // Only the painted chunks re-bake (mask re-composes) + re-scatter.
+  SculptMarkDirty(w, center.x - radius, center.z - radius, center.x + radius,
+                  center.z + radius);
 }
 
 void BrushWorldSetAutoSlope(BrushWorld *w, int layer, float startDeg,

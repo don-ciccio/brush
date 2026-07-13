@@ -120,10 +120,17 @@ Mesh BrushFoliageBuildLODMeshTarget(Mesh source, float targetRatio, int maxTris)
 Mesh BrushFoliageBuildBillboardMesh(Mesh source);
 
 // --- Zero-asset procedural defaults + the instanced shader (MAIN THREAD) -----
+// A realistic grass clump: `blades` thin, curved, tapered blades (5 verts /
+// 3 tris each, ~1 cm wide, radial, bending outward with gravity droop) filling
+// a `radius` circle up to `height` tall. vertexColor.a ramps 0(base)->1(tip)
+// for the wind sway; UVs map to 3 vertical strips (for a striped blade card).
+// Uploaded. THE zero-asset default — a proper grass look, not crossed cards.
+Mesh BrushFoliageMakeGrassPatch(int blades, float radius, float height);
+
 // A grass tuft: `blades` crossed vertical cards (world `height` x `width`),
 // vertexColor.a = height along the blade (0 base, 1 tip) for the wind sway,
-// soft radial normals, UV v mapping base->0 tip->1. Uploaded. This is the
-// engine's zero-asset default mesh; a game swaps in a .glb per layer.
+// soft radial normals, UV v mapping base->0 tip->1. The cheaper/blockier
+// alternative to MakeGrassPatch (kept for billboards / low-detail).
 Mesh BrushFoliageMakeTuft(int blades, float height, float width);
 
 // A vertical gradient card (base color at v=0 -> tip color at v=1) with mipmaps,
@@ -154,17 +161,41 @@ typedef struct BrushFoliageLayerConfig {
   Vector3 macroLow, macroHigh; // low-frequency macro-color ramp endpoints
   Mesh mesh;            // uploaded source mesh ({0} -> the procedural tuft)
   Texture2D albedo;     // albedo/card (id 0 -> the procedural gradient)
+  // Surface-layer auto-exclusion (reads the terrain splat weights).
+  int   growLayer;      // grow only where terrain layer N dominates (-1 = any)
+  int   avoidLayer;     // exclude where terrain layer N weight > threshold
+                        // (-1 = none) — e.g. the road/paving layer
+  float avoidThreshold; // 0..1 (0 -> default 0.5)
 } BrushFoliageLayerConfig;
 
 typedef struct BrushFoliage BrushFoliage;
 
+// Quality preset (the perf-audit's shipping knob, foliage slice). Scales the
+// draw distance — foliage's real overdraw/thermal lever at 4x retina — and
+// toggles shadow RECEPTION (the CSM taps in the grass shader). A future global
+// BrushRenderSetQuality drives this; games can also set it directly.
+typedef enum {
+  BRUSH_FOLIAGE_LOW = 0,  // 0.5x distance, no shadow taps
+  BRUSH_FOLIAGE_MED,      // 0.75x distance, shadows
+  BRUSH_FOLIAGE_HIGH,     // full distance, shadows
+} BrushFoliageQuality;
+
 // Create the system: loads the shared shader + the zero-asset tuft/gradient.
+// Initial quality is BRUSH_FOLIAGE_QUALITY (0/1/2, default HIGH).
 BrushFoliage *BrushFoliageCreate(void);
+
+void BrushFoliageSetQuality(BrushFoliage *f, BrushFoliageQuality q);
+BrushFoliageQuality BrushFoliageGetQuality(const BrushFoliage *f);
 void BrushFoliageDestroy(BrushFoliage *f);
 
 // Add a layer (returns its index, or -1 if full). Copies the config; builds the
 // layer's far-LOD mesh, material, and draw buffers.
 int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg);
+
+// Drop every layer (frees their LOD meshes/materials/buffers), keeping the
+// shared shader + procedural defaults. For the editor's live re-scatter: clear,
+// re-add from the edited scene, then BrushWorldRebakeAll to re-scatter chunks.
+void BrushFoliageClearLayers(BrushFoliage *f);
 
 // Global wind shared by every layer (each scales it by its own windStrength).
 void BrushFoliageSetWind(BrushFoliage *f, Vector2 dir, float strength);
@@ -179,6 +210,13 @@ void BrushFoliageAttach(BrushFoliage *f, BrushWorld *world);
 // Per-frame: advance wind/animation time and set the global draw-distance scale
 // (<1 shrinks the whole foliage horizon toward the camera as it zooms out).
 void BrushFoliageUpdate(BrushFoliage *f, float time, float distanceScale);
+
+int BrushFoliageLayerCount(const BrushFoliage *f);
+
+// Last frame's visible near/far instance counts for a layer (the editor's
+// overdraw readout). Draw calls this frame = (near>0) + (far>0).
+void BrushFoliageLayerStats(const BrushFoliage *f, int layer, int *nearCount,
+                            int *farCount);
 
 #ifdef __cplusplus
 }

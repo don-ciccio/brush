@@ -195,6 +195,41 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
           temp.roadCount--;
         }
       }
+    } else if (strncmp(p, "foliage ", 8) == 0) {
+      if (temp.foliageCount < BRUSH_SCENE_MAX_FOLIAGE) {
+        char fw1[64] = {0}, fw2[128] = {0}, fw3[128] = {0};
+        float dens = 0, drawD = 0, lodD = 0, sc = 1, jit = 0, ho = 0, slope = 0,
+              wind = 1, farK = 0.4f;
+        float tr = 1, tg = 1, tb = 1, mlr = 0, mlg = 0, mlb = 0, mhr = 0,
+              mhg = 0, mhb = 0;
+        int fn = sscanf(p,
+                        "foliage %63s %127s %127s %f %f %f %f %f %f %f %f %f "
+                        "%f %f %f %f %f %f %f %f %f",
+                        fw1, fw2, fw3, &dens, &drawD, &lodD, &sc, &jit, &ho,
+                        &slope, &wind, &farK, &tr, &tg, &tb, &mlr, &mlg, &mlb,
+                        &mhr, &mhg, &mhb);
+        if (fn >= 6) { // name + 2 paths + density + drawD + lodD
+          BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount++];
+          memset(fl, 0, sizeof(*fl));
+          CopyField(fl->name, sizeof(fl->name), fw1);
+          CopyField(fl->model, sizeof(fl->model), fw2);
+          CopyField(fl->albedo, sizeof(fl->albedo), fw3);
+          fl->density = dens;
+          fl->drawDistance = drawD;
+          fl->lodDistance = lodD;
+          fl->scale = (fn >= 7) ? sc : 1.0f;
+          fl->scaleJitter = (fn >= 8) ? jit : 0.0f;
+          fl->heightOffset = (fn >= 9) ? ho : 0.0f;
+          fl->maxSlopeDeg = (fn >= 10) ? slope : 0.0f;
+          fl->windStrength = (fn >= 11) ? wind : 1.0f;
+          fl->farKeepRatio = (fn >= 12) ? farK : 0.4f;
+          // Colours are optional trailing triples; (0,0,0) tells the foliage
+          // system to use its own default tint/macro ramp.
+          fl->tint = (fn >= 15) ? (Vector3){tr, tg, tb} : (Vector3){1, 1, 1};
+          fl->macroLow = (fn >= 18) ? (Vector3){mlr, mlg, mlb} : (Vector3){0, 0, 0};
+          fl->macroHigh = (fn >= 21) ? (Vector3){mhr, mhg, mhb} : (Vector3){0, 0, 0};
+        }
+      }
     } else {
       // Forward compatibility: unknown entity types are skipped, not fatal.
       TraceLog(LOG_WARNING, "BRUSH scene: %s:%d unknown line: %.40s", path,
@@ -287,6 +322,21 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     fprintf(f, " %g\n", r->paintFade); // trailing texture-edge margin
   }
 
+  if (s->foliageCount > 0)
+    fprintf(f, "\n# foliage  name model albedo  density drawD lodD  scale jitter"
+               " hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)\n");
+  for (int i = 0; i < s->foliageCount; i++) {
+    const BrushSceneFoliageLayer *fl = &s->foliage[i];
+    fprintf(f,
+            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g\n",
+            fl->name[0] ? fl->name : "-", fl->model[0] ? fl->model : "-",
+            fl->albedo[0] ? fl->albedo : "-", fl->density, fl->drawDistance,
+            fl->lodDistance, fl->scale, fl->scaleJitter, fl->heightOffset,
+            fl->maxSlopeDeg, fl->windStrength, fl->farKeepRatio, fl->tint.x,
+            fl->tint.y, fl->tint.z, fl->macroLow.x, fl->macroLow.y,
+            fl->macroLow.z, fl->macroHigh.x, fl->macroHigh.y, fl->macroHigh.z);
+  }
+
   fclose(f);
   strncpy(s->path, path, BRUSH_SCENE_PATH_MAX - 1);
   s->modTime = GetFileModTime(path);
@@ -372,6 +422,15 @@ void BrushSceneUnloadMaterials(BrushScene *s) {
       BrushAssetsReleaseModel(s->models[i].path);
     s->models[i].model = (Model){0};
   }
+  if (s->foliageCount >= 0 && s->foliageCount <= BRUSH_SCENE_MAX_FOLIAGE) {
+    for (int i = 0; i < s->foliageCount; i++) {
+      if (s->foliage[i].model[0] && s->foliage[i].modelRes.meshCount > 0)
+        BrushAssetsReleaseModel(s->foliage[i].model);
+      BrushAssetsReleaseTexture(s->foliage[i].albedoTex);
+      s->foliage[i].modelRes = (Model){0};
+      s->foliage[i].albedoTex = (Texture2D){0};
+    }
+  }
 }
 
 void BrushSceneResolveMaterials(BrushScene *s) {
@@ -391,6 +450,11 @@ void BrushSceneResolveMaterials(BrushScene *s) {
     mi->model = BrushAssetsModel(mi->path);
     if (mi->scale.x == 0 && mi->scale.y == 0 && mi->scale.z == 0)
       mi->scale = (Vector3){1, 1, 1};
+  }
+  for (int i = 0; i < s->foliageCount; i++) {
+    BrushSceneFoliageLayer *fl = &s->foliage[i];
+    fl->modelRes = fl->model[0] ? BrushAssetsModel(fl->model) : (Model){0};
+    fl->albedoTex = fl->albedo[0] ? BrushAssetsTexture(fl->albedo) : (Texture2D){0};
   }
 }
 

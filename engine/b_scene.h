@@ -48,6 +48,7 @@ extern "C" {
 #define BRUSH_SCENE_MAX_MODELS 128
 #define BRUSH_SCENE_MAX_POST 48
 #define BRUSH_SCENE_MAX_ROADS 32
+#define BRUSH_SCENE_MAX_FOLIAGE 8
 #define BRUSH_SCENE_PATH_MAX 512
 #define BRUSH_SCENE_NAME_MAX 32
 
@@ -113,6 +114,23 @@ typedef struct BrushSceneRoad {
   int   pointCount;
 } BrushSceneRoad;
 
+// One instanced-foliage layer (a plant type scattered over the terrain). Pure
+// data; the model/albedo paths resolve via b_assets like a material, falling
+// back to the engine's procedural tuft/gradient when empty. The game converts
+// this to a BrushFoliageLayerConfig (b_foliage) — b_scene stays foliage-agnostic.
+typedef struct BrushSceneFoliageLayer {
+  char name[BRUSH_SCENE_NAME_MAX];
+  char model[128];   // .glb source mesh; "" -> procedural tuft
+  char albedo[128];  // albedo card;      "" -> procedural gradient
+  float density;       // instances / m^2
+  float drawDistance;  // hard cull (m)
+  float lodDistance;   // near -> far LOD switch (m)
+  float scale, scaleJitter, heightOffset, maxSlopeDeg, windStrength, farKeepRatio;
+  Vector3 tint, macroLow, macroHigh;
+  Model modelRes;      // resolved (not saved)
+  Texture2D albedoTex; // resolved (not saved)
+} BrushSceneFoliageLayer;
+
 typedef struct BrushScene {
   Vector3 spawn;
   float timeHours; // starting clock (b_tod), <0 = not specified
@@ -123,6 +141,8 @@ typedef struct BrushScene {
   int lightCount;
   BrushSceneRoad roads[BRUSH_SCENE_MAX_ROADS];
   int roadCount;
+  BrushSceneFoliageLayer foliage[BRUSH_SCENE_MAX_FOLIAGE];
+  int foliageCount;
   BrushSceneMaterial materials[BRUSH_SCENE_MAX_MATERIALS];
   int materialCount;
   BrushSceneModelInstance models[BRUSH_SCENE_MAX_MODELS];

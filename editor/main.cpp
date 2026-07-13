@@ -154,6 +154,7 @@ enum EntityType { ENTITY_NONE, ENTITY_BLOCK, ENTITY_LIGHT, ENTITY_SPAWN, ENTITY_
 static BrushPhysics g_phys;
 static BrushScene g_scene;
 static BrushWorld *g_world = NULL;
+static BrushFoliage *g_foliage = NULL;
 static Texture2D g_groundTex;
 static Model g_unitCube;
 static Model g_spawnMarker;
@@ -185,6 +186,9 @@ static bool g_roadActive = false;  // sculpt-mode Road spline tool
 static int g_selectedRoadIdx = -1;
 static int g_selectedNodeIdx = -1;
 static bool g_roadResyncPending = false; // a road changed; re-bake when idle
+static bool g_foliageResyncPending = false; // placement changed; rebuild + re-scatter
+static bool g_foliageRebuildPending = false; // draw-only change; rebuild layers, no rebake
+static int g_selectedFoliage = -1;          // active foliage layer in the panel
 
 static bool g_useSlopeFilter = false;
 static float g_constrainSlopeDegMin = 0.0f;
@@ -262,6 +266,43 @@ static void SyncRoadsToWorld() {
         o->layerSlot = RoadLayerSlot(r->material); // -1 = shape only
     }
     BrushWorldSetRoads(g_world, wr, n);
+}
+
+// (Re)build the foliage system's layers from the scene's foliage entries. The
+// scene stays foliage-system-agnostic, so translate here (as the sandbox does).
+static void BuildFoliageLayers() {
+    if (!g_foliage) return;
+    BrushFoliageClearLayers(g_foliage);
+    for (int i = 0; i < g_scene.foliageCount; i++) {
+        const BrushSceneFoliageLayer *fl = &g_scene.foliage[i];
+        BrushFoliageLayerConfig c = {};
+        c.density = fl->density;
+        c.drawDistance = fl->drawDistance;
+        c.lodDistance = fl->lodDistance;
+        c.scale = fl->scale;
+        c.scaleJitter = fl->scaleJitter;
+        c.heightOffset = fl->heightOffset;
+        c.maxSlopeDeg = fl->maxSlopeDeg;
+        c.windStrength = fl->windStrength;
+        c.farKeepRatio = fl->farKeepRatio;
+        c.tint = fl->tint;
+        c.macroLow = fl->macroLow;
+        c.macroHigh = fl->macroHigh;
+        c.albedo = fl->albedoTex;
+        c.growLayer = -1;
+        c.avoidLayer = -1;
+        if (fl->modelRes.meshCount > 0) c.mesh = fl->modelRes.meshes[0];
+        BrushFoliageAddLayer(g_foliage, &c);
+    }
+}
+
+// Re-resolve assets, rebuild the layers, and re-scatter every chunk. Called
+// (deferred to idle) whenever a foliage layer edit changes placement/mesh.
+static void SyncFoliageToWorld() {
+    if (!g_world || !g_foliage) return;
+    BrushSceneResolveMaterials(&g_scene); // pick up model/albedo path changes
+    BuildFoliageLayers();
+    BrushWorldRebakeAll(g_world);
 }
 
 static void AddEditorLog(const char *fmt, ...) {
@@ -1114,8 +1155,25 @@ static bool OpenProjectAt(const char *dir) {
                               .loadRadius = 3, .physics = &g_phys,
                               .groundTex = g_groundTex, .texMetresPerTile = 64.0f };
     wcfg.layerCount = BrushSceneTerrainLayers(&g_scene, wcfg.layers);
+
+    // Live instanced foliage: build from the scene, install worker hooks before
+    // create so the initial ring scatters, attach the draw after.
+    g_foliage = BrushFoliageCreate();
+    if (g_scene.foliageCount == 0) {
+        BrushSceneFoliageLayer *fl = &g_scene.foliage[g_scene.foliageCount++];
+        memset(fl, 0, sizeof(*fl));
+        snprintf(fl->name, sizeof(fl->name), "grass");
+        fl->density = 0.5f; fl->drawDistance = 68.0f; fl->lodDistance = 26.0f;
+        fl->scale = 1.0f; fl->scaleJitter = 0.35f; fl->heightOffset = -0.04f;
+        fl->maxSlopeDeg = 42.0f; fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f;
+        fl->tint = (Vector3){1, 1, 1};
+    }
+    BuildFoliageLayers();
+    BrushFoliageInstallHooks(g_foliage, &wcfg);
+
     g_world = BrushWorldCreate(
         wcfg, (Vector3){ g_scene.spawn.x, 0, g_scene.spawn.z });
+    BrushFoliageAttach(g_foliage, g_world);
 
     BrushWorldSculptLoad(g_world, g_terrainPath);
     ApplyTerrainLayers();
@@ -1358,6 +1416,7 @@ int main(int argc, char **argv) {
         BrushTodUpdate(&g_tod, dt);
         BrushRenderApplyTimeOfDay(&g_tod);
         BrushWorldUpdate(g_world, g_camera.cam.position);
+        BrushFoliageUpdate(g_foliage, (float)GetTime(), 1.0f);
         // Nothing is dynamic here, but Jolt's broadphase does its node
         // maintenance inside Update — without stepping, editing churn
         // eventually aborts with "QuadTree: Out of nodes!".
@@ -2487,6 +2546,114 @@ int main(int argc, char **argv) {
             }
         }
 
+        // --- Foliage UI ------------------------------------------------------
+        // Procedural world config (like terrain layers), not a gizmo entity.
+        // Placement edits (density/scale/model) re-scatter; draw-only edits
+        // (tint/wind/distance) just rebuild the layers — both deferred to idle.
+        if (ImGui::CollapsingHeader("Foliage")) {
+            // Runtime graphics setting (not scene data): draw distance + shadow
+            // reception. Low cuts grass overdraw — the thermal lever.
+            const char *qNames[] = { "Low", "Medium", "High" };
+            int q = (int)BrushFoliageGetQuality(g_foliage);
+            if (ImGui::Combo("Quality", &q, qNames, 3))
+                BrushFoliageSetQuality(g_foliage, (BrushFoliageQuality)q);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Foliage draw distance + shadow reception. Low cuts "
+                                  "grass overdraw at 4x retina (the thermal lever).");
+            ImGui::Spacing();
+
+            if (g_scene.foliageCount == 0)
+                ImGui::TextDisabled("No foliage layers.");
+            for (int i = 0; i < g_scene.foliageCount; i++) {
+                char label[64];
+                int nc = 0, fc = 0;
+                BrushFoliageLayerStats(g_foliage, i, &nc, &fc);
+                snprintf(label, sizeof(label), "%s##fol%d",
+                         g_scene.foliage[i].name[0] ? g_scene.foliage[i].name : "(unnamed)", i);
+                if (ImGui::Selectable(label, g_selectedFoliage == i))
+                    g_selectedFoliage = i;
+            }
+
+            ImGui::Spacing();
+            if (ImGui::Button("Add Foliage Layer") &&
+                g_scene.foliageCount < BRUSH_SCENE_MAX_FOLIAGE) {
+                BrushSceneFoliageLayer *fl = &g_scene.foliage[g_scene.foliageCount];
+                memset(fl, 0, sizeof(*fl));
+                snprintf(fl->name, sizeof(fl->name), "layer%d", g_scene.foliageCount);
+                fl->density = 1.0f; fl->drawDistance = 60.0f; fl->lodDistance = 24.0f;
+                fl->scale = 1.0f; fl->scaleJitter = 0.3f; fl->maxSlopeDeg = 42.0f;
+                fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f; fl->tint = (Vector3){1, 1, 1};
+                g_selectedFoliage = g_scene.foliageCount++;
+                g_dirty = true; g_foliageResyncPending = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(live: edits re-scatter the grass)");
+
+            if (g_selectedFoliage >= 0 && g_selectedFoliage < g_scene.foliageCount) {
+                ImGui::Separator();
+                BrushSceneFoliageLayer *fl = &g_scene.foliage[g_selectedFoliage];
+                int nc = 0, fc = 0;
+                BrushFoliageLayerStats(g_foliage, g_selectedFoliage, &nc, &fc);
+                ImGui::Text("Visible: %d near / %d far  (%d draw call%s)", nc, fc,
+                            (nc > 0) + (fc > 0), ((nc > 0) + (fc > 0)) == 1 ? "" : "s");
+
+                ImGui::InputText("Name", fl->name, sizeof(fl->name));
+                if (ImGui::IsItemDeactivatedAfterEdit()) g_dirty = true;
+
+                // Model / albedo paths (empty -> procedural tuft/gradient).
+                // Path changes need a re-resolve, so they take the resync path.
+                ImGui::InputText("Model (.glb)", fl->model, sizeof(fl->model));
+                if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty = procedural tuft.");
+                ImGui::InputText("Albedo", fl->albedo, sizeof(fl->albedo));
+                if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty = procedural gradient card.");
+
+                ImGui::SeparatorText("Placement");
+                if (ImGui::SliderFloat("Density", &fl->density, 0.05f, 6.0f, "%.2f /m2")) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::SliderFloat("Scale", &fl->scale, 0.1f, 5.0f, "%.2f")) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::SliderFloat("Scale Jitter", &fl->scaleJitter, 0.0f, 1.0f, "%.2f")) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::SliderFloat("Height Offset", &fl->heightOffset, -0.5f, 0.5f, "%.2f m")) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::SliderFloat("Max Slope", &fl->maxSlopeDeg, 0.0f, 90.0f, fl->maxSlopeDeg < 0.5f ? "any" : "%.0f deg")) { g_dirty = true; g_foliageResyncPending = true; }
+
+                ImGui::SeparatorText("Distances (overdraw lever)");
+                if (ImGui::SliderFloat("Draw Distance", &fl->drawDistance, 10.0f, 200.0f, "%.0f m")) { g_dirty = true; g_foliageRebuildPending = true; }
+                if (fl->drawDistance > 120.0f) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "(!)");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("High draw distance = heavy grass overdraw at 4x retina "
+                                          "(the donor's thermal-throttle lever). Keep modest.");
+                }
+                if (ImGui::SliderFloat("LOD Distance", &fl->lodDistance, 5.0f, 150.0f, "%.0f m")) { g_dirty = true; g_foliageRebuildPending = true; }
+                if (ImGui::SliderFloat("Far LOD Keep", &fl->farKeepRatio, 0.05f, 1.0f, fl->farKeepRatio > 0.99f ? "no far LOD" : "%.2f")) { g_dirty = true; g_foliageRebuildPending = true; }
+
+                ImGui::SeparatorText("Look");
+                if (ImGui::SliderFloat("Wind", &fl->windStrength, 0.0f, 3.0f, "%.2f")) { g_dirty = true; g_foliageRebuildPending = true; }
+                if (ImGui::ColorEdit3("Tint", (float *)&fl->tint)) { g_dirty = true; g_foliageRebuildPending = true; }
+                if (ImGui::ColorEdit3("Macro Low", (float *)&fl->macroLow)) { g_dirty = true; g_foliageRebuildPending = true; }
+                if (ImGui::ColorEdit3("Macro High", (float *)&fl->macroHigh)) { g_dirty = true; g_foliageRebuildPending = true; }
+
+                ImGui::Spacing();
+                if (ImGui::Button("Duplicate Layer") &&
+                    g_scene.foliageCount < BRUSH_SCENE_MAX_FOLIAGE) {
+                    g_scene.foliage[g_scene.foliageCount] = *fl;
+                    g_scene.foliage[g_scene.foliageCount].modelRes = (Model){0};
+                    g_scene.foliage[g_scene.foliageCount].albedoTex = (Texture2D){0};
+                    g_selectedFoliage = g_scene.foliageCount++;
+                    g_dirty = true; g_foliageResyncPending = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete Layer")) {
+                    for (int fi = g_selectedFoliage; fi < g_scene.foliageCount - 1; fi++)
+                        g_scene.foliage[fi] = g_scene.foliage[fi + 1];
+                    g_scene.foliageCount--;
+                    g_selectedFoliage = -1;
+                    g_dirty = true; g_foliageResyncPending = true;
+                }
+            }
+        }
+
         ImGui::End();
 
         // === Console =========================================================
@@ -3138,6 +3305,16 @@ int main(int argc, char **argv) {
             g_roadResyncPending = false;
         }
 
+        // Live foliage: once the user stops dragging, either re-scatter (a
+        // placement change) or just rebuild the layers (a draw-only change like
+        // tint/wind — instances are untouched, so skip the costly world rebake).
+        if (!ImGui::IsAnyItemActive() && !ImGuizmo::IsUsing()) {
+            if (g_foliageResyncPending) SyncFoliageToWorld();
+            else if (g_foliageRebuildPending) BuildFoliageLayers();
+            g_foliageResyncPending = false;
+            g_foliageRebuildPending = false;
+        }
+
         rlImGuiEnd();
         EndDrawing();
 
@@ -3161,7 +3338,8 @@ int main(int argc, char **argv) {
     BrushSceneUnloadMaterials(&g_scene);
     BrushAssetsShutdown();
     UnloadModel(g_spawnMarker);
-    BrushWorldDestroy(g_world);
+    BrushWorldDestroy(g_world);   // frees chunk foliage handles via the free hook
+    BrushFoliageDestroy(g_foliage);
     BrushPhysicsCleanup(&g_phys);
     BrushRenderShutdown();
     CloseWindow();

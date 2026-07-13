@@ -422,6 +422,87 @@ Mesh BrushFoliageBuildBillboardMesh(Mesh source) {
 
 // --- Zero-asset procedural defaults + shader --------------------------------
 
+// Deterministic [0,1) LCG for blade scatter within a patch (donor parity).
+static float PatchRand(unsigned int *s) {
+  *s = *s * 1103515245u + 12345u;
+  return (float)((*s >> 16) & 0x7fff) / 32767.0f;
+}
+
+Mesh BrushFoliageMakeGrassPatch(int blades, float radius, float height) {
+  if (blades < 1) blades = 1;
+  if (radius <= 0.0f) radius = 0.45f;
+  if (height <= 0.0f) height = 0.24f;
+
+  Mesh m = {0};
+  m.vertexCount = blades * 5;
+  m.triangleCount = blades * 3;
+  m.vertices = (float *)MemAlloc(sizeof(float) * m.vertexCount * 3);
+  m.texcoords = (float *)MemAlloc(sizeof(float) * m.vertexCount * 2);
+  m.normals = (float *)MemAlloc(sizeof(float) * m.vertexCount * 3);
+  m.colors = (unsigned char *)MemAlloc(sizeof(unsigned char) * m.vertexCount * 4);
+  m.indices = (unsigned short *)MemAlloc(sizeof(unsigned short) * m.triangleCount * 3);
+
+  unsigned int seed = 1337u;
+  const float TAU = 6.2831853f;
+
+  for (int i = 0; i < blades; i++) {
+    // Blade base: uniform within the patch circle (sqrt for even area).
+    float theta = PatchRand(&seed) * TAU;
+    float r = radius * sqrtf(PatchRand(&seed));
+    float bx = r * cosf(theta), bz = r * sinf(theta);
+
+    float bh = height * (0.70f + 0.60f * PatchRand(&seed)); // 70..130% height
+    float bw = 0.005f * (0.60f + 0.60f * PatchRand(&seed)); // ~0.6..1.2 cm wide
+
+    float yaw = theta + (PatchRand(&seed) - 0.5f) * 0.6f;   // mostly outward
+    float fwdX = cosf(yaw), fwdZ = sinf(yaw);
+    float wX = -sinf(yaw) * bw, wZ = cosf(yaw) * bw;
+
+    float bend = (0.25f + 0.45f * PatchRand(&seed)) * bh;   // outward curve
+    float sink = bend * 0.25f;                              // gravity droop
+
+    int v = i * 5;
+    // v0 base-left, v1 base-right, v2 mid-left, v3 mid-right, v4 tip.
+    float px[5] = {bx - wX, bx + wX, bx - wX * 0.8f + fwdX * bend * 0.3f,
+                   bx + wX * 0.8f + fwdX * bend * 0.3f, bx + fwdX * bend};
+    float py[5] = {0.0f, 0.0f, bh * 0.5f - sink * 0.2f, bh * 0.5f - sink * 0.2f,
+                   bh - sink};
+    float pz[5] = {bz - wZ, bz + wZ, bz - wZ * 0.8f + fwdZ * bend * 0.3f,
+                   bz + wZ * 0.8f + fwdZ * bend * 0.3f, bz + fwdZ * bend};
+    // UVs: one of three vertical texture strips, narrowing to the tip.
+    float uOff = (float)(i % 3) * 0.33f, uW = 0.33f;
+    float uu[5] = {uOff, uOff + uW, uOff + uW * 0.1f, uOff + uW * 0.9f, uOff + uW * 0.5f};
+    float vv[5] = {0.0f, 0.0f, 0.5f, 0.5f, 1.0f};
+    unsigned char av[5] = {0, 0, 127, 127, 255}; // height in alpha (wind sway)
+
+    float nX = sinf(yaw), nZ = cosf(yaw), nY = 0.4f;
+    float nl = sqrtf(nX * nX + nY * nY + nZ * nZ);
+    nX /= nl; nY /= nl; nZ /= nl;
+
+    for (int k = 0; k < 5; k++) {
+      int vi = v + k;
+      m.vertices[vi * 3 + 0] = px[k];
+      m.vertices[vi * 3 + 1] = py[k];
+      m.vertices[vi * 3 + 2] = pz[k];
+      m.texcoords[vi * 2 + 0] = uu[k];
+      m.texcoords[vi * 2 + 1] = vv[k];
+      m.normals[vi * 3 + 0] = nX;
+      m.normals[vi * 3 + 1] = nY;
+      m.normals[vi * 3 + 2] = nZ;
+      m.colors[vi * 4 + 0] = 255; m.colors[vi * 4 + 1] = 255;
+      m.colors[vi * 4 + 2] = 255; m.colors[vi * 4 + 3] = av[k];
+    }
+
+    int t = i * 9; // 3 tris * 3 indices
+    m.indices[t + 0] = v + 0; m.indices[t + 1] = v + 1; m.indices[t + 2] = v + 2;
+    m.indices[t + 3] = v + 1; m.indices[t + 4] = v + 3; m.indices[t + 5] = v + 2;
+    m.indices[t + 6] = v + 2; m.indices[t + 7] = v + 3; m.indices[t + 8] = v + 4;
+  }
+
+  UploadMesh(&m, false);
+  return m;
+}
+
 Mesh BrushFoliageMakeTuft(int blades, float height, float width) {
   if (blades < 1) blades = 1;
   if (height <= 0.0f) height = 0.4f;
@@ -515,6 +596,7 @@ typedef struct BrushFoliageLayer {
   Material material;
   Matrix *bufNear, *bufFar; // shared per-frame draw buffers (main thread)
   int bufCap;
+  int lastNear, lastFar; // visible counts from the last draw (editor stats)
 } BrushFoliageLayer;
 
 struct BrushFoliage {
@@ -528,6 +610,9 @@ struct BrushFoliage {
   BrushWorld *world;
   float time;
   float distanceScale;
+  BrushFoliageQuality quality;
+  float qualityScale;  // draw-distance multiplier from the preset
+  bool qualityShadows; // whether foliage samples the shadow map
   int locTime, locWindDir, locWindStr, locFadeStart, locFadeEnd, locFadeNearEnd;
   int locMacroLow, locMacroHigh, locGrassTint, locAlphaCutoff;
 };
@@ -542,12 +627,19 @@ BrushFoliage *BrushFoliageCreate(void) {
   BrushFoliage *f = MemAlloc(sizeof(BrushFoliage));
   memset(f, 0, sizeof(*f));
   f->shader = BrushFoliageLoadShader();
-  f->defaultTuft = BrushFoliageMakeTuft(5, 0.45f, 0.14f);
+  f->defaultTuft = BrushFoliageMakeGrassPatch(120, 0.45f, 0.24f);
   f->defaultGradient = BrushFoliageMakeGradientTex((Color){52, 78, 36, 255},
                                                    (Color){150, 180, 84, 255});
   f->windDir = (Vector2){0.9578f, 0.2873f}; // normalized (1, 0.3)
   f->windStrength = 1.0f;
   f->distanceScale = 1.0f;
+  BrushFoliageQuality q = BRUSH_FOLIAGE_HIGH;
+  const char *qe = getenv("BRUSH_FOLIAGE_QUALITY");
+  if (qe) {
+    int v = atoi(qe);
+    q = (v <= 0) ? BRUSH_FOLIAGE_LOW : (v >= 2 ? BRUSH_FOLIAGE_HIGH : BRUSH_FOLIAGE_MED);
+  }
+  BrushFoliageSetQuality(f, q);
   f->locTime = GetShaderLocation(f->shader, "uTime");
   f->locWindDir = GetShaderLocation(f->shader, "uWindDirection");
   f->locWindStr = GetShaderLocation(f->shader, "uWindStrength");
@@ -592,12 +684,28 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   // with margin. The cull bounds-checks anyway, so undersizing only drops
   // instances (never overflows).
   float dd = L->cfg.drawDistance;
-  long cap = (long)(L->cfg.density * (2.0f * dd) * (2.0f * dd) * 1.2f) + 256;
-  if (cap > 400000) cap = 400000;
+  long cap = (long)(L->cfg.density * (2.0f * dd) * (2.0f * dd) * 1.2f *
+                    BRUSH_FOLIAGE_MAX_BOOST) + 256; // painting can thicken
+  if (cap > 900000) cap = 900000;
   L->bufCap = (int)cap;
   L->bufNear = MemAlloc(sizeof(Matrix) * L->bufCap);
   L->bufFar = MemAlloc(sizeof(Matrix) * L->bufCap);
   return f->layerCount++;
+}
+
+void BrushFoliageClearLayers(BrushFoliage *f) {
+  for (int i = 0; i < f->layerCount; i++) {
+    BrushFoliageLayer *L = &f->layers[i];
+    if (L->hasFar) UnloadMesh(L->farMesh);
+    // Shader + albedo are system/caller-owned; detach so UnloadMaterial leaves them.
+    L->material.shader = (Shader){0};
+    L->material.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+    UnloadMaterial(L->material);
+    if (L->bufNear) MemFree(L->bufNear);
+    if (L->bufFar) MemFree(L->bufFar);
+    *L = (BrushFoliageLayer){0};
+  }
+  f->layerCount = 0;
 }
 
 void BrushFoliageSetWind(BrushFoliage *f, Vector2 dir, float strength) {
@@ -616,11 +724,29 @@ static unsigned int HashCell(int x, int z, unsigned int seed) {
 }
 
 typedef struct {
-  float (*heightAt)(void *, float, float);
-  void *hctx;
+  const BrushChunkSamplers *s; // height + density + splat samplers (chunk-local)
   const BrushFoliageLayerConfig *cfg;
-  unsigned int seed; // per-LAYER (constant across chunks) -> seamless placement
+  unsigned int seed;  // per-LAYER (constant across chunks) -> seamless placement
+  int paintLayer;     // foliage density-mask channel (0..3, or -1 = no mask)
 } ScatterCtx;
+
+// True if this position passes the layer's surface-layer rules (grow/avoid).
+static bool SurfacePasses(const ScatterCtx *s, float x, float z) {
+  if (!s->s->splatAt || (s->cfg->growLayer < 0 && s->cfg->avoidLayer < 0))
+    return true;
+  float w[4];
+  s->s->splatAt(s->s->ctx, x, z, w);
+  if (s->cfg->avoidLayer >= 0 && s->cfg->avoidLayer < 4) {
+    float thr = s->cfg->avoidThreshold > 0.0f ? s->cfg->avoidThreshold : 0.5f;
+    if (w[s->cfg->avoidLayer] > thr) return false; // e.g. on the road layer
+  }
+  if (s->cfg->growLayer >= 0 && s->cfg->growLayer < 4) {
+    int dom = 0;
+    for (int L = 1; L < 4; L++) if (w[L] > w[dom]) dom = L;
+    if (dom != s->cfg->growLayer) return false; // wrong dominant terrain layer
+  }
+  return true;
+}
 
 static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCount,
                          int gx, int gz, float bx, float bz, float cw, float cd,
@@ -633,35 +759,47 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
   // chunks' grids tile, and a given world cell hashes identically everywhere.
   int wcx = (int)lroundf(bx / cw);
   int wcz = (int)lroundf(bz / cd);
-  unsigned int h = HashCell(wcx, wcz, s->seed);
-  float r1 = (float)(h & 0xffff) / 65535.0f;
-  float r2 = (float)((h >> 16) & 0xffff) / 65535.0f;
+  unsigned int h0 = HashCell(wcx, wcz, s->seed);
 
-  float jx = bx + (r1 - 0.5f) * cw;
-  float jz = bz + (r2 - 0.5f) * cd;
-  float y = s->heightAt(s->hctx, jx, jz);
+  // Painted density multiplier -> instances this cell emits (multi-emit boost;
+  // the grid stays fixed-resolution so borders stay seamless).
+  float M = s->s->densityAt ? s->s->densityAt(s->s->ctx, bx, bz, s->paintLayer)
+                            : 1.0f;
+  if (M <= 0.0f) return;
+  int n = (int)M;
+  if ((float)(h0 & 0xffff) / 65535.0f < (M - (float)n)) n++;
 
-  if (s->cfg->maxSlopeDeg > 0.0f) {
-    float e = 0.5f;
-    float hx = s->heightAt(s->hctx, jx + e, jz) - s->heightAt(s->hctx, jx - e, jz);
-    float hz = s->heightAt(s->hctx, jx, jz + e) - s->heightAt(s->hctx, jx, jz - e);
-    float ny = (2.0f * e) / sqrtf(hx * hx + hz * hz + 4.0f * e * e);
-    if (acosf(ny) * 57.29578f > s->cfg->maxSlopeDeg) return; // too steep
+  for (int k = 0; k < n && *index < maxCount; k++) {
+    unsigned int h = HashCell(wcx * 131 + k * 977 + 7, wcz, s->seed);
+    float r1 = (float)(h & 0xffff) / 65535.0f;
+    float r2 = (float)((h >> 16) & 0xffff) / 65535.0f;
+    float jx = bx + (r1 - 0.5f) * cw;
+    float jz = bz + (r2 - 0.5f) * cd;
+
+    if (!SurfacePasses(s, jx, jz)) continue;
+
+    float y = s->s->heightAt(s->s->ctx, jx, jz);
+    if (s->cfg->maxSlopeDeg > 0.0f) {
+      float e = 0.5f;
+      float hx = s->s->heightAt(s->s->ctx, jx + e, jz) - s->s->heightAt(s->s->ctx, jx - e, jz);
+      float hz = s->s->heightAt(s->s->ctx, jx, jz + e) - s->s->heightAt(s->s->ctx, jx, jz - e);
+      float ny = (2.0f * e) / sqrtf(hx * hx + hz * hz + 4.0f * e * e);
+      if (acosf(ny) * 57.29578f > s->cfg->maxSlopeDeg) continue; // too steep
+    }
+
+    float yaw = r1 * 6.2831853f;
+    float sc = s->cfg->scale * (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
+    int i = *index;
+    set->positions[i] = (Vector3){jx, y, jz};
+    set->transforms[i] = MatrixMultiply(
+        MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)),
+        MatrixTranslate(jx, y + s->cfg->heightOffset, jz));
+    (*index)++;
   }
-
-  float yaw = r1 * 6.2831853f;
-  float sc = s->cfg->scale * (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
-  int i = *index;
-  set->positions[i] = (Vector3){jx, y, jz};
-  set->transforms[i] = MatrixMultiply(
-      MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)),
-      MatrixTranslate(jx, y + s->cfg->heightOffset, jz));
-  (*index)++;
 }
 
 void *BrushFoliageChunkBake(void *user, BrushChunkCoord coord, Vector3 origin,
-                            float size, float (*heightAt)(void *, float, float),
-                            void *hctx) {
+                            float size, const BrushChunkSamplers *samplers) {
   (void)coord;
   BrushFoliage *f = (BrushFoliage *)user;
   FoliageChunkHandle *H = MemAlloc(sizeof(FoliageChunkHandle));
@@ -670,11 +808,15 @@ void *BrushFoliageChunkBake(void *user, BrushChunkCoord coord, Vector3 origin,
   Vector3 center = {origin.x + size * 0.5f, 0.0f, origin.z + size * 0.5f};
   for (int li = 0; li < f->layerCount; li++) {
     BrushFoliageLayer *L = &f->layers[li];
-    long cap = (long)(L->cfg.density * size * size) + 8;
-    if (cap > 200000) cap = 200000;
-    ScatterCtx pc = {heightAt, hctx, &L->cfg, 0x9e3779b9u + (unsigned)li * 2246822519u};
+    // Grid at base density; painting boosts up to MAX_BOOST via multi-emit, so
+    // size the cap for the ceiling.
+    long cap = (long)(L->cfg.density * size * size * BRUSH_FOLIAGE_MAX_BOOST) + 8;
+    if (cap > 300000) cap = 300000;
+    ScatterCtx pc = {samplers, &L->cfg,
+                     0x9e3779b9u + (unsigned)li * 2246822519u,
+                     (li < BRUSH_FOLIAGE_PAINT_MAX) ? li : -1};
     BrushFoliageScatterGrid(&H->sets[li], center, size, size, L->cfg.density,
-                            1.0f, (int)cap, FoliagePlace, &pc);
+                            BRUSH_FOLIAGE_MAX_BOOST, (int)cap, FoliagePlace, &pc);
     BrushFoliageBuildGrid(&H->sets[li], center, size, size, 4.0f);
   }
   return H;
@@ -701,8 +843,9 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
   rlDisableBackfaceCulling(); // grass cards are two-sided
   for (int li = 0; li < f->layerCount; li++) {
     BrushFoliageLayer *L = &f->layers[li];
-    float draw = L->cfg.drawDistance * f->distanceScale;
-    float lod = L->cfg.lodDistance * f->distanceScale;
+    float ds = f->distanceScale * f->qualityScale; // zoom * quality preset
+    float draw = L->cfg.drawDistance * ds;
+    float lod = L->cfg.lodDistance * ds;
 
     int nc = 0, fc = 0;
     for (int ci = 0; ci < nv; ci++) {
@@ -711,6 +854,8 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       BrushFoliageCull(&H->sets[li], cam.position, cam.target, draw, lod,
                        L->bufNear, L->bufCap, &nc, L->bufFar, L->bufCap, &fc);
     }
+    L->lastNear = nc;
+    L->lastFar = fc;
     if (nc == 0 && fc == 0) continue;
 
     float wind = f->windStrength * L->cfg.windStrength;
@@ -727,6 +872,11 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     SetShaderValue(f->shader, f->locGrassTint, &L->cfg.tint, SHADER_UNIFORM_VEC3);
     SetShaderValue(f->shader, f->locAlphaCutoff, &cutoff, SHADER_UNIFORM_FLOAT);
     BrushRenderApplySceneLighting(f->shader);
+    if (!f->qualityShadows) { // Low: skip the CSM taps in the grass shader
+      float off = 0.0f;
+      SetShaderValue(f->shader, GetShaderLocation(f->shader, "uShadowEnabled"),
+                     &off, SHADER_UNIFORM_FLOAT);
+    }
 
     if (nc > 0) DrawMeshInstanced(L->nearMesh, L->material, L->bufNear, nc);
     if (fc > 0)
@@ -752,19 +902,36 @@ void BrushFoliageUpdate(BrushFoliage *f, float time, float distanceScale) {
   f->distanceScale = (distanceScale > 0.0f) ? distanceScale : 1.0f;
 }
 
+void BrushFoliageSetQuality(BrushFoliage *f, BrushFoliageQuality q) {
+  f->quality = q;
+  switch (q) {
+    case BRUSH_FOLIAGE_LOW:  f->qualityScale = 0.5f;  f->qualityShadows = false; break;
+    case BRUSH_FOLIAGE_MED:  f->qualityScale = 0.75f; f->qualityShadows = true;  break;
+    default:                 f->qualityScale = 1.0f;  f->qualityShadows = true;  break;
+  }
+}
+
+BrushFoliageQuality BrushFoliageGetQuality(const BrushFoliage *f) {
+  return f ? f->quality : BRUSH_FOLIAGE_HIGH;
+}
+
+int BrushFoliageLayerCount(const BrushFoliage *f) { return f ? f->layerCount : 0; }
+
+void BrushFoliageLayerStats(const BrushFoliage *f, int layer, int *nearCount,
+                            int *farCount) {
+  int nc = 0, fc = 0;
+  if (f && layer >= 0 && layer < f->layerCount) {
+    nc = f->layers[layer].lastNear;
+    fc = f->layers[layer].lastFar;
+  }
+  if (nearCount) *nearCount = nc;
+  if (farCount) *farCount = fc;
+}
+
 void BrushFoliageDestroy(BrushFoliage *f) {
   if (!f) return;
   if (f->world) BrushRenderSetSceneCallback(NULL, NULL);
-  for (int i = 0; i < f->layerCount; i++) {
-    BrushFoliageLayer *L = &f->layers[i];
-    if (L->hasFar) UnloadMesh(L->farMesh);
-    // The shader + albedo are system-owned; detach so UnloadMaterial leaves them.
-    L->material.shader = (Shader){0};
-    L->material.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
-    UnloadMaterial(L->material);
-    if (L->bufNear) MemFree(L->bufNear);
-    if (L->bufFar) MemFree(L->bufFar);
-  }
+  BrushFoliageClearLayers(f);
   UnloadMesh(f->defaultTuft);
   UnloadTexture(f->defaultGradient);
   UnloadShader(f->shader);
