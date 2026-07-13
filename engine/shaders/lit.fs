@@ -228,6 +228,7 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
     vec2 P = (viewTS.xy / max(abs(viewTS.z), 0.1)) * scale; // total sweep
     vec2 dUV = P * layerD;
     vec2 ddx = dFdx(uv), ddy = dFdy(uv);
+    // Linear search: step along the ray until it passes under the height field.
     float curD = 0.0;
     vec2  cur = uv;
     float hCur = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
@@ -237,12 +238,19 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
         curD += layerD;
         hCur  = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
     }
-    // Interpolate the crossing between the last two steps (the "occlusion" bit).
+    // Relief-mapping refinement: the intersection lies in the last [prev, cur]
+    // interval (prev above the surface, cur below). Bisect it a few times for a
+    // sharp hit — much crisper on stone edges than POM's single linear lerp.
     vec2  prev  = cur + dUV;
-    float after  = hCur - curD;
-    float before = (1.0 - textureGrad(heightTex, prev, ddx, ddy).r) - (curD - layerD);
-    float t = after / (after - before + 1e-5);
-    return mix(cur, prev, clamp(t, 0.0, 1.0));
+    float prevD = curD - layerD;
+    for (int i = 0; i < 5; i++) {
+        vec2  midUV = 0.5 * (cur + prev);
+        float midD  = 0.5 * (curD + prevD);
+        float hMid  = 1.0 - textureGrad(heightTex, midUV, ddx, ddy).r;
+        if (midD >= hMid) { cur = midUV;  curD = midD; }  // still under: tighten near side
+        else              { prev = midUV; prevD = midD; } // above: tighten far side
+    }
+    return 0.5 * (cur + prev);
 }
 
 // Soft self-shadow of the height field: march from the parallax hit point
@@ -252,18 +260,21 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
 float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale) {
     if (L.z <= 0.05) return 1.0;
     vec2 ddx = dFdx(uv), ddy = dFdy(uv);
-    float h0 = textureGrad(heightTex, uv, ddx, ddy).r; // hit height (1 = crest)
+    // Work in the same depth space as the march (0 = crest, 1 = valley). The
+    // ray rises toward the light -> depth DECREASES by 1/N per step, matching
+    // the horizontal (L.xy / L.z) * scale sweep (Tatarchuk's soft self-shadow).
     const int N = 12;
-    vec2  dUV = (L.xy / L.z) * scale / float(N);
-    float dH  = (1.0 - h0) / float(N);                 // climb to the crest over N steps
-    float occ = 0.0;
-    vec2  cur = uv;
-    float rayH = h0;
+    float rayD = 1.0 - textureGrad(heightTex, uv, ddx, ddy).r; // hit depth
+    vec2  dUV  = (L.xy / max(L.z, 0.1)) * scale / float(N);
+    float dD   = 1.0 / float(N);
+    float occ  = 0.0;
+    vec2  cur  = uv;
     for (int i = 0; i < N; i++) {
         cur  += dUV;
-        rayH += dH;
-        float s = textureGrad(heightTex, cur, ddx, ddy).r;
-        if (s > rayH) occ = max(occ, (s - rayH) * (1.0 - float(i) / float(N)));
+        rayD -= dD;
+        if (rayD <= 0.0) break;                          // above the tallest crest
+        float sD = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
+        if (sD < rayD) occ = max(occ, (rayD - sD) * (1.0 - float(i) / float(N)));
     }
     return 1.0 - clamp(occ * 4.0, 0.0, 1.0);
 }
