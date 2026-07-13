@@ -177,8 +177,6 @@ typedef struct BrushFoliageLayerConfig {
   Mesh meshes[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   Texture2D albedos[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   float meshScale[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // per-variant scale x layer scale (0 -> 1)
-  float meshBaseY[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // model-space lowest vertex (computed
-                                                   // by AddLayer) -> anchors the base to the ground
   int meshCount;        // 0 -> a single procedural tuft
   // Surface-layer auto-exclusion (reads the terrain splat weights).
   int   growLayer;      // grow only where terrain layer N dominates (-1 = any)

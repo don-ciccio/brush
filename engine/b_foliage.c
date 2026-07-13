@@ -176,12 +176,10 @@ static bool CullWalkBegin(const BrushFoliageSet *set, Vector3 viewPos,
   return true;
 }
 
-// Per-instance visibility: distance^2 (out) + a GENEROUS behind-the-camera cull.
-// The forward vector is XZ-projected, which is unreliable when the camera looks
-// down (third-person, inspecting), so a tight FOV cone wrongly culls on-screen
-// side/near grass and it pops as you move. Keep everything except grass clearly
-// behind the camera (>12 m back along the view). GPU frustum culling handles the
-// rest at raster; a few extra off-screen instances in the vertex pass are cheap.
+// Per-instance visibility: distance^2 (out) + FOV test (matches the donor's
+// proven grass cull). A wide ~60-degree half-cone covers a ~50-deg vertical
+// FOV with margin; instances within 6 m skip the cone (they wrap around the
+// camera in third person). Returns false to skip.
 static inline bool InstanceVisible(const BrushFoliageSet *set, int i,
                                    Vector3 viewPos, float fwdX, float fwdZ,
                                    float maxDist2, float *dist2Out) {
@@ -189,7 +187,11 @@ static inline bool InstanceVisible(const BrushFoliageSet *set, int i,
   float dz = set->positions[i].z - viewPos.z;
   float dist2 = dx * dx + dz * dz;
   if (dist2 > maxDist2) return false;
-  if (dist2 >= 36.0f && (dx * fwdX + dz * fwdZ) < -12.0f) return false; // far behind
+  if (dist2 >= 36.0f) {
+    float projDist = dx * fwdX + dz * fwdZ;
+    if (projDist < 0.0f) return false;                     // behind camera
+    if (projDist * projDist < 0.25f * dist2) return false; // cos(60 deg)^2
+  }
   *dist2Out = dist2;
   return true;
 }
@@ -219,7 +221,7 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
       float cwx = set->originX + (cx + 0.5f) * set->cellSize;
       float cwz = set->originZ + (cz + 0.5f) * set->cellSize;
       float projC = (cwx - viewPos.x) * w.fwdX + (cwz - viewPos.z) * w.fwdZ;
-      if (projC < -(w.cellRadiusWorld + 12.0f)) continue;
+      if (projC < -(w.cellRadiusWorld + 4.0f)) continue;
 
       for (int k = 0; k < cell->count; k++) {
         int i = set->gridIndices[cell->offset + k];
@@ -255,7 +257,7 @@ void BrushFoliageCull3(const BrushFoliageSet *set, Vector3 viewPos,
       float cwx = set->originX + (cx + 0.5f) * set->cellSize;
       float cwz = set->originZ + (cz + 0.5f) * set->cellSize;
       float projC = (cwx - viewPos.x) * w.fwdX + (cwz - viewPos.z) * w.fwdZ;
-      if (projC < -(w.cellRadiusWorld + 12.0f)) continue;
+      if (projC < -(w.cellRadiusWorld + 4.0f)) continue;
 
       for (int k = 0; k < cell->count; k++) {
         int i = set->gridIndices[cell->offset + k];
@@ -685,18 +687,35 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   for (int m = 0; m < mc; m++) {
     // The wind bends by world height, so a model mesh works as-is (shared,
     // not owned); an empty slot falls back to the procedural tuft.
-    L->nearMesh[m] = (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0)
-                         ? cfg->meshes[m] : f->defaultTuft;
-    // Lowest vertex in model space -> anchor the base to the terrain at scatter
-    // time (models often pivot at their centre, so they'd float/sink otherwise).
-    float minY = 0.0f;
-    Mesh nm = L->nearMesh[m];
-    if (nm.vertices && nm.vertexCount > 0) {
-      minY = nm.vertices[1];
-      for (int v = 1; v < nm.vertexCount; v++)
-        if (nm.vertices[v * 3 + 1] < minY) minY = nm.vertices[v * 3 + 1];
+    Mesh src = (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0)
+                   ? cfg->meshes[m] : f->defaultTuft;
+    // Ground the provided model mesh: recentre it on XZ and drop its base to
+    // Y=0, then re-upload. Models are often pivoted at their centre (or an
+    // arbitrary point), which makes them float/sink or swing around the scatter
+    // point when rotated. Baking the transform into the geometry once — rather
+    // than offsetting per instance — means BOTH the near mesh and the LOD mesh
+    // built from it share the same grounded base, so grass never jumps at the
+    // LOD boundary. Idempotent: re-running on an already-grounded/shared mesh
+    // (e.g. the procedural tuft) subtracts ~0 and skips the GPU update.
+    if (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0 && src.vertices) {
+      float minX = 1e9f, maxX = -1e9f, minY = 1e9f, minZ = 1e9f, maxZ = -1e9f;
+      for (int v = 0; v < src.vertexCount; v++) {
+        float x = src.vertices[v * 3], y = src.vertices[v * 3 + 1], z = src.vertices[v * 3 + 2];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      }
+      float ox = (minX + maxX) * 0.5f, oy = minY, oz = (minZ + maxZ) * 0.5f;
+      if (fabsf(ox) > 1e-4f || fabsf(oy) > 1e-4f || fabsf(oz) > 1e-4f) {
+        for (int v = 0; v < src.vertexCount; v++) {
+          src.vertices[v * 3] -= ox;
+          src.vertices[v * 3 + 1] -= oy;
+          src.vertices[v * 3 + 2] -= oz;
+        }
+        UpdateMeshBuffer(src, 0, src.vertices, sizeof(float) * src.vertexCount * 3, 0);
+      }
     }
-    L->cfg.meshBaseY[m] = minY;
+    L->nearMesh[m] = src;
     if (L->cfg.farKeepRatio < 0.999f) {
       L->farMesh[m] = BrushFoliageBuildLODMesh(L->nearMesh[m], L->cfg.farKeepRatio);
       L->hasFar[m] = true;
@@ -832,14 +851,13 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     float yaw = r1 * 6.2831853f;
     float sc = s->cfg->scale * vscale *
                (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
-    // Anchor the model's BASE (its lowest vertex, scaled) to the terrain, so
-    // centre-pivoted models don't float or sink.
-    float baseY = y + s->cfg->heightOffset - s->cfg->meshBaseY[mi] * sc;
+    // The mesh base is baked to Y=0 at layer setup (AddLayer grounds + centres
+    // the geometry), so the scatter point maps straight to the terrain height.
     int i = *index;
     set->positions[i] = (Vector3){jx, y, jz};
     set->transforms[i] = MatrixMultiply(
         MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)),
-        MatrixTranslate(jx, baseY, jz));
+        MatrixTranslate(jx, y + s->cfg->heightOffset, jz));
     set->modelIdx[i] = mi;
     (*index)++;
   }
