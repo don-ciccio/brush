@@ -1,0 +1,14 @@
+# Meadow — an example scene showing the instanced-foliage system with real
+# grass models (a multi-model palette + per-variant scale). See docs/foliage-plan.md.
+#
+# The "grass" layer mixes three Quaternius grass meshes at their own scales
+# (Grass1 5x, Grass4 2.5x, Grass_5 6.2x); "poppies" sprinkles a flower.
+version 2
+spawn 0 0.5 6
+time 12
+
+# foliage  name model albedo  density drawD lodD  scale jitter hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)  grow avoid avoidThr  modelScale0
+foliage grass assets/models/Grass1.glb - 0.5 72 26 1 0.4 -0.02 42 1 0.4  1.7 1.8 1.4  0 0 0  0 0 0  -1 -1 0.5  5
+foliage_model assets/models/Grass4.glb 2.5
+foliage_model assets/models/Grass_5.glb 6.2
+foliage poppies assets/models/RedPoppy.glb - 0.12 55 22 1 0.2 0 42 0.7 0.4  1 1 1  0 0 0  0 0 0  -1 -1 0.5  1.5

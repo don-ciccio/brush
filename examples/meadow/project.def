@@ -1,0 +1,4 @@
+# brush project definition (see engine/b_project.h)
+version 1
+name Meadow
+scene assets/meadow.def
