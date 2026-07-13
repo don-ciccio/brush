@@ -352,6 +352,14 @@ static void SandboxInit(void *user) {
   // every chunk and the terrain texture pops in ~1s after launch.
   wcfg.layerCount = BrushSceneTerrainLayers(&s->scene, wcfg.layers);
 
+  // Harness: 2-layer terrain (base + a 'path') so surface-layer exclusion has a
+  // layer to avoid. Paints a path strip after create; the grass layer avoids it.
+  if (getenv("BRUSH_TEST_FOLIAGE_AVOID") != NULL) {
+    wcfg.layers[0] = (BrushTerrainLayer){.albedo = s->groundTex, .tile = 64.0f};
+    wcfg.layers[1] = (BrushTerrainLayer){.albedo = s->groundTex, .tile = 8.0f};
+    wcfg.layerCount = 2;
+  }
+
   // Instanced grass: build the system from the scene's foliage layers, then
   // install the worker scatter hooks into the world config BEFORE create so the
   // initial ring scatters foliage on frame 1 (as with the splat layers above).
@@ -372,7 +380,12 @@ static void SandboxInit(void *user) {
     fl->windStrength = 1.0f;
     fl->farKeepRatio = 0.4f;
     fl->tint = (Vector3){1, 1, 1};
+    fl->growLayer = -1;
+    fl->avoidLayer = -1;
+    fl->avoidThreshold = 0.5f;
   }
+  if (getenv("BRUSH_TEST_FOLIAGE_AVOID") != NULL && s->scene.foliageCount > 0)
+    s->scene.foliage[0].avoidLayer = 1; // grass avoids the painted 'path' layer
   for (int i = 0; i < s->scene.foliageCount; i++) {
     const BrushSceneFoliageLayer *fl = &s->scene.foliage[i];
     BrushFoliageLayerConfig c = {
@@ -389,8 +402,9 @@ static void SandboxInit(void *user) {
         .macroLow = fl->macroLow,
         .macroHigh = fl->macroHigh,
         .albedo = fl->albedoTex,
-        .growLayer = -1,
-        .avoidLayer = -1};
+        .growLayer = fl->growLayer,
+        .avoidLayer = fl->avoidLayer,
+        .avoidThreshold = fl->avoidThreshold};
     if (fl->modelRes.meshCount > 0) c.mesh = fl->modelRes.meshes[0];
     BrushFoliageAddLayer(s->foliage, &c);
   }
@@ -398,6 +412,15 @@ static void SandboxInit(void *user) {
 
   s->world = BrushWorldCreate(wcfg, (Vector3){spx, 0, spz});
   BrushFoliageAttach(s->foliage, s->world);
+
+  // Harness: paint a 'path' (terrain layer 1) strip across spawn; the grass
+  // layer (avoidLayer=1) should leave it bare — surface-layer auto-exclusion.
+  if (getenv("BRUSH_TEST_FOLIAGE_AVOID") != NULL) {
+    for (int i = 0; i < 5; i++) {
+      float zz = spz - 8.0f + i * 4.0f;
+      BrushWorldPaint(s->world, (Vector3){spx, 0, zz}, 4.5f, 1.0f, 1);
+    }
+  }
 
   // Harness: paint the foliage density mask — thicken one patch, carve another
   // — to verify Phase A (multi-emit boost + carve-out + localized re-scatter).

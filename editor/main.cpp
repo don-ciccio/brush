@@ -290,8 +290,9 @@ static void BuildFoliageLayers() {
         c.macroLow = fl->macroLow;
         c.macroHigh = fl->macroHigh;
         c.albedo = fl->albedoTex;
-        c.growLayer = -1;
-        c.avoidLayer = -1;
+        c.growLayer = fl->growLayer;
+        c.avoidLayer = fl->avoidLayer;
+        c.avoidThreshold = fl->avoidThreshold;
         if (fl->modelRes.meshCount > 0) c.mesh = fl->modelRes.meshes[0];
         BrushFoliageAddLayer(g_foliage, &c);
     }
@@ -1168,6 +1169,7 @@ static bool OpenProjectAt(const char *dir) {
         fl->scale = 1.0f; fl->scaleJitter = 0.35f; fl->heightOffset = -0.04f;
         fl->maxSlopeDeg = 42.0f; fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f;
         fl->tint = (Vector3){1, 1, 1};
+        fl->growLayer = -1; fl->avoidLayer = -1; fl->avoidThreshold = 0.5f;
     }
     BuildFoliageLayers();
     BrushFoliageInstallHooks(g_foliage, &wcfg);
@@ -2588,6 +2590,7 @@ int main(int argc, char **argv) {
                 fl->density = 1.0f; fl->drawDistance = 60.0f; fl->lodDistance = 24.0f;
                 fl->scale = 1.0f; fl->scaleJitter = 0.3f; fl->maxSlopeDeg = 42.0f;
                 fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f; fl->tint = (Vector3){1, 1, 1};
+                fl->growLayer = -1; fl->avoidLayer = -1; fl->avoidThreshold = 0.5f;
                 g_selectedFoliage = g_scene.foliageCount++;
                 g_dirty = true; g_foliageResyncPending = true;
             }
@@ -2638,6 +2641,31 @@ int main(int argc, char **argv) {
                 if (ImGui::ColorEdit3("Tint", (float *)&fl->tint)) { g_dirty = true; g_foliageRebuildPending = true; }
                 if (ImGui::ColorEdit3("Macro Low", (float *)&fl->macroLow)) { g_dirty = true; g_foliageRebuildPending = true; }
                 if (ImGui::ColorEdit3("Macro High", (float *)&fl->macroHigh)) { g_dirty = true; g_foliageRebuildPending = true; }
+
+                ImGui::SeparatorText("Surface Rules");
+                // Grow only on / avoid a terrain layer (auto-exclusion, e.g.
+                // no grass on the road/paving layer). Placement -> re-scatter.
+                if (ImGui::BeginCombo("Grows On", fl->growLayer < 0 ? "any" : TerrainSlotLabel(fl->growLayer))) {
+                    if (ImGui::Selectable("any", fl->growLayer < 0)) { fl->growLayer = -1; g_dirty = true; g_foliageResyncPending = true; }
+                    for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+                        if (!g_scene.terrainLayers[i][0]) continue;
+                        if (ImGui::Selectable(TerrainSlotLabel(i), fl->growLayer == i)) { fl->growLayer = i; g_dirty = true; g_foliageResyncPending = true; }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::BeginCombo("Avoids", fl->avoidLayer < 0 ? "none" : TerrainSlotLabel(fl->avoidLayer))) {
+                    if (ImGui::Selectable("none", fl->avoidLayer < 0)) { fl->avoidLayer = -1; g_dirty = true; g_foliageResyncPending = true; }
+                    for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
+                        if (!g_scene.terrainLayers[i][0]) continue;
+                        if (ImGui::Selectable(TerrainSlotLabel(i), fl->avoidLayer == i)) { fl->avoidLayer = i; g_dirty = true; g_foliageResyncPending = true; }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (fl->avoidLayer >= 0) {
+                    if (fl->avoidThreshold <= 0.0f) fl->avoidThreshold = 0.5f;
+                    if (ImGui::SliderFloat("Avoid Above", &fl->avoidThreshold, 0.05f, 1.0f, "%.2f"))
+                        { g_dirty = true; g_foliageResyncPending = true; }
+                }
 
                 ImGui::Spacing();
                 if (g_selectedFoliage < BRUSH_FOLIAGE_PAINT_MAX) {

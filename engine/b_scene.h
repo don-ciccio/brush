@@ -127,6 +127,9 @@ typedef struct BrushSceneFoliageLayer {
   float lodDistance;   // near -> far LOD switch (m)
   float scale, scaleJitter, heightOffset, maxSlopeDeg, windStrength, farKeepRatio;
   Vector3 tint, macroLow, macroHigh;
+  int   growLayer;     // grow only where terrain layer N dominates (-1 = any)
+  int   avoidLayer;    // exclude where terrain layer N > threshold (-1 = none)
+  float avoidThreshold; // 0..1 (0 -> default 0.5)
   Model modelRes;      // resolved (not saved)
   Texture2D albedoTex; // resolved (not saved)
 } BrushSceneFoliageLayer;

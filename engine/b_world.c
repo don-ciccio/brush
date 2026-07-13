@@ -1527,23 +1527,27 @@ int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz) {
 }
 
 bool BrushWorldSculptAny(const BrushWorld *w) {
-  return w->tileCount > 0 || w->wtileCount > 0;
+  return w->tileCount > 0 || w->wtileCount > 0 || w->fmtileCount > 0;
 }
 
-// Blob layout (also the .terrain file format). BSC2 appends the paint
-// weights after the height tiles; BSC1 files (heights only) still load.
-//   u32 magic 'BSC2' | i32 tileRes | i32 count
+// Blob layout (also the .terrain file format). BSC2 appends the paint weights
+// after the height tiles; BSC3 appends the foliage density mask after that.
+// Older files (BSC1 heights-only, BSC2 heights+weights) still load.
+//   u32 magic 'BSC3' | i32 tileRes | i32 count
 //   i32 rangeT0x rangeT0z rangeT1x rangeT1z   (tile range the blob covers)
 //   count  x { i32 tx, i32 tz, float[tileRes^2] }          (height deltas)
 //   i32 wcount
 //   wcount x { i32 tx, i32 tz, u8[tileRes^2 * 4] }          (layer weights)
+//   i32 fmcount                                             (BSC3+)
+//   fmcount x { i32 tx, i32 tz, u8[tileRes^2 * 4] }         (foliage density)
 #define SCULPT_MAGIC 0x31435342u  // "BSC1"
 #define SCULPT_MAGIC2 0x32435342u // "BSC2"
+#define SCULPT_MAGIC3 0x33435342u // "BSC3"
 
 static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
                                       int t1x, int t1z, int *outSize) {
   int n = w->tileRes * w->tileRes;
-  int count = 0, wcount = 0;
+  int count = 0, wcount = 0, fmcount = 0;
   for (int i = 0; i < w->tileCount; i++) {
     SculptTile *t = &w->tiles[i];
     if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) count++;
@@ -1552,12 +1556,18 @@ static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
     SplatTile *t = &w->wtiles[i];
     if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) wcount++;
   }
+  for (int i = 0; i < w->fmtileCount; i++) {
+    FoliageMaskTile *t = &w->fmtiles[i];
+    if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) fmcount++;
+  }
   int size = (int)(sizeof(unsigned int) + 7 * sizeof(int) +
                    (size_t)count * (2 * sizeof(int) + n * sizeof(float)) +
-                   (size_t)wcount * (2 * sizeof(int) + (size_t)n * 4));
+                   (size_t)wcount * (2 * sizeof(int) + (size_t)n * 4) +
+                   sizeof(int) + // fmcount
+                   (size_t)fmcount * (2 * sizeof(int) + (size_t)n * 4));
   unsigned char *blob = (unsigned char *)MemAlloc((unsigned int)size);
   unsigned char *p = blob;
-  *(unsigned int *)p = SCULPT_MAGIC2; p += 4;
+  *(unsigned int *)p = SCULPT_MAGIC3; p += 4;
   *(int *)p = w->tileRes; p += 4;
   *(int *)p = count; p += 4;
   *(int *)p = t0x; p += 4;
@@ -1579,6 +1589,14 @@ static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
     *(int *)p = t->tz; p += 4;
     memcpy(p, t->w, (size_t)n * 4); p += (size_t)n * 4;
   }
+  *(int *)p = fmcount; p += 4;
+  for (int i = 0; i < w->fmtileCount; i++) {
+    FoliageMaskTile *t = &w->fmtiles[i];
+    if (t->tx < t0x || t->tx > t1x || t->tz < t0z || t->tz > t1z) continue;
+    *(int *)p = t->tx; p += 4;
+    *(int *)p = t->tz; p += 4;
+    memcpy(p, t->m, (size_t)n * 4); p += (size_t)n * 4;
+  }
   if (outSize) *outSize = size;
   return blob;
 }
@@ -1599,8 +1617,10 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
   if (blob == NULL || size < 28) return;
   const unsigned char *p = blob;
   unsigned int magic = *(const unsigned int *)p;
-  if (magic != SCULPT_MAGIC && magic != SCULPT_MAGIC2) return;
-  bool hasWeights = (magic == SCULPT_MAGIC2);
+  if (magic != SCULPT_MAGIC && magic != SCULPT_MAGIC2 && magic != SCULPT_MAGIC3)
+    return;
+  bool hasWeights = (magic == SCULPT_MAGIC2 || magic == SCULPT_MAGIC3);
+  bool hasMask = (magic == SCULPT_MAGIC3);
   p += 4;
   int tileRes = *(const int *)p; p += 4;
   int count = *(const int *)p; p += 4;
@@ -1645,6 +1665,23 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
       p += (size_t)n * 4;
     }
   }
+  if (hasMask) {
+    // In-range mask tiles created after the snapshot return to the neutral
+    // default (M = 1x base).
+    for (int i = 0; i < w->fmtileCount; i++) {
+      FoliageMaskTile *t = &w->fmtiles[i];
+      if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z)
+        memset(t->m, FOLIAGE_MASK_NEUTRAL, (size_t)n * 4);
+    }
+    int fmcount = *(const int *)p; p += 4;
+    for (int i = 0; i < fmcount; i++) {
+      int tx = *(const int *)p; p += 4;
+      int tz = *(const int *)p; p += 4;
+      FoliageMaskTile *t = FoliageMaskGet(w, tx, tz, true);
+      memcpy(t->m, p, (size_t)n * 4);
+      p += (size_t)n * 4;
+    }
+  }
   pthread_mutex_unlock(&w->sculptMutex);
 
   float tileWorld = w->gridStep * (float)w->tileRes;
@@ -1666,6 +1703,14 @@ bool BrushWorldSculptSave(BrushWorld *w, const char *path) {
   }
   for (int i = 0; i < w->wtileCount; i++) {
     SplatTile *t = &w->wtiles[i];
+    if (first) { t0x = t1x = t->tx; t0z = t1z = t->tz; first = false; }
+    if (t->tx < t0x) t0x = t->tx;
+    if (t->tx > t1x) t1x = t->tx;
+    if (t->tz < t0z) t0z = t->tz;
+    if (t->tz > t1z) t1z = t->tz;
+  }
+  for (int i = 0; i < w->fmtileCount; i++) {
+    FoliageMaskTile *t = &w->fmtiles[i];
     if (first) { t0x = t1x = t->tx; t0z = t1z = t->tz; first = false; }
     if (t->tx < t0x) t0x = t->tx;
     if (t->tx > t1x) t1x = t->tx;
