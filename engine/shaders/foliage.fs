@@ -23,6 +23,7 @@ uniform vec3 viewPos;
 uniform float uLinearize; // 1 = sRGB albedo -> linear (post path); 0 = direct LDR
 uniform vec3 uGrassTint;  // per-layer albedo tint (1,1,1 = none)
 uniform float uAlphaCutoff; // discard below this texture alpha (card cutout)
+uniform float uImpostor;    // 1 = billboard: output the pre-lit baked atlas as-is
 
 // Sun shadow (CSM) — mirrors lit.fs's cascade selection, single tap. Gated off
 // by default (uShadowEnabled 0) so a shader with no shadow maps bound still runs.
@@ -55,6 +56,12 @@ float ShadowFactor(vec3 fragPos, float ndotl) {
 void main() {
     vec4 tex = texture(texture0, fragTexCoord);
     if (tex.a < uAlphaCutoff) discard;
+
+    // Billboard impostor: the atlas already holds the clump's fully-lit LINEAR
+    // colour (baked once from the 3D mesh with the scene sun), so output it
+    // directly — re-lighting a flat card can't reproduce the mesh's averaged
+    // per-blade shading and reads too dark. Just apply the distance fade.
+    if (uImpostor > 0.5) { finalColor = vec4(tex.rgb, tex.a * fragFade * colDiffuse.a); return; }
 
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb * uGrassTint;
     albedo *= fragMacroColor; // low-frequency patch variation

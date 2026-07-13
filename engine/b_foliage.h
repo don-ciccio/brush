@@ -105,14 +105,18 @@ void BrushFoliageScatterGrid(BrushFoliageSet *set, Vector3 center, float width,
 void BrushFoliageBuildGrid(BrushFoliageSet *set, Vector3 center, float width,
                            float depth, float cellSize);
 
-// 2-tier cull, routed by model variant: walk only the grid cells within
-// `drawDistance` of viewPos, apply distance + horizontal-FOV tests, and APPEND
-// each survivor's transform into the near (dist < lodDistance) or far batch,
+// Cull routed by model variant: walk only the grid cells within `drawDistance`
+// of viewPos, apply distance + horizontal-FOV tests, and APPEND each survivor's
+// transform into the near (dist < lodDistance), far, or billboard band batch,
 // indexed by the instance's modelIdx. Read-only in `set`. Accumulate across
 // chunks by reusing the same batches (reset their counts once per frame first).
+// Pass billboardDistance > 0 and a non-NULL bbB for the 3-tier split (near <
+// lodDistance, far < billboardDistance, billboard < drawDistance); otherwise it
+// is a 2-tier near/far cull (bbB may be NULL).
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                      BrushFoliageDrawBatch *nearB, BrushFoliageDrawBatch *farB);
+                      float billboardDistance, BrushFoliageDrawBatch *nearB,
+                      BrushFoliageDrawBatch *farB, BrushFoliageDrawBatch *bbB);
 
 // 3-tier cull: near (< lodDistance), far (< billboardDistance), billboard
 // (< drawDistance) — each appended to its own caller buffer, so the three

@@ -205,12 +205,15 @@ static inline void BatchAppend(BrushFoliageDrawBatch *b, unsigned char mi,
 
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                      BrushFoliageDrawBatch *nearB, BrushFoliageDrawBatch *farB) {
+                      float billboardDistance, BrushFoliageDrawBatch *nearB,
+                      BrushFoliageDrawBatch *farB, BrushFoliageDrawBatch *bbB) {
   CullWalk w;
   if (!CullWalkBegin(set, viewPos, viewTarget, drawDistance, &w)) return;
 
   float maxDist2 = drawDistance * drawDistance;
   float lodDist2 = lodDistance * lodDistance;
+  bool useBB = (bbB != NULL && billboardDistance > 0.0f);
+  float bbDist2 = billboardDistance * billboardDistance;
 
   for (int cz = w.startCz; cz != w.endCz + w.stepZ; cz += w.stepZ) {
     for (int cx = w.startCx; cx != w.endCx + w.stepX; cx += w.stepX) {
@@ -229,7 +232,9 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
         if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, &dist2))
           continue;
         unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
-        BatchAppend(dist2 < lodDist2 ? nearB : farB, mi, set->transforms[i]);
+        BrushFoliageDrawBatch *dst = (dist2 < lodDist2) ? nearB
+            : (useBB && dist2 >= bbDist2) ? bbB : farB;
+        BatchAppend(dst, mi, set->transforms[i]);
       }
     }
   }
@@ -603,7 +608,14 @@ typedef struct BrushFoliageLayer {
   Mesh farMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];  // decimated LOD, owned
   bool hasFar[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   Material material[BRUSH_FOLIAGE_MODELS_PER_LAYER];
-  BrushFoliageDrawBatch nearB, farB; // per-model visible buffers (main thread)
+  // Billboard impostor band (opt-in): a crossed-quad + a texture baked once from
+  // the clump, drawn beyond billboardDistance in place of the far mesh.
+  Mesh billboardMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  Material billboardMat[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  RenderTexture2D impostorRT[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // owns the atlas tex
+  bool hasImpostor[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  float billboardDistance; // 0 = no billboard band (2-tier)
+  BrushFoliageDrawBatch nearB, farB, bbB; // per-model visible buffers (main thread)
   int lastNear, lastFar; // visible counts from the last draw (editor stats)
 } BrushFoliageLayer;
 
@@ -623,6 +635,9 @@ struct BrushFoliage {
   bool qualityShadows; // whether foliage samples the shadow map
   int locTime, locWindDir, locWindStr, locFadeStart, locFadeEnd, locFadeNearEnd;
   int locMacroLow, locMacroHigh, locGrassTint, locAlphaCutoff;
+  int locSunDir, locSunColor, locAmbient, locLinearize; // for the impostor bake
+  int locImpostor; // 1 = output the pre-lit baked atlas directly
+  bool impostor; // BRUSH_FOLIAGE_IMPOSTOR: bake a billboard far-tier per variant
 };
 
 // One chunk's scattered instances, one set per layer. The opaque world handle.
@@ -658,7 +673,108 @@ BrushFoliage *BrushFoliageCreate(void) {
   f->locMacroHigh = GetShaderLocation(f->shader, "uMacroHigh");
   f->locGrassTint = GetShaderLocation(f->shader, "uGrassTint");
   f->locAlphaCutoff = GetShaderLocation(f->shader, "uAlphaCutoff");
+  f->locSunDir = GetShaderLocation(f->shader, "uSunDir");
+  f->locSunColor = GetShaderLocation(f->shader, "uSunColor");
+  f->locAmbient = GetShaderLocation(f->shader, "uAmbient");
+  f->locLinearize = GetShaderLocation(f->shader, "uLinearize");
+  f->locImpostor = GetShaderLocation(f->shader, "uImpostor");
+  f->impostor = (getenv("BRUSH_FOLIAGE_IMPOSTOR") != NULL);
   return f;
+}
+
+// Bake one grass clump (its NEAR mesh + albedo) into an impostor atlas: an
+// orthographic front-view render capturing the lit-neutral albedo + cutout
+// alpha, framed to match BrushFoliageBuildBillboardMesh's cross-quad so the
+// quad's [0,1] UVs map the clump 1:1. Grass is only ever seen from a narrow,
+// near-horizontal pitch, so a single view (reused on both cross planes) reads
+// convincingly at distance — no octahedral angle atlas needed. One-time cost.
+// Stores the render target (owns the texture) + a ready billboard mesh/material.
+static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L, int m,
+                                     Texture2D albedo) {
+  Mesh mesh = L->nearMesh[m];
+  if (!mesh.vertices || mesh.vertexCount <= 0) return;
+
+  float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f, maxY = 0.0f;
+  for (int v = 0; v < mesh.vertexCount; v++) {
+    float x = mesh.vertices[v * 3], y = mesh.vertices[v * 3 + 1], z = mesh.vertices[v * 3 + 2];
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    if (y > maxY) maxY = y;
+  }
+  // Match BuildBillboardMesh's framing (85% of the wider horizontal spread).
+  float bw = fmaxf(maxX - minX, maxZ - minZ) * 0.5f * 0.85f;
+  float bh = maxY * 0.85f;
+  if (bw <= 0.001f) bw = 0.5f;
+  if (bh <= 0.001f) bh = 1.0f;
+
+  int rtH = 256;
+  int rtW = (int)lroundf(256.0f * (2.0f * bw) / bh);
+  if (rtW < 32) rtW = 32; if (rtW > 1024) rtW = 1024;
+  RenderTexture2D rt = LoadRenderTexture(rtW, rtH);
+  if (rt.id == 0) return;
+
+  float D = bw + bh + 1.0f; // ortho eye distance (rotation-free front view)
+  BeginTextureMode(rt);
+  ClearBackground((Color){0, 0, 0, 0}); // transparent atlas
+  rlDrawRenderBatchActive();
+  rlMatrixMode(RL_PROJECTION);
+  rlPushMatrix();
+  rlLoadIdentity();
+  rlOrtho(-bw, bw, 0.0, bh, 0.01, 2.0 * D); // exact framing -> no aspect distortion
+  rlMatrixMode(RL_MODELVIEW);
+  rlLoadIdentity();
+  rlTranslatef(0.0f, 0.0f, -D); // look down -Z from +Z, no rotation
+
+  // Fully-lit bake: pull the live scene sun/ambient, then render the clump with
+  // the layer's tint + a representative (mid) macro colour into LINEAR HDR. The
+  // atlas thus stores the mesh's real per-blade shading, output as-is at draw so
+  // the billboard matches the mesh (a flat re-lit card would read too dark).
+  BrushRenderApplySceneLighting(f->shader); // live uSunDir/uSunColor/uAmbient
+  float zero = 0.0f, one = 1.0f, big = 1.0e9f, cutoff = 0.3f, vp[3] = {0, 0, D};
+  Vector3 macroMid = {(L->cfg.macroLow.x + L->cfg.macroHigh.x) * 0.5f,
+                      (L->cfg.macroLow.y + L->cfg.macroHigh.y) * 0.5f,
+                      (L->cfg.macroLow.z + L->cfg.macroHigh.z) * 0.5f};
+  SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locLinearize, &one, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locTime, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locWindStr, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeStart, &big, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeEnd, &big, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeNearEnd, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locMacroLow, &macroMid, SHADER_UNIFORM_VEC3);
+  SetShaderValue(f->shader, f->locMacroHigh, &macroMid, SHADER_UNIFORM_VEC3);
+  SetShaderValue(f->shader, f->locGrassTint, &L->cfg.tint, SHADER_UNIFORM_VEC3);
+  SetShaderValue(f->shader, f->locAlphaCutoff, &cutoff, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->shader.locs[SHADER_LOC_VECTOR_VIEW], vp, SHADER_UNIFORM_VEC3);
+  SetShaderValue(f->shader, GetShaderLocation(f->shader, "uShadowEnabled"), &zero, SHADER_UNIFORM_FLOAT);
+
+  Material bakeMat = LoadMaterialDefault();
+  bakeMat.shader = f->shader;
+  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
+  bakeMat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+  Matrix idn = MatrixIdentity();
+  rlDisableBackfaceCulling();
+  DrawMeshInstanced(mesh, bakeMat, &idn, 1);
+  rlDrawRenderBatchActive();
+
+  rlMatrixMode(RL_PROJECTION);
+  rlPopMatrix();
+  rlMatrixMode(RL_MODELVIEW);
+  rlLoadIdentity();
+  EndTextureMode();
+
+  bakeMat.shader = (Shader){0}; // shared, not owned
+  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+  UnloadMaterial(bakeMat);
+
+  SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
+  L->impostorRT[m] = rt;
+  L->billboardMesh[m] = BrushFoliageBuildBillboardMesh(mesh);
+  L->billboardMat[m] = LoadMaterialDefault();
+  L->billboardMat[m].shader = f->shader;
+  L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].texture = rt.texture;
+  L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+  L->hasImpostor[m] = true;
 }
 
 int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
@@ -728,11 +844,20 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     }
     L->material[m] = LoadMaterialDefault();
     L->material[m].shader = f->shader;
-    L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture =
+    Texture2D albedo =
         (cfg->meshCount > 0 && cfg->albedos[m].id != 0) ? cfg->albedos[m]
                                                         : f->defaultGradient;
+    L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
     L->material[m].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    // Bake the billboard impostor once (opt-in) — the shader state it sets is
+    // re-pushed every frame in the draw, so scribbling on it here is fine.
+    if (f->impostor) BrushFoliageBakeImpostor(f, L, m, albedo);
   }
+  // Billboard band covers the outer half of the far range (mesh near, impostor
+  // far); 0 disables it. Kept short of drawDistance's fade so the swap hides.
+  L->billboardDistance = (f->impostor)
+      ? L->cfg.lodDistance + (L->cfg.drawDistance - L->cfg.lodDistance) * 0.5f
+      : 0.0f;
 
   // Per-model visible buffers, each sized to the layer's worst-case (one variant
   // could dominate). The cull bounds-checks, so undersizing only drops instances.
@@ -742,9 +867,12 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   if (cap > 900000) cap = 900000;
   L->nearB.cap = L->farB.cap = (int)cap;
   L->nearB.modelCount = L->farB.modelCount = mc;
+  L->bbB.cap = f->impostor ? (int)cap : 0; // no billboard buffers when off
+  L->bbB.modelCount = mc;
   for (int m = 0; m < mc; m++) {
     L->nearB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
     L->farB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
+    if (f->impostor) L->bbB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
   }
   return f->layerCount++;
 }
@@ -759,8 +887,16 @@ void BrushFoliageClearLayers(BrushFoliage *f) {
       L->material[m].shader = (Shader){0};
       L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
       UnloadMaterial(L->material[m]);
+      if (L->hasImpostor[m]) {
+        UnloadMesh(L->billboardMesh[m]);
+        L->billboardMat[m].shader = (Shader){0};
+        L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+        UnloadMaterial(L->billboardMat[m]);
+        UnloadRenderTexture(L->impostorRT[m]); // owns the atlas texture
+      }
       if (L->nearB.buf[m]) MemFree(L->nearB.buf[m]);
       if (L->farB.buf[m]) MemFree(L->farB.buf[m]);
+      if (L->bbB.buf[m]) MemFree(L->bbB.buf[m]);
     }
     *L = (BrushFoliageLayer){0};
   }
@@ -916,19 +1052,25 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     float draw = L->cfg.drawDistance * ds;
     float lod = L->cfg.lodDistance * ds;
 
+    float bbDist = (L->billboardDistance > 0.0f) ? L->billboardDistance * ds : 0.0f;
+
     // Reset the per-model batch counts, then gather every chunk into them.
-    for (int m = 0; m < L->meshCount; m++) { L->nearB.count[m] = 0; L->farB.count[m] = 0; }
+    for (int m = 0; m < L->meshCount; m++) {
+      L->nearB.count[m] = 0; L->farB.count[m] = 0; L->bbB.count[m] = 0;
+    }
     for (int ci = 0; ci < nv; ci++) {
       FoliageChunkHandle *H = (FoliageChunkHandle *)views[ci].handle;
       if (li >= H->setCount) continue;
       BrushFoliageCull(&H->sets[li], cam.position, cam.target, draw, lod,
-                       &L->nearB, &L->farB);
+                       bbDist, &L->nearB, &L->farB, &L->bbB);
     }
-    int nc = 0, fc = 0;
-    for (int m = 0; m < L->meshCount; m++) { nc += L->nearB.count[m]; fc += L->farB.count[m]; }
+    int nc = 0, fc = 0, bc = 0;
+    for (int m = 0; m < L->meshCount; m++) {
+      nc += L->nearB.count[m]; fc += L->farB.count[m]; bc += L->bbB.count[m];
+    }
     L->lastNear = nc;
-    L->lastFar = fc;
-    if (nc == 0 && fc == 0) continue;
+    L->lastFar = fc + bc;
+    if (nc == 0 && fc == 0 && bc == 0) continue;
 
     float wind = f->windStrength * L->cfg.windStrength;
     SetShaderValue(f->shader, f->locTime, &f->time, SHADER_UNIFORM_FLOAT);
@@ -950,13 +1092,29 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
                      &off, SHADER_UNIFORM_FLOAT);
     }
 
-    // One (near) + one (far) instanced draw PER model variant.
+    // Lit mesh bands first (near + far LOD), one instanced draw per variant.
+    if (f->impostor) {
+      float zero = 0.0f;
+      SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
+    }
     for (int m = 0; m < L->meshCount; m++) {
       if (L->nearB.count[m] > 0)
         DrawMeshInstanced(L->nearMesh[m], L->material[m], L->nearB.buf[m], L->nearB.count[m]);
       if (L->farB.count[m] > 0)
         DrawMeshInstanced(L->hasFar[m] ? L->farMesh[m] : L->nearMesh[m],
                           L->material[m], L->farB.buf[m], L->farB.count[m]);
+    }
+    // Billboard band: pre-lit atlas output as-is (uImpostor), one draw / variant.
+    if (bc > 0) {
+      float one = 1.0f;
+      SetShaderValue(f->shader, f->locImpostor, &one, SHADER_UNIFORM_FLOAT);
+      for (int m = 0; m < L->meshCount; m++) {
+        if (L->bbB.count[m] > 0 && L->hasImpostor[m])
+          DrawMeshInstanced(L->billboardMesh[m], L->billboardMat[m],
+                            L->bbB.buf[m], L->bbB.count[m]);
+      }
+      float zero = 0.0f;
+      SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
     }
   }
   rlEnableBackfaceCulling();
