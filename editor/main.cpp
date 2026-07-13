@@ -302,6 +302,7 @@ static void BuildFoliageLayers() {
                 ? mdl->materials[mdl->meshMaterial[0]].maps[MATERIAL_MAP_DIFFUSE].texture
                 : (Texture2D){0};
             c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
+            c.meshScale[mc] = fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f;
             mc++;
         }
         c.meshCount = mc;
@@ -2625,7 +2626,7 @@ int main(int argc, char **argv) {
                 ImGui::Text("Models (%d/%d)", fl->modelCount, BRUSH_SCENE_FOLIAGE_MODELS);
                 for (int m = 0; m < fl->modelCount; m++) {
                     ImGui::PushID(m);
-                    ImGui::SetNextItemWidth(-32);
+                    ImGui::SetNextItemWidth(-96);
                     ImGui::InputText("##m", fl->models[m], sizeof(fl->models[m]));
                     if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
                     if (ImGui::BeginDragDropTarget()) {
@@ -2636,8 +2637,17 @@ int main(int argc, char **argv) {
                         ImGui::EndDragDropTarget();
                     }
                     ImGui::SameLine();
+                    if (fl->modelScale[m] <= 0.0f) fl->modelScale[m] = 1.0f;
+                    ImGui::SetNextItemWidth(56);
+                    if (ImGui::DragFloat("##s", &fl->modelScale[m], 0.01f, 0.02f, 20.0f, "x%.2f"))
+                        { g_dirty = true; g_foliageResyncPending = true; }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-variant scale (x the layer Scale)");
+                    ImGui::SameLine();
                     if (ImGui::SmallButton("X")) {
-                        for (int k = m; k < fl->modelCount - 1; k++) strcpy(fl->models[k], fl->models[k + 1]);
+                        for (int k = m; k < fl->modelCount - 1; k++) {
+                            strcpy(fl->models[k], fl->models[k + 1]);
+                            fl->modelScale[k] = fl->modelScale[k + 1];
+                        }
                         fl->models[--fl->modelCount][0] = '\0';
                         g_dirty = true; g_foliageResyncPending = true;
                         ImGui::PopID(); break;
@@ -2649,6 +2659,7 @@ int main(int argc, char **argv) {
                     if (ImGui::BeginDragDropTarget()) {
                         if (const ImGuiPayload *pl = ImGui::AcceptDragDropPayload("BRUSH_MODEL")) {
                             strncpy(fl->models[fl->modelCount], (const char *)pl->Data, sizeof(fl->models[0]) - 1);
+                            fl->modelScale[fl->modelCount] = 1.0f;
                             fl->modelCount++;
                             g_dirty = true; g_foliageResyncPending = true;
                         }

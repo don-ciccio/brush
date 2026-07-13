@@ -394,6 +394,7 @@ static void SandboxInit(void *user) {
     snprintf(fl->models[1], sizeof(fl->models[1]), "assets/models/rock_3.glb");
     fl->modelCount = 2;
     fl->density = 0.06f; fl->scale = 0.08f; fl->scaleJitter = 0.3f; fl->farKeepRatio = 0.5f;
+    fl->modelScale[0] = 1.0f; fl->modelScale[1] = 0.4f; // variant 1 much smaller
     BrushSceneResolveMaterials(&s->scene); // resolve the new model paths
   }
   for (int i = 0; i < s->scene.foliageCount; i++) {
@@ -424,6 +425,7 @@ static void SandboxInit(void *user) {
           ? mdl->materials[mdl->meshMaterial[0]].maps[MATERIAL_MAP_DIFFUSE].texture
           : (Texture2D){0};
       c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
+      c.meshScale[mc] = fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f;
       mc++;
     }
     c.meshCount = mc;

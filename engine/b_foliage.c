@@ -812,17 +812,20 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
       if (acosf(ny) * 57.29578f > s->cfg->maxSlopeDeg) continue; // too steep
     }
 
+    // Random model variant (deterministic per instance), then scale by that
+    // variant's own factor so mixed meshes (rock + grass) size independently.
+    unsigned char mi = (s->meshCount > 1)
+                           ? (unsigned char)((h >> 9) % (unsigned)s->meshCount) : 0;
+    float vscale = (s->cfg->meshScale[mi] > 0.0f) ? s->cfg->meshScale[mi] : 1.0f;
     float yaw = r1 * 6.2831853f;
-    float sc = s->cfg->scale * (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
+    float sc = s->cfg->scale * vscale *
+               (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
     int i = *index;
     set->positions[i] = (Vector3){jx, y, jz};
     set->transforms[i] = MatrixMultiply(
         MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)),
         MatrixTranslate(jx, y + s->cfg->heightOffset, jz));
-    // Random model variant (deterministic per instance from the hash).
-    set->modelIdx[i] = (s->meshCount > 1)
-                           ? (unsigned char)((h >> 9) % (unsigned)s->meshCount)
-                           : 0;
+    set->modelIdx[i] = mi;
     (*index)++;
   }
 }

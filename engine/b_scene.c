@@ -203,19 +203,20 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         float tr = 1, tg = 1, tb = 1, mlr = 0, mlg = 0, mlb = 0, mhr = 0,
               mhg = 0, mhb = 0;
         int grow = -1, avoid = -1;
-        float avoidThr = 0.5f;
+        float avoidThr = 0.5f, ms0 = 1.0f;
         int fn = sscanf(p,
                         "foliage %63s %127s %127s %f %f %f %f %f %f %f %f %f "
-                        "%f %f %f %f %f %f %f %f %f %d %d %f",
+                        "%f %f %f %f %f %f %f %f %f %d %d %f %f",
                         fw1, fw2, fw3, &dens, &drawD, &lodD, &sc, &jit, &ho,
                         &slope, &wind, &farK, &tr, &tg, &tb, &mlr, &mlg, &mlb,
-                        &mhr, &mhg, &mhb, &grow, &avoid, &avoidThr);
+                        &mhr, &mhg, &mhb, &grow, &avoid, &avoidThr, &ms0);
         if (fn >= 6) { // name + 2 paths + density + drawD + lodD
           BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount++];
           memset(fl, 0, sizeof(*fl));
           CopyField(fl->name, sizeof(fl->name), fw1);
           CopyField(fl->models[0], sizeof(fl->models[0]), fw2);
           fl->modelCount = fl->models[0][0] ? 1 : 0; // extra via foliage_model
+          fl->modelScale[0] = (fn >= 25 && ms0 > 0.0f) ? ms0 : 1.0f;
           CopyField(fl->albedo, sizeof(fl->albedo), fw3);
           fl->density = dens;
           fl->drawDistance = drawD;
@@ -242,9 +243,12 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
       if (temp.foliageCount > 0) {
         BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount - 1];
         char mp[128] = {0};
-        if (sscanf(p, "foliage_model %127s", mp) == 1 &&
-            fl->modelCount < BRUSH_SCENE_FOLIAGE_MODELS)
+        float ms = 1.0f;
+        if (sscanf(p, "foliage_model %127s %f", mp, &ms) >= 1 &&
+            fl->modelCount < BRUSH_SCENE_FOLIAGE_MODELS) {
+          fl->modelScale[fl->modelCount] = (ms > 0.0f) ? ms : 1.0f;
           CopyField(fl->models[fl->modelCount++], sizeof(fl->models[0]), mp);
+        }
       }
     } else {
       // Forward compatibility: unknown entity types are skipped, not fatal.
@@ -345,16 +349,19 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   for (int i = 0; i < s->foliageCount; i++) {
     const BrushSceneFoliageLayer *fl = &s->foliage[i];
     fprintf(f,
-            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g\n",
+            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g %g\n",
             fl->name[0] ? fl->name : "-", fl->models[0][0] ? fl->models[0] : "-",
             fl->albedo[0] ? fl->albedo : "-", fl->density, fl->drawDistance,
             fl->lodDistance, fl->scale, fl->scaleJitter, fl->heightOffset,
             fl->maxSlopeDeg, fl->windStrength, fl->farKeepRatio, fl->tint.x,
             fl->tint.y, fl->tint.z, fl->macroLow.x, fl->macroLow.y,
             fl->macroLow.z, fl->macroHigh.x, fl->macroHigh.y, fl->macroHigh.z,
-            fl->growLayer, fl->avoidLayer, fl->avoidThreshold);
-    for (int m = 1; m < fl->modelCount; m++) // extra palette variants
-      if (fl->models[m][0]) fprintf(f, "foliage_model %s\n", fl->models[m]);
+            fl->growLayer, fl->avoidLayer, fl->avoidThreshold,
+            fl->modelScale[0] > 0.0f ? fl->modelScale[0] : 1.0f);
+    for (int m = 1; m < fl->modelCount; m++) // extra palette variants + scale
+      if (fl->models[m][0])
+        fprintf(f, "foliage_model %s %g\n", fl->models[m],
+                fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f);
   }
 
   fclose(f);

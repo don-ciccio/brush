@@ -124,6 +124,7 @@ typedef struct BrushSceneFoliageLayer {
   char name[BRUSH_SCENE_NAME_MAX];
   char models[BRUSH_SCENE_FOLIAGE_MODELS][128]; // .glb palette (mixed per
                                                 // instance); empty -> procedural
+  float modelScale[BRUSH_SCENE_FOLIAGE_MODELS]; // per-variant scale x layer scale (0->1)
   int  modelCount;
   char albedo[128];  // shared fallback card; "" -> model's own / procedural
   float density;       // instances / m^2
