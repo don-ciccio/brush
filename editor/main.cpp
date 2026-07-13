@@ -183,6 +183,7 @@ static BrushSculptOp g_sculptOp = BRUSH_SCULPT_ADD;
 static bool g_paintActive = false; // sculpt-mode Paint tool (terrain layers)
 static int g_paintLayer = 1;       // painted layer (0 is the base coat)
 static bool g_roadActive = false;  // sculpt-mode Road spline tool
+static bool g_foliagePaintActive = false; // sculpt-mode foliage-density paint tool
 static int g_selectedRoadIdx = -1;
 static int g_selectedNodeIdx = -1;
 static bool g_roadResyncPending = false; // a road changed; re-bake when idle
@@ -1249,6 +1250,9 @@ int main(int argc, char **argv) {
         g_paintActive = true;
     } else if (bm != NULL && strcmp(bm, "sculpt") == 0) {
         g_mode = MODE_SCULPT;
+    } else if (bm != NULL && strcmp(bm, "grass") == 0) {
+        g_mode = MODE_SCULPT;
+        g_foliagePaintActive = true;
     }
 
     // CLI/env project selection skips the manager (also how the headless
@@ -1501,7 +1505,8 @@ int main(int argc, char **argv) {
             RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
             BeginTextureMode(*target);
             BeginMode3D(g_camera.cam);
-            Color ringCol = g_paintActive                       ? MAGENTA
+            Color ringCol = g_foliagePaintActive                 ? LIME
+                            : g_paintActive                     ? MAGENTA
                             : (g_sculptOp == BRUSH_SCULPT_ADD)  ? GREEN
                             : (g_sculptOp == BRUSH_SCULPT_SMOOTH) ? SKYBLUE
                                                                   : GOLD;
@@ -2635,6 +2640,19 @@ int main(int argc, char **argv) {
                 if (ImGui::ColorEdit3("Macro High", (float *)&fl->macroHigh)) { g_dirty = true; g_foliageRebuildPending = true; }
 
                 ImGui::Spacing();
+                if (g_selectedFoliage < BRUSH_FOLIAGE_PAINT_MAX) {
+                    if (ImGui::Button("Paint Density")) {
+                        g_mode = MODE_SCULPT;
+                        g_foliagePaintActive = true;
+                        g_paintActive = g_roadActive = false;
+                    }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Sculpt mode -> drag to thicken, shift-drag to "
+                                          "thin/carve. The 'Grass' toolbar tool.");
+                } else {
+                    ImGui::TextDisabled("(only the first 4 layers are paintable)");
+                }
+                ImGui::Spacing();
                 if (ImGui::Button("Duplicate Layer") &&
                     g_scene.foliageCount < BRUSH_SCENE_MAX_FOLIAGE) {
                     g_scene.foliage[g_scene.foliageCount] = *fl;
@@ -3026,7 +3044,17 @@ int main(int argc, char **argv) {
                         }
                         const BrushConstraints *pBc = hasBC ? &bc : NULL;
 
-                        if (g_paintActive) {
+                        if (g_foliagePaintActive) {
+                            // Paint the active foliage layer's density mask;
+                            // shift thins/carves. Only the painted chunks
+                            // re-scatter (localized).
+                            int ch = (g_selectedFoliage >= 0 &&
+                                      g_selectedFoliage < BRUSH_FOLIAGE_PAINT_MAX)
+                                         ? g_selectedFoliage : 0;
+                            float flow = fminf(g_brushStrength * 3.0f * dtStroke, 1.0f);
+                            BrushWorldPaintFoliage(g_world, g_cursorPos,
+                                                   g_brushRadius, flow, ch, lower);
+                        } else if (g_paintActive) {
                             // shift paints the base coat back (erase).
                             int layer = lower ? 0 : g_paintLayer;
                             float flow = fminf(g_brushStrength * 4.0f * dtStroke, 1.0f);
@@ -3175,32 +3203,37 @@ int main(int argc, char **argv) {
                 ImGui::SameLine();
                 ImGui::Checkbox("Snap", &g_surfaceSnap);
             } else {
-                if (ToolButton(" Raise ", !g_paintActive && !g_roadActive && g_sculptOp == BRUSH_SCULPT_ADD)) {
+                bool sculpting = !g_paintActive && !g_roadActive && !g_foliagePaintActive;
+                if (ToolButton(" Raise ", sculpting && g_sculptOp == BRUSH_SCULPT_ADD)) {
                     g_sculptOp = BRUSH_SCULPT_ADD;
-                    g_paintActive = false;
-                    g_roadActive = false;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Smooth ", !g_paintActive && !g_roadActive && g_sculptOp == BRUSH_SCULPT_SMOOTH)) {
+                if (ToolButton(" Smooth ", sculpting && g_sculptOp == BRUSH_SCULPT_SMOOTH)) {
                     g_sculptOp = BRUSH_SCULPT_SMOOTH;
-                    g_paintActive = false;
-                    g_roadActive = false;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Flatten ", !g_paintActive && !g_roadActive && g_sculptOp == BRUSH_SCULPT_FLATTEN)) {
+                if (ToolButton(" Flatten ", sculpting && g_sculptOp == BRUSH_SCULPT_FLATTEN)) {
                     g_sculptOp = BRUSH_SCULPT_FLATTEN;
-                    g_paintActive = false;
-                    g_roadActive = false;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Paint ", g_paintActive && !g_roadActive)) {
+                if (ToolButton(" Paint ", g_paintActive)) {
                     g_paintActive = true;
-                    g_roadActive = false;
+                    g_roadActive = g_foliagePaintActive = false;
                 }
                 ImGui::SameLine();
-                if (ToolButton(" Road ", g_roadActive && !g_paintActive)) {
+                if (ToolButton(" Road ", g_roadActive)) {
                     g_roadActive = true;
-                    g_paintActive = false;
+                    g_paintActive = g_foliagePaintActive = false;
+                }
+                ImGui::SameLine();
+                if (ToolButton(" Grass ", g_foliagePaintActive)) {
+                    g_foliagePaintActive = true;
+                    g_paintActive = g_roadActive = false;
+                    if (g_selectedFoliage < 0 && g_scene.foliageCount > 0)
+                        g_selectedFoliage = 0;
                 }
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(140);
@@ -3243,6 +3276,31 @@ int main(int argc, char **argv) {
                         ImGui::PopID();
                     }
                     if (g_paintLayer >= tlCount) g_paintLayer = tlCount > 0 ? tlCount - 1 : 0;
+                }
+                // Grass tool: pick which foliage layer's density to paint (only
+                // the first 4 layers are paintable). Shift-drag thins/carves.
+                if (g_foliagePaintActive) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("|");
+                    if (g_scene.foliageCount == 0) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
+                                           "add a Foliage layer in Environment");
+                    }
+                    int paintable = g_scene.foliageCount < BRUSH_FOLIAGE_PAINT_MAX
+                                        ? g_scene.foliageCount : BRUSH_FOLIAGE_PAINT_MAX;
+                    for (int i = 0; i < paintable; i++) {
+                        ImGui::SameLine();
+                        ImGui::PushID(1000 + i);
+                        bool sel = (g_selectedFoliage == i);
+                        if (sel)
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.6f, 0.3f, 1));
+                        const char *nm = g_scene.foliage[i].name[0]
+                                             ? g_scene.foliage[i].name : TextFormat("%d", i);
+                        if (ImGui::Button(nm, ImVec2(0, 28))) g_selectedFoliage = i;
+                        if (sel) ImGui::PopStyleColor();
+                        ImGui::PopID();
+                    }
                 }
             }
             ImGui::EndGroup();
