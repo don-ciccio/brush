@@ -118,10 +118,14 @@ typedef struct BrushSceneRoad {
 // data; the model/albedo paths resolve via b_assets like a material, falling
 // back to the engine's procedural tuft/gradient when empty. The game converts
 // this to a BrushFoliageLayerConfig (b_foliage) — b_scene stays foliage-agnostic.
+#define BRUSH_SCENE_FOLIAGE_MODELS 4 // == BRUSH_FOLIAGE_MODELS_PER_LAYER
+
 typedef struct BrushSceneFoliageLayer {
   char name[BRUSH_SCENE_NAME_MAX];
-  char model[128];   // .glb source mesh; "" -> procedural tuft
-  char albedo[128];  // albedo card;      "" -> procedural gradient
+  char models[BRUSH_SCENE_FOLIAGE_MODELS][128]; // .glb palette (mixed per
+                                                // instance); empty -> procedural
+  int  modelCount;
+  char albedo[128];  // shared fallback card; "" -> model's own / procedural
   float density;       // instances / m^2
   float drawDistance;  // hard cull (m)
   float lodDistance;   // near -> far LOD switch (m)
@@ -130,7 +134,7 @@ typedef struct BrushSceneFoliageLayer {
   int   growLayer;     // grow only where terrain layer N dominates (-1 = any)
   int   avoidLayer;    // exclude where terrain layer N > threshold (-1 = none)
   float avoidThreshold; // 0..1 (0 -> default 0.5)
-  Model modelRes;      // resolved (not saved)
+  Model modelRes[BRUSH_SCENE_FOLIAGE_MODELS]; // resolved (not saved)
   Texture2D albedoTex; // resolved (not saved)
 } BrushSceneFoliageLayer;
 

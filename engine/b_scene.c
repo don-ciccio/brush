@@ -214,7 +214,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
           BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount++];
           memset(fl, 0, sizeof(*fl));
           CopyField(fl->name, sizeof(fl->name), fw1);
-          CopyField(fl->model, sizeof(fl->model), fw2);
+          CopyField(fl->models[0], sizeof(fl->models[0]), fw2);
+          fl->modelCount = fl->models[0][0] ? 1 : 0; // extra via foliage_model
           CopyField(fl->albedo, sizeof(fl->albedo), fw3);
           fl->density = dens;
           fl->drawDistance = drawD;
@@ -235,6 +236,15 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
           fl->avoidLayer = (fn >= 23) ? avoid : -1;
           fl->avoidThreshold = (fn >= 24) ? avoidThr : 0.5f;
         }
+      }
+    } else if (strncmp(p, "foliage_model ", 14) == 0) {
+      // Extra model variant appended to the most-recent foliage layer.
+      if (temp.foliageCount > 0) {
+        BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount - 1];
+        char mp[128] = {0};
+        if (sscanf(p, "foliage_model %127s", mp) == 1 &&
+            fl->modelCount < BRUSH_SCENE_FOLIAGE_MODELS)
+          CopyField(fl->models[fl->modelCount++], sizeof(fl->models[0]), mp);
       }
     } else {
       // Forward compatibility: unknown entity types are skipped, not fatal.
@@ -336,13 +346,15 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     const BrushSceneFoliageLayer *fl = &s->foliage[i];
     fprintf(f,
             "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g\n",
-            fl->name[0] ? fl->name : "-", fl->model[0] ? fl->model : "-",
+            fl->name[0] ? fl->name : "-", fl->models[0][0] ? fl->models[0] : "-",
             fl->albedo[0] ? fl->albedo : "-", fl->density, fl->drawDistance,
             fl->lodDistance, fl->scale, fl->scaleJitter, fl->heightOffset,
             fl->maxSlopeDeg, fl->windStrength, fl->farKeepRatio, fl->tint.x,
             fl->tint.y, fl->tint.z, fl->macroLow.x, fl->macroLow.y,
             fl->macroLow.z, fl->macroHigh.x, fl->macroHigh.y, fl->macroHigh.z,
             fl->growLayer, fl->avoidLayer, fl->avoidThreshold);
+    for (int m = 1; m < fl->modelCount; m++) // extra palette variants
+      if (fl->models[m][0]) fprintf(f, "foliage_model %s\n", fl->models[m]);
   }
 
   fclose(f);
@@ -432,11 +444,14 @@ void BrushSceneUnloadMaterials(BrushScene *s) {
   }
   if (s->foliageCount >= 0 && s->foliageCount <= BRUSH_SCENE_MAX_FOLIAGE) {
     for (int i = 0; i < s->foliageCount; i++) {
-      if (s->foliage[i].model[0] && s->foliage[i].modelRes.meshCount > 0)
-        BrushAssetsReleaseModel(s->foliage[i].model);
-      BrushAssetsReleaseTexture(s->foliage[i].albedoTex);
-      s->foliage[i].modelRes = (Model){0};
-      s->foliage[i].albedoTex = (Texture2D){0};
+      BrushSceneFoliageLayer *fl = &s->foliage[i];
+      for (int m = 0; m < fl->modelCount && m < BRUSH_SCENE_FOLIAGE_MODELS; m++) {
+        if (fl->models[m][0] && fl->modelRes[m].meshCount > 0)
+          BrushAssetsReleaseModel(fl->models[m]);
+        fl->modelRes[m] = (Model){0};
+      }
+      BrushAssetsReleaseTexture(fl->albedoTex);
+      fl->albedoTex = (Texture2D){0};
     }
   }
 }
@@ -461,7 +476,9 @@ void BrushSceneResolveMaterials(BrushScene *s) {
   }
   for (int i = 0; i < s->foliageCount; i++) {
     BrushSceneFoliageLayer *fl = &s->foliage[i];
-    fl->modelRes = fl->model[0] ? BrushAssetsModel(fl->model) : (Model){0};
+    for (int m = 0; m < BRUSH_SCENE_FOLIAGE_MODELS; m++)
+      fl->modelRes[m] = (m < fl->modelCount && fl->models[m][0])
+                            ? BrushAssetsModel(fl->models[m]) : (Model){0};
     fl->albedoTex = fl->albedo[0] ? BrushAssetsTexture(fl->albedo) : (Texture2D){0};
   }
 }

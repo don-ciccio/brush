@@ -33,6 +33,10 @@ extern "C" {
 #include <raylib.h>
 #include <stdbool.h>
 
+// Up to this many model variants per foliage layer (a meadow mixes several
+// meshes for variety — each instance randomly picks one).
+#define BRUSH_FOLIAGE_MODELS_PER_LAYER 4
+
 // One bucket of the uniform spatial grid: a [offset, offset+count) slice of the
 // set's flat `gridIndices` array.
 typedef struct BrushFoliageGridCell {
@@ -41,6 +45,15 @@ typedef struct BrushFoliageGridCell {
   int capacity;
 } BrushFoliageGridCell;
 
+// Per-frame visible instances, routed by model variant so each variant draws
+// with its own mesh in one instanced call. The cull appends into buf[modelIdx].
+typedef struct BrushFoliageDrawBatch {
+  Matrix *buf[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  int count[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  int cap;        // per-model buffer capacity
+  int modelCount; // active variants (clamps stray indices)
+} BrushFoliageDrawBatch;
+
 // A set of static foliage instances + a spatial index over them. STATIC after
 // build — the renderer only reads it. Per-frame visible data lives in the
 // caller (see the cull functions), not here.
@@ -48,6 +61,7 @@ typedef struct BrushFoliageSet {
   // All instances (computed once at scatter).
   Matrix *transforms;
   Vector3 *positions; // instance base XZ(Y) — the cull's cheap distance test
+  unsigned char *modelIdx; // which model variant each instance uses (0..N-1)
   int count;
 
   // Uniform spatial grid (built once, after scatter).
@@ -83,15 +97,14 @@ void BrushFoliageScatterGrid(BrushFoliageSet *set, Vector3 center, float width,
 void BrushFoliageBuildGrid(BrushFoliageSet *set, Vector3 center, float width,
                            float depth, float cellSize);
 
-// 2-tier cull: walk only the grid cells within `drawDistance` of viewPos,
-// apply distance + horizontal-FOV tests, and APPEND survivors' transforms to
-// the caller's near (dist < lodDistance) and far buffers, continuing from
-// *nearCount / *farCount. Bounds-checked against maxNear/maxFar. Read-only in
-// `set`. Accumulate across chunks by threading the same buffers + counts.
+// 2-tier cull, routed by model variant: walk only the grid cells within
+// `drawDistance` of viewPos, apply distance + horizontal-FOV tests, and APPEND
+// each survivor's transform into the near (dist < lodDistance) or far batch,
+// indexed by the instance's modelIdx. Read-only in `set`. Accumulate across
+// chunks by reusing the same batches (reset their counts once per frame first).
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                      Matrix *outNear, int maxNear, int *nearCount,
-                      Matrix *outFar, int maxFar, int *farCount);
+                      BrushFoliageDrawBatch *nearB, BrushFoliageDrawBatch *farB);
 
 // 3-tier cull: near (< lodDistance), far (< billboardDistance), billboard
 // (< drawDistance) — each appended to its own caller buffer, so the three
@@ -159,8 +172,11 @@ typedef struct BrushFoliageLayerConfig {
   float farKeepRatio;   // far-LOD decimation (1 = no far LOD, share near mesh)
   Vector3 tint;         // albedo tint ((0,0,0) -> white)
   Vector3 macroLow, macroHigh; // low-frequency macro-color ramp endpoints
-  Mesh mesh;            // uploaded source mesh ({0} -> the procedural tuft)
-  Texture2D albedo;     // albedo/card (id 0 -> the procedural gradient)
+  // Model palette: up to N mesh variants mixed per instance ({0} mesh ->
+  // procedural tuft; id-0 albedo -> the model's own texture, else the gradient).
+  Mesh meshes[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  Texture2D albedos[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  int meshCount;        // 0 -> a single procedural tuft
   // Surface-layer auto-exclusion (reads the terrain splat weights).
   int   growLayer;      // grow only where terrain layer N dominates (-1 = any)
   int   avoidLayer;     // exclude where terrain layer N weight > threshold

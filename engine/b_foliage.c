@@ -35,6 +35,7 @@ void BrushFoliageScatterGrid(BrushFoliageSet *set, Vector3 center, float width,
 
   set->transforms = (Matrix *)MemAlloc(sizeof(Matrix) * maxCount);
   set->positions = (Vector3 *)MemAlloc(sizeof(Vector3) * maxCount);
+  set->modelIdx = (unsigned char *)MemAlloc(sizeof(unsigned char) * maxCount);
 
   float halfW = width / 2.0f;
   float halfD = depth / 2.0f;
@@ -68,6 +69,11 @@ void BrushFoliageScatterGrid(BrushFoliageSet *set, Vector3 center, float width,
     memcpy(trimmedP, set->positions, sizeof(Vector3) * index);
     MemFree(set->positions);
     set->positions = trimmedP;
+
+    unsigned char *trimmedM = (unsigned char *)MemAlloc(sizeof(unsigned char) * index);
+    memcpy(trimmedM, set->modelIdx, sizeof(unsigned char) * index);
+    MemFree(set->modelIdx);
+    set->modelIdx = trimmedM;
   }
 }
 
@@ -188,16 +194,21 @@ static inline bool InstanceVisible(const BrushFoliageSet *set, int i,
   return true;
 }
 
+// Append a transform to the batch buffer for its model variant (bounds-checked).
+static inline void BatchAppend(BrushFoliageDrawBatch *b, unsigned char mi,
+                               Matrix m) {
+  int idx = (mi < b->modelCount) ? mi : 0;
+  if (b->count[idx] < b->cap) b->buf[idx][b->count[idx]++] = m;
+}
+
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                      Matrix *outNear, int maxNear, int *nearCount,
-                      Matrix *outFar, int maxFar, int *farCount) {
+                      BrushFoliageDrawBatch *nearB, BrushFoliageDrawBatch *farB) {
   CullWalk w;
   if (!CullWalkBegin(set, viewPos, viewTarget, drawDistance, &w)) return;
 
   float maxDist2 = drawDistance * drawDistance;
   float lodDist2 = lodDistance * lodDistance;
-  int nc = *nearCount, fc = *farCount;
 
   for (int cz = w.startCz; cz != w.endCz + w.stepZ; cz += w.stepZ) {
     for (int cx = w.startCx; cx != w.endCx + w.stepX; cx += w.stepX) {
@@ -215,17 +226,11 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
         float dist2;
         if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, &dist2))
           continue;
-        if (dist2 < lodDist2) {
-          if (nc < maxNear) outNear[nc++] = set->transforms[i];
-        } else {
-          if (fc < maxFar) outFar[fc++] = set->transforms[i];
-        }
+        unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
+        BatchAppend(dist2 < lodDist2 ? nearB : farB, mi, set->transforms[i]);
       }
     }
   }
-
-  *nearCount = nc;
-  *farCount = fc;
 }
 
 void BrushFoliageCull3(const BrushFoliageSet *set, Vector3 viewPos,
@@ -279,6 +284,7 @@ void BrushFoliageSetCleanup(BrushFoliageSet *set) {
   if (set->gridIndices) { MemFree(set->gridIndices); set->gridIndices = NULL; }
   if (set->transforms) { MemFree(set->transforms); set->transforms = NULL; }
   if (set->positions) { MemFree(set->positions); set->positions = NULL; }
+  if (set->modelIdx) { MemFree(set->modelIdx); set->modelIdx = NULL; }
   set->count = 0;
 }
 
@@ -590,12 +596,12 @@ Shader BrushFoliageLoadShader(void) {
 
 typedef struct BrushFoliageLayer {
   BrushFoliageLayerConfig cfg;
-  Mesh nearMesh;   // shared (system tuft) or caller-owned; NOT freed by us
-  Mesh farMesh;    // decimated LOD, owned
-  bool hasFar;
-  Material material;
-  Matrix *bufNear, *bufFar; // shared per-frame draw buffers (main thread)
-  int bufCap;
+  int meshCount;   // model variants (>=1; a meadow mixes several meshes)
+  Mesh nearMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // shared/caller-owned; NOT freed
+  Mesh farMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];  // decimated LOD, owned
+  bool hasFar[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  Material material[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  BrushFoliageDrawBatch nearB, farB; // per-model visible buffers (main thread)
   int lastNear, lastFar; // visible counts from the last draw (editor stats)
 } BrushFoliageLayer;
 
@@ -669,40 +675,58 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   if (L->cfg.tint.x == 0 && L->cfg.tint.y == 0 && L->cfg.tint.z == 0)
     L->cfg.tint = (Vector3){1, 1, 1};
 
-  L->nearMesh = (cfg->mesh.vertexCount > 0) ? cfg->mesh : f->defaultTuft;
-  if (L->cfg.farKeepRatio < 0.999f) {
-    L->farMesh = BrushFoliageBuildLODMesh(L->nearMesh, L->cfg.farKeepRatio);
-    L->hasFar = true;
+  // Model palette: build near + far LOD mesh and a material per variant. An
+  // empty palette (or a variant with no mesh) falls back to the procedural tuft;
+  // a variant with no albedo falls back to the gradient.
+  int mc = cfg->meshCount;
+  if (mc <= 0) mc = 1;
+  if (mc > BRUSH_FOLIAGE_MODELS_PER_LAYER) mc = BRUSH_FOLIAGE_MODELS_PER_LAYER;
+  L->meshCount = mc;
+  for (int m = 0; m < mc; m++) {
+    Mesh src = (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0)
+                   ? cfg->meshes[m] : f->defaultTuft;
+    L->nearMesh[m] = src;
+    if (L->cfg.farKeepRatio < 0.999f) {
+      L->farMesh[m] = BrushFoliageBuildLODMesh(src, L->cfg.farKeepRatio);
+      L->hasFar[m] = true;
+    } else {
+      L->hasFar[m] = false;
+    }
+    L->material[m] = LoadMaterialDefault();
+    L->material[m].shader = f->shader;
+    L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture =
+        (cfg->meshCount > 0 && cfg->albedos[m].id != 0) ? cfg->albedos[m]
+                                                        : f->defaultGradient;
+    L->material[m].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
   }
-  L->material = LoadMaterialDefault();
-  L->material.shader = f->shader;
-  L->material.maps[MATERIAL_MAP_DIFFUSE].texture =
-      (cfg->albedo.id != 0) ? cfg->albedo : f->defaultGradient;
-  L->material.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
 
-  // Worst-case visible instances ~ density over the draw-distance bounding box,
-  // with margin. The cull bounds-checks anyway, so undersizing only drops
-  // instances (never overflows).
+  // Per-model visible buffers, each sized to the layer's worst-case (one variant
+  // could dominate). The cull bounds-checks, so undersizing only drops instances.
   float dd = L->cfg.drawDistance;
   long cap = (long)(L->cfg.density * (2.0f * dd) * (2.0f * dd) * 1.2f *
                     BRUSH_FOLIAGE_MAX_BOOST) + 256; // painting can thicken
   if (cap > 900000) cap = 900000;
-  L->bufCap = (int)cap;
-  L->bufNear = MemAlloc(sizeof(Matrix) * L->bufCap);
-  L->bufFar = MemAlloc(sizeof(Matrix) * L->bufCap);
+  L->nearB.cap = L->farB.cap = (int)cap;
+  L->nearB.modelCount = L->farB.modelCount = mc;
+  for (int m = 0; m < mc; m++) {
+    L->nearB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
+    L->farB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
+  }
   return f->layerCount++;
 }
 
 void BrushFoliageClearLayers(BrushFoliage *f) {
   for (int i = 0; i < f->layerCount; i++) {
     BrushFoliageLayer *L = &f->layers[i];
-    if (L->hasFar) UnloadMesh(L->farMesh);
-    // Shader + albedo are system/caller-owned; detach so UnloadMaterial leaves them.
-    L->material.shader = (Shader){0};
-    L->material.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
-    UnloadMaterial(L->material);
-    if (L->bufNear) MemFree(L->bufNear);
-    if (L->bufFar) MemFree(L->bufFar);
+    for (int m = 0; m < L->meshCount; m++) {
+      if (L->hasFar[m]) UnloadMesh(L->farMesh[m]);
+      // Shader + albedo are system/caller-owned; detach before UnloadMaterial.
+      L->material[m].shader = (Shader){0};
+      L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+      UnloadMaterial(L->material[m]);
+      if (L->nearB.buf[m]) MemFree(L->nearB.buf[m]);
+      if (L->farB.buf[m]) MemFree(L->farB.buf[m]);
+    }
     *L = (BrushFoliageLayer){0};
   }
   f->layerCount = 0;
@@ -728,6 +752,7 @@ typedef struct {
   const BrushFoliageLayerConfig *cfg;
   unsigned int seed;  // per-LAYER (constant across chunks) -> seamless placement
   int paintLayer;     // foliage density-mask channel (0..3, or -1 = no mask)
+  int meshCount;      // model variants -> per-instance modelIdx (>=1)
 } ScatterCtx;
 
 // True if this position passes the layer's surface-layer rules (grow/avoid).
@@ -794,6 +819,10 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     set->transforms[i] = MatrixMultiply(
         MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)),
         MatrixTranslate(jx, y + s->cfg->heightOffset, jz));
+    // Random model variant (deterministic per instance from the hash).
+    set->modelIdx[i] = (s->meshCount > 1)
+                           ? (unsigned char)((h >> 9) % (unsigned)s->meshCount)
+                           : 0;
     (*index)++;
   }
 }
@@ -814,7 +843,7 @@ void *BrushFoliageChunkBake(void *user, BrushChunkCoord coord, Vector3 origin,
     if (cap > 300000) cap = 300000;
     ScatterCtx pc = {samplers, &L->cfg,
                      0x9e3779b9u + (unsigned)li * 2246822519u,
-                     (li < BRUSH_FOLIAGE_PAINT_MAX) ? li : -1};
+                     (li < BRUSH_FOLIAGE_PAINT_MAX) ? li : -1, L->meshCount};
     BrushFoliageScatterGrid(&H->sets[li], center, size, size, L->cfg.density,
                             BRUSH_FOLIAGE_MAX_BOOST, (int)cap, FoliagePlace, &pc);
     BrushFoliageBuildGrid(&H->sets[li], center, size, size, 4.0f);
@@ -847,13 +876,16 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     float draw = L->cfg.drawDistance * ds;
     float lod = L->cfg.lodDistance * ds;
 
-    int nc = 0, fc = 0;
+    // Reset the per-model batch counts, then gather every chunk into them.
+    for (int m = 0; m < L->meshCount; m++) { L->nearB.count[m] = 0; L->farB.count[m] = 0; }
     for (int ci = 0; ci < nv; ci++) {
       FoliageChunkHandle *H = (FoliageChunkHandle *)views[ci].handle;
       if (li >= H->setCount) continue;
       BrushFoliageCull(&H->sets[li], cam.position, cam.target, draw, lod,
-                       L->bufNear, L->bufCap, &nc, L->bufFar, L->bufCap, &fc);
+                       &L->nearB, &L->farB);
     }
+    int nc = 0, fc = 0;
+    for (int m = 0; m < L->meshCount; m++) { nc += L->nearB.count[m]; fc += L->farB.count[m]; }
     L->lastNear = nc;
     L->lastFar = fc;
     if (nc == 0 && fc == 0) continue;
@@ -878,10 +910,14 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
                      &off, SHADER_UNIFORM_FLOAT);
     }
 
-    if (nc > 0) DrawMeshInstanced(L->nearMesh, L->material, L->bufNear, nc);
-    if (fc > 0)
-      DrawMeshInstanced(L->hasFar ? L->farMesh : L->nearMesh, L->material,
-                        L->bufFar, fc);
+    // One (near) + one (far) instanced draw PER model variant.
+    for (int m = 0; m < L->meshCount; m++) {
+      if (L->nearB.count[m] > 0)
+        DrawMeshInstanced(L->nearMesh[m], L->material[m], L->nearB.buf[m], L->nearB.count[m]);
+      if (L->farB.count[m] > 0)
+        DrawMeshInstanced(L->hasFar[m] ? L->farMesh[m] : L->nearMesh[m],
+                          L->material[m], L->farB.buf[m], L->farB.count[m]);
+    }
   }
   rlEnableBackfaceCulling();
 }

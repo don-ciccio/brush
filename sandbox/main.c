@@ -386,6 +386,16 @@ static void SandboxInit(void *user) {
   }
   if (getenv("BRUSH_TEST_FOLIAGE_AVOID") != NULL && s->scene.foliageCount > 0)
     s->scene.foliage[0].avoidLayer = 1; // grass avoids the painted 'path' layer
+  // Harness: mix two real .glb models in one layer (proves per-instance mesh
+  // selection + bucketed draw). Rocks are big, so drop density + scale.
+  if (getenv("BRUSH_TEST_FOLIAGE_MODELS") != NULL && s->scene.foliageCount > 0) {
+    BrushSceneFoliageLayer *fl = &s->scene.foliage[0];
+    snprintf(fl->models[0], sizeof(fl->models[0]), "assets/models/rock_0.glb");
+    snprintf(fl->models[1], sizeof(fl->models[1]), "assets/models/rock_3.glb");
+    fl->modelCount = 2;
+    fl->density = 0.06f; fl->scale = 0.08f; fl->scaleJitter = 0.3f; fl->farKeepRatio = 0.5f;
+    BrushSceneResolveMaterials(&s->scene); // resolve the new model paths
+  }
   for (int i = 0; i < s->scene.foliageCount; i++) {
     const BrushSceneFoliageLayer *fl = &s->scene.foliage[i];
     BrushFoliageLayerConfig c = {
@@ -401,11 +411,22 @@ static void SandboxInit(void *user) {
         .tint = fl->tint,
         .macroLow = fl->macroLow,
         .macroHigh = fl->macroHigh,
-        .albedo = fl->albedoTex,
         .growLayer = fl->growLayer,
         .avoidLayer = fl->avoidLayer,
         .avoidThreshold = fl->avoidThreshold};
-    if (fl->modelRes.meshCount > 0) c.mesh = fl->modelRes.meshes[0];
+    // Model palette: mesh + texture per resolved variant ({0} -> procedural).
+    int mc = 0;
+    for (int m = 0; m < fl->modelCount; m++) {
+      const Model *mdl = &fl->modelRes[m];
+      if (mdl->meshCount <= 0) continue;
+      c.meshes[mc] = mdl->meshes[0];
+      Texture2D t = (mdl->materialCount > 0)
+          ? mdl->materials[mdl->meshMaterial[0]].maps[MATERIAL_MAP_DIFFUSE].texture
+          : (Texture2D){0};
+      c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
+      mc++;
+    }
+    c.meshCount = mc;
     BrushFoliageAddLayer(s->foliage, &c);
   }
   BrushFoliageInstallHooks(s->foliage, &wcfg);

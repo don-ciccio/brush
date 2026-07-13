@@ -289,11 +289,22 @@ static void BuildFoliageLayers() {
         c.tint = fl->tint;
         c.macroLow = fl->macroLow;
         c.macroHigh = fl->macroHigh;
-        c.albedo = fl->albedoTex;
         c.growLayer = fl->growLayer;
         c.avoidLayer = fl->avoidLayer;
         c.avoidThreshold = fl->avoidThreshold;
-        if (fl->modelRes.meshCount > 0) c.mesh = fl->modelRes.meshes[0];
+        // Model palette: mesh + texture per resolved variant ({0} -> procedural).
+        int mc = 0;
+        for (int m = 0; m < fl->modelCount; m++) {
+            const Model *mdl = &fl->modelRes[m];
+            if (mdl->meshCount <= 0) continue;
+            c.meshes[mc] = mdl->meshes[0];
+            Texture2D t = (mdl->materialCount > 0)
+                ? mdl->materials[mdl->meshMaterial[0]].maps[MATERIAL_MAP_DIFFUSE].texture
+                : (Texture2D){0};
+            c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
+            mc++;
+        }
+        c.meshCount = mc;
         BrushFoliageAddLayer(g_foliage, &c);
     }
 }
@@ -2608,11 +2619,44 @@ int main(int argc, char **argv) {
                 ImGui::InputText("Name", fl->name, sizeof(fl->name));
                 if (ImGui::IsItemDeactivatedAfterEdit()) g_dirty = true;
 
-                // Model / albedo paths (empty -> procedural tuft/gradient).
-                // Path changes need a re-resolve, so they take the resync path.
-                ImGui::InputText("Model (.glb)", fl->model, sizeof(fl->model));
-                if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty = procedural tuft.");
+                // Model palette: drag .glb files from the Assets panel to mix
+                // several meshes in one meadow (each instance picks one). An
+                // empty list = the procedural grass tuft.
+                ImGui::Text("Models (%d/%d)", fl->modelCount, BRUSH_SCENE_FOLIAGE_MODELS);
+                for (int m = 0; m < fl->modelCount; m++) {
+                    ImGui::PushID(m);
+                    ImGui::SetNextItemWidth(-32);
+                    ImGui::InputText("##m", fl->models[m], sizeof(fl->models[m]));
+                    if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload *pl = ImGui::AcceptDragDropPayload("BRUSH_MODEL")) {
+                            strncpy(fl->models[m], (const char *)pl->Data, sizeof(fl->models[m]) - 1);
+                            g_dirty = true; g_foliageResyncPending = true;
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X")) {
+                        for (int k = m; k < fl->modelCount - 1; k++) strcpy(fl->models[k], fl->models[k + 1]);
+                        fl->models[--fl->modelCount][0] = '\0';
+                        g_dirty = true; g_foliageResyncPending = true;
+                        ImGui::PopID(); break;
+                    }
+                    ImGui::PopID();
+                }
+                if (fl->modelCount < BRUSH_SCENE_FOLIAGE_MODELS) {
+                    ImGui::Button("+  drop a .glb here to add a model", ImVec2(-1, 0));
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload *pl = ImGui::AcceptDragDropPayload("BRUSH_MODEL")) {
+                            strncpy(fl->models[fl->modelCount], (const char *)pl->Data, sizeof(fl->models[0]) - 1);
+                            fl->modelCount++;
+                            g_dirty = true; g_foliageResyncPending = true;
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                }
+                if (fl->modelCount == 0)
+                    ImGui::TextDisabled("(procedural grass — drop .glb models to mix real meshes)");
                 ImGui::InputText("Albedo", fl->albedo, sizeof(fl->albedo));
                 if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty = procedural gradient card.");
@@ -2683,9 +2727,10 @@ int main(int argc, char **argv) {
                 ImGui::Spacing();
                 if (ImGui::Button("Duplicate Layer") &&
                     g_scene.foliageCount < BRUSH_SCENE_MAX_FOLIAGE) {
-                    g_scene.foliage[g_scene.foliageCount] = *fl;
-                    g_scene.foliage[g_scene.foliageCount].modelRes = (Model){0};
-                    g_scene.foliage[g_scene.foliageCount].albedoTex = (Texture2D){0};
+                    BrushSceneFoliageLayer *dup = &g_scene.foliage[g_scene.foliageCount];
+                    *dup = *fl;
+                    for (int m = 0; m < BRUSH_SCENE_FOLIAGE_MODELS; m++) dup->modelRes[m] = (Model){0};
+                    dup->albedoTex = (Texture2D){0};
                     g_selectedFoliage = g_scene.foliageCount++;
                     g_dirty = true; g_foliageResyncPending = true;
                 }
