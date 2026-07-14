@@ -223,6 +223,12 @@ bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
 int BrushSceneTerrainLayers(const BrushScene *s,
                             BrushTerrainLayer out[BRUSH_TERRAIN_LAYERS]);
 
+// Resolve one material-library name to a terrain-layer set (albedo/normal/tile).
+// Used for terrain layers and the independent road surface material. false if
+// the name is empty/unknown or the material has no albedo.
+bool BrushSceneMaterialLayer(const BrushScene *s, const char *name,
+                             BrushTerrainLayer *out);
+
 // Same, for a placed model's optional material (triplanar projection wraps
 // the mesh — good for rocks/organic props). False = draw the model plain
 // (its own embedded textures, if any).

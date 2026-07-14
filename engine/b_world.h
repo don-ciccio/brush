@@ -293,6 +293,12 @@ typedef struct BrushWorldRoad {
 // them from a scene. count 0 clears all roads.
 void BrushWorldSetRoads(BrushWorld *w, const BrushWorldRoad *roads, int count);
 
+// Set the shared road SURFACE material (albedo/normal/tile) — composited over
+// the terrain along the road corridor, independent of the 4 terrain layers so
+// it never bleeds into the layer mix. NULL / id-0 albedo clears it (roads then
+// carve height only). Marks road-overlapping chunks dirty to rebake the mask.
+void BrushWorldSetRoadMaterial(BrushWorld *w, const BrushTerrainLayer *mat);
+
 // Flatten a road spline to a world-space polyline at ~gridStep spacing (phantom
 // endpoints so it reaches both ends). Returns a MemAlloc'd array of `*outN`
 // points (caller MemFree) or NULL if count < 2. SHARED by the bake and the

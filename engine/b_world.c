@@ -72,6 +72,12 @@ typedef struct WorldChunk {
   unsigned char *splatPixels;
   bool splatValid;    // pixels filled this bake (layers configured)
   Texture2D splatTex; // GPU copy (kept across slot reuse, like the mesh)
+  // Road coverage (independent of the terrain splat): hmRes^2 R8, 0..255 = how
+  // much the road surface covers this texel. Composited OVER the terrain blend
+  // with its OWN material, so a road never leaks into the terrain layer mix.
+  unsigned char *roadPixels;
+  bool roadValid;
+  Texture2D roadTex;
   unsigned char *maskPixels; // hmRes^2 * 4 foliage density (composed under lock,
                              // then read lock-free by the scatter samplers)
   bool maskValid;
@@ -158,6 +164,8 @@ struct BrushWorld {
   Vector3 *roadPoly[BRUSH_WORLD_MAX_ROADS];
   int roadPolyN[BRUSH_WORLD_MAX_ROADS];
   float roadAABB[BRUSH_WORLD_MAX_ROADS][4]; // minX, minZ, maxX, maxZ (+ edge)
+  BrushTerrainLayer roadLayer; // the road SURFACE material (own texture/tile)
+  bool hasRoadLayer;           // a road material is set -> composite it
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -642,7 +650,7 @@ static void BuildMesh(const BrushWorld *w, WorldChunk *chunk) {
 // Live-road bake hooks (defined with the road section below). Both take world
 // XZ and are called under sculptMutex from BuildCpu.
 static float RoadHeightAt(const BrushWorld *w, float wx, float wz, float h);
-static void RoadSplatAt(const BrushWorld *w, float wx, float wz, unsigned char *px);
+static unsigned char RoadCoverageAt(const BrushWorld *w, float wx, float wz);
 
 static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
   Vector3 o = ChunkOrigin(w, chunk->coord);
@@ -696,11 +704,24 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
       for (int x = 0; x < sr; x++) {
         unsigned char *px = &chunk->splatPixels[(z * sr + x) * 4];
         SplatWeightsAt(w, bGx + x, bGz + z, px);
-        if (w->roadCount > 0)
-          RoadSplatAt(w, (float)(bGx + x) * w->gridStep,
-                      (float)(bGz + z) * w->gridStep, px);
       }
     chunk->splatValid = true;
+  }
+  // Road coverage mask — baked SEPARATELY from the terrain splat so the road
+  // surface is composited over the terrain with its own material and never
+  // bleeds into the layer mix (or the auto-slope / auto-height rules).
+  chunk->roadValid = false;
+  if (w->roadCount > 0) { // bake coverage whenever roads exist (material-agnostic)
+    int sr = w->cfg.hmRes;
+    if (chunk->roadPixels == NULL)
+      chunk->roadPixels = (unsigned char *)MemAlloc((unsigned int)(sr * sr));
+    long bGx = (long)chunk->coord.x * w->tileRes;
+    long bGz = (long)chunk->coord.z * w->tileRes;
+    for (int z = 0; z < sr; z++)
+      for (int x = 0; x < sr; x++)
+        chunk->roadPixels[z * sr + x] = RoadCoverageAt(
+            w, (float)(bGx + x) * w->gridStep, (float)(bGz + z) * w->gridStep);
+    chunk->roadValid = true;
   }
   // Foliage density mask -> per-chunk pixels (only where painting exists, so an
   // unpainted world pays nothing). Composed under the lock like splat; the
@@ -830,6 +851,8 @@ static WorldChunk *AcquireSlot(BrushWorld *w, BrushChunkCoord c) {
       bool up = k->meshUploaded;
       unsigned char *sp = k->splatPixels;
       Texture2D st = k->splatTex;
+      unsigned char *rp = k->roadPixels;
+      Texture2D rtx = k->roadTex;
       memset(k, 0, sizeof(*k));
       k->coord = c;
       k->heightmap = hm;
@@ -837,6 +860,8 @@ static WorldChunk *AcquireSlot(BrushWorld *w, BrushChunkCoord c) {
       k->meshUploaded = up;
       k->splatPixels = sp;
       k->splatTex = st;
+      k->roadPixels = rp;
+      k->roadTex = rtx;
       k->terrainBody = BRUSH_BODY_INVALID;
       return k;
     }
@@ -893,6 +918,22 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
       SetTextureWrap(chunk->splatTex, TEXTURE_WRAP_CLAMP);
     } else {
       UpdateTexture(chunk->splatTex, chunk->splatPixels);
+    }
+  }
+  // Road coverage mask -> single-channel GPU texture (mirrors the splat upload).
+  if (IsWindowReady() && chunk->roadValid && chunk->roadPixels != NULL) {
+    int sr = w->cfg.hmRes;
+    if (chunk->roadTex.id == 0) {
+      Image img = {.data = chunk->roadPixels,
+                   .width = sr,
+                   .height = sr,
+                   .mipmaps = 1,
+                   .format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE};
+      chunk->roadTex = LoadTextureFromImage(img); // copies the pixels
+      SetTextureFilter(chunk->roadTex, TEXTURE_FILTER_BILINEAR);
+      SetTextureWrap(chunk->roadTex, TEXTURE_WRAP_CLAMP);
+    } else {
+      UpdateTexture(chunk->roadTex, chunk->roadPixels);
     }
   }
 
@@ -973,6 +1014,14 @@ static void DestroyChunkBuffers(WorldChunk *chunk) {
   if (chunk->splatPixels) {
     MemFree(chunk->splatPixels);
     chunk->splatPixels = NULL;
+  }
+  if (chunk->roadTex.id != 0) {
+    UnloadTexture(chunk->roadTex);
+    chunk->roadTex = (Texture2D){0};
+  }
+  if (chunk->roadPixels) {
+    MemFree(chunk->roadPixels);
+    chunk->roadPixels = NULL;
   }
   if (chunk->maskPixels) {
     MemFree(chunk->maskPixels);
@@ -1236,6 +1285,11 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
         sd.layerHeightOn[li] = w->layerHeightOn[li];
         sd.layerHeightStart[li] = w->layerHeightStart[li];
         sd.layerHeightFull[li] = w->layerHeightFull[li];
+      }
+      if (w->hasRoadLayer && chunk->roadTex.id != 0) {
+        sd.roadMask = chunk->roadTex;
+        sd.roadLayer = w->roadLayer;
+        sd.hasRoad = true;
       }
       BrushRenderSubmitMeshSplat(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material,
                                  xf, &sd);
@@ -1852,22 +1906,18 @@ static float RoadHeightAt(const BrushWorld *w, float wx, float wz, float h) {
 // Bake hook: drive the road layer weight dominant across every overlapping
 // road, using the TEXTURE margin `paintFade` (0 = hard paved edge). Sum-255
 // preserving so it doesn't fight the renormalise.
-static void RoadSplatAt(const BrushWorld *w, float wx, float wz,
-                        unsigned char *px) {
+// Road surface coverage at a world point: the strongest road mask over all
+// roads (0..255). Roads with layerSlot < 0 still contribute — the slot field is
+// now only a legacy carve hint; texturing is the dedicated road material.
+static unsigned char RoadCoverageAt(const BrushWorld *w, float wx, float wz) {
+  float cov = 0.0f;
   for (int i = 0; i < w->roadCount; i++) {
-    int slot = w->roads[i].layerSlot;
-    if (slot < 0 || slot >= BRUSH_TERRAIN_LAYERS) continue;
     float roadY, D = RoadDistance(w, i, wx, wz, &roadY);
     if (D < 0.0f) continue;
     float m = RoadMask(D, w->roads[i].width * 0.5f, w->roads[i].paintFade);
-    if (m <= 0.0f) continue;
-    float tgt[4] = {0, 0, 0, 0};
-    tgt[slot] = 255.0f;
-    for (int k = 0; k < 4; k++) {
-      float v = (float)px[k] + (tgt[k] - (float)px[k]) * m;
-      px[k] = (unsigned char)(v < 0.0f ? 0 : (v > 255.0f ? 255 : v + 0.5f));
-    }
+    if (m > cov) cov = m;
   }
+  return (unsigned char)(cov <= 0.0f ? 0 : (cov >= 1.0f ? 255 : cov * 255.0f + 0.5f));
 }
 
 // (Re)build road i's cached polyline + world AABB (edge-expanded). Caller holds
@@ -1930,6 +1980,25 @@ void BrushWorldSetRoads(BrushWorld *w, const BrushWorldRoad *roads, int count) {
   pthread_mutex_unlock(&w->sculptMutex);
 
   for (int i = 0; i < dirtyN; i++)
+    SculptMarkDirty(w, dirty[i][0], dirty[i][1], dirty[i][2], dirty[i][3]);
+}
+
+void BrushWorldSetRoadMaterial(BrushWorld *w, const BrushTerrainLayer *mat) {
+  float dirty[BRUSH_WORLD_MAX_ROADS][4];
+  int dirtyN = 0;
+  pthread_mutex_lock(&w->sculptMutex);
+  if (mat != NULL && mat->albedo.id != 0) {
+    w->roadLayer = *mat;
+    w->hasRoadLayer = true;
+  } else {
+    w->roadLayer = (BrushTerrainLayer){0};
+    w->hasRoadLayer = false;
+  }
+  for (int i = 0; i < w->roadCount; i++)
+    if (w->roadPolyN[i] > 0 && dirtyN < BRUSH_WORLD_MAX_ROADS)
+      memcpy(dirty[dirtyN++], w->roadAABB[i], sizeof(float) * 4);
+  pthread_mutex_unlock(&w->sculptMutex);
+  for (int i = 0; i < dirtyN; i++) // rebake road-overlapping chunks with the mask
     SculptMarkDirty(w, dirty[i][0], dirty[i][1], dirty[i][2], dirty[i][3]);
 }
 

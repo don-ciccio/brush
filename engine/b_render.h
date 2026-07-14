@@ -189,6 +189,11 @@ typedef struct BrushSplatDraw {
   int   layerHeightOn[BRUSH_TERRAIN_LAYERS];
   float layerHeightStart[BRUSH_TERRAIN_LAYERS];
   float layerHeightFull[BRUSH_TERRAIN_LAYERS];
+  // Road surface: a coverage mask (R8, 0..1) + its OWN material, composited over
+  // the finished terrain blend so it never enters the 4-layer mix or auto-rules.
+  Texture2D roadMask;
+  BrushTerrainLayer roadLayer;
+  bool hasRoad;
 } BrushSplatDraw;
 
 // BrushRenderSubmitMesh with splat blending for exactly this draw.

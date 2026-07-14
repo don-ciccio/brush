@@ -55,7 +55,6 @@ uniform sampler2D uLayerAlbedo2;
 uniform sampler2D uLayerAlbedo3;
 uniform sampler2D uLayerNormal1;
 uniform sampler2D uLayerNormal2;
-uniform sampler2D uLayerNormal3;
 uniform sampler2D uLayerHeight;  // displacement of the ONE POM terrain layer
 uniform int   uPomLayer;         // splat slot that gets POM (-1 = none)
 uniform float uPomTile;          // that layer's tile
@@ -68,6 +67,12 @@ uniform float uSplatRes;   // splat texture resolution per side
 uniform vec4 uLayerTiles;  // metres per repeat, per layer
 uniform vec4 uLayerSwizzled; // DXT5nm flag per layer
 uniform int uLayerCount;
+// Road surface: an INDEPENDENT material composited over the finished terrain
+// blend by a coverage mask, so it never enters the 4-layer mix or its auto-rules.
+uniform float uRoadEnabled;
+uniform sampler2D uRoadMask;   // R = road coverage 0..1
+uniform sampler2D uRoadAlbedo;
+uniform float uRoadTile;
 // Auto-slope mask: steep terrain auto-blends toward one layer beneath the
 // painted weights (x = layer index or -1 off, y = cos(startDeg),
 // z = cos(endDeg); start < end in degrees so cosStart > cosEnd).
@@ -473,10 +478,23 @@ void main()
         if (uHasNormalMap > 0.5) {
             splatBump = SampleLayerBump(texture2, uLayerTiles.x, WP(0), triW, uLayerSwizzled.x, steep) * sw.r;
             if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, WP(1), triW, uLayerSwizzled.y, steep) * sw.g;
-            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, WP(2), triW, uLayerSwizzled.z, steep) * sw.b;
-            if (uLayerCount > 3) splatBump += SampleLayerBump(uLayerNormal3, uLayerTiles.w, WP(3), triW, uLayerSwizzled.w, steep) * sw.a;
-        }
+            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, WP(2), triW, uLayerSwizzled.z, steep) * sw.b;        }
         #undef WP
+
+        // Road surface: composite its OWN material over the finished terrain
+        // blend by the coverage mask. Independent of the 4 layers above and of
+        // auto-slope/auto-height, so it only appears on the road corridor.
+        if (uRoadEnabled > 0.5) {
+            float rm = clamp(texture(uRoadMask, suv).r, 0.0, 1.0);
+            if (rm > 0.001) {
+                a = mix(a, SampleLayer(uRoadAlbedo, uRoadTile, wp, triW, steep), rm);
+                albedo = a;
+                // Road inherits the terrain surface normal (flattens the layer
+                // bump under the paving); a dedicated road normal map is a future
+                // extension gated by the texture-unit budget.
+                splatBump = mix(splatBump, vec3(0.0), rm);
+            }
+        }
     }
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 

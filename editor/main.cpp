@@ -223,15 +223,6 @@ static char g_scenePath[512] = "assets/gym.def";
 static char g_logLines[MAX_LOG_LINES][256];
 static int g_logLineCount = 0;
 
-// Which terrain-layer slot (0..3) a road's material occupies, or -1 if the
-// material isn't assigned to a slot (road then carves shape only, no paint).
-static int RoadLayerSlot(const char *material) {
-    if (!material || !material[0]) return -1;
-    for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++)
-        if (strcmp(g_scene.terrainLayers[i], material) == 0) return i;
-    return -1;
-}
-
 // Initialise a fresh road with sane defaults. Material defaults to the first
 // configured terrain layer (so it paints out of the box); "" until one is set.
 static void NewRoad(BrushSceneRoad *r) {
@@ -264,9 +255,18 @@ static void SyncRoadsToWorld() {
         o->width = r->width;
         o->fade = r->fade;
         o->paintFade = r->paintFade;
-        o->layerSlot = RoadLayerSlot(r->material); // -1 = shape only
+        o->layerSlot = -1; // texturing is the dedicated road material, not a slot
     }
     BrushWorldSetRoads(g_world, wr, n);
+
+    // Road SURFACE material (independent of the 4 terrain layers). v1: shared
+    // across roads — the first road's `material` name from the library.
+    BrushTerrainLayer roadMat;
+    bool haveRoadMat = false;
+    for (int i = 0; i < g_scene.roadCount && !haveRoadMat; i++)
+        if (g_scene.roads[i].material[0])
+            haveRoadMat = BrushSceneMaterialLayer(&g_scene, g_scene.roads[i].material, &roadMat);
+    BrushWorldSetRoadMaterial(g_world, haveRoadMat ? &roadMat : nullptr);
 }
 
 // (Re)build the foliage system's layers from the scene's foliage entries. The

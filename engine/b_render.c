@@ -49,6 +49,7 @@ typedef struct BrushRenderState {
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
   int locPomLayer, locPomTile, locPomScale;
   int locHeightBlendLayer, locHeightBlendSharp;
+  int locRoadEnabled, locRoadTile;
   float specDefault; // uSpecStrength for draws without material props
   float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
@@ -152,9 +153,16 @@ void BrushRenderInit(int width, int height, float renderScale) {
     u = 5; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo3"), &u, SHADER_UNIFORM_INT);
     u = 6; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal1"), &u, SHADER_UNIFORM_INT);
     u = 7; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal2"), &u, SHADER_UNIFORM_INT);
-    u = 8; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal3"), &u, SHADER_UNIFORM_INT);
+    // (layer-3 normal map dropped to free a sampler unit for the road albedo;
+    //  the 4th terrain layer keeps its albedo but shades with the geo normal.)
     u = 9; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerHeight"), &u, SHADER_UNIFORM_INT);
+    // Road surface (composited over the terrain blend): mask + own albedo/normal
+    // on the high units (13..15) past the shadow cascades (10..12).
+    u = 13; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uRoadMask"), &u, SHADER_UNIFORM_INT);
+    u = 14; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uRoadAlbedo"), &u, SHADER_UNIFORM_INT);
   }
+  g_r.locRoadEnabled = GetShaderLocation(g_r.lit, "uRoadEnabled");
+  g_r.locRoadTile = GetShaderLocation(g_r.lit, "uRoadTile");
   g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
   g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
   g_r.locPointRadius = GetShaderLocation(g_r.lit, "uPointRadius");
@@ -421,6 +429,12 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
     rlActiveTextureSlot(9);
     rlEnableTexture(sp->layers[specialLayer].displacement.id);
   }
+  // Road surface: coverage mask + own albedo/normal on units 13..15.
+  bool road = sp->hasRoad && sp->roadMask.id != 0 && sp->roadLayer.albedo.id != 0;
+  if (road) {
+    rlActiveTextureSlot(13); rlEnableTexture(sp->roadMask.id);
+    rlActiveTextureSlot(14); rlEnableTexture(sp->roadLayer.albedo.id);
+  }
   rlActiveTextureSlot(0);
   int pomLayer = (specialLayer >= 0 && g_r.pomQuality > 0 &&
                   sp->layers[specialLayer].parallax) ? specialLayer : -1;
@@ -474,6 +488,10 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locHeightBlendSharp, &hbSharp, SHADER_UNIFORM_FLOAT);
   float pomSh = (g_r.pomQuality >= 2) ? 1.0f : 0.0f;
   SetShaderValue(g_r.lit, g_r.locParallaxShadow, &pomSh, SHADER_UNIFORM_FLOAT);
+  float roadOn = road ? 1.0f : 0.0f;
+  float roadTile = (sp->roadLayer.tile > 0.01f) ? sp->roadLayer.tile : 4.0f;
+  SetShaderValue(g_r.lit, g_r.locRoadEnabled, &roadOn, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locRoadTile, &roadTile, SHADER_UNIFORM_FLOAT);
   // Matte terrain: override the prop-default specular ApplyMaterialProps set
   // (runs before this) so grass/dirt don't get a plasticky sun sheen.
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.terrainSpec,
@@ -491,6 +509,7 @@ static void DrawCmd(const BrushDrawCmd *cmd) {
       cmd->material->maps[MATERIAL_MAP_NORMAL].texture = savedNormal;
       float off = 0.0f;
       SetShaderValue(g_r.lit, g_r.locSplatEnabled, &off, SHADER_UNIFORM_FLOAT);
+      SetShaderValue(g_r.lit, g_r.locRoadEnabled, &off, SHADER_UNIFORM_FLOAT);
       return;
     }
     DrawMesh(cmd->mesh, *cmd->material, cmd->transform);

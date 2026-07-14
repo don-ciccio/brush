@@ -521,26 +521,34 @@ bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
   return MaterialProps(s, k->material, out);
 }
 
+// Resolve a material-library name to a BrushTerrainLayer (albedo/normal/tile...).
+// Returns false (out zeroed) if the name is empty/unknown or has no albedo.
+bool BrushSceneMaterialLayer(const BrushScene *s, const char *name,
+                             BrushTerrainLayer *out) {
+  *out = (BrushTerrainLayer){0};
+  int mi = BrushSceneFindMaterial(s, name);
+  if (mi < 0) return false;
+  const BrushSceneMaterial *m = &s->materials[mi];
+  if (m->albedoTex.id == 0) return false;
+  out->albedo = m->albedoTex;
+  out->normal = m->normalTex;
+  out->displacement = m->displacementTex;
+  out->tile = (m->tile > 0.01f) ? m->tile : 1.0f;
+  out->heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
+  out->normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
+  out->parallax = m->parallax;
+  out->heightBlend = m->heightBlend;
+  out->blendSharp = (m->blendSharp > 0.0f) ? m->blendSharp : 0.2f;
+  return true;
+}
+
 int BrushSceneTerrainLayers(const BrushScene *s,
                             BrushTerrainLayer out[BRUSH_TERRAIN_LAYERS]) {
   int count = 0;
   for (int i = 0; i < BRUSH_TERRAIN_LAYERS; i++) {
     out[i] = (BrushTerrainLayer){0};
     if (count != i) continue; // contiguous from slot 0
-    int mi = BrushSceneFindMaterial(s, s->terrainLayers[i]);
-    if (mi < 0) continue;
-    const BrushSceneMaterial *m = &s->materials[mi];
-    if (m->albedoTex.id == 0) continue;
-    out[i].albedo = m->albedoTex;
-    out[i].normal = m->normalTex;
-    out[i].displacement = m->displacementTex;
-    out[i].tile = (m->tile > 0.01f) ? m->tile : 1.0f;
-    out[i].heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
-    out[i].normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
-    out[i].parallax = m->parallax;
-    out[i].heightBlend = m->heightBlend;
-    out[i].blendSharp = (m->blendSharp > 0.0f) ? m->blendSharp : 0.2f;
-    count = i + 1;
+    if (BrushSceneMaterialLayer(s, s->terrainLayers[i], &out[i])) count = i + 1;
   }
   return count;
 }

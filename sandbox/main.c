@@ -242,14 +242,18 @@ static void ApplySceneRoads(Sandbox *s) {
     o->width = r->width;
     o->fade = r->fade;
     o->paintFade = r->paintFade;
-    o->layerSlot = -1;
-    for (int L = 0; L < BRUSH_TERRAIN_LAYERS; L++)
-      if (strcmp(s->scene.terrainLayers[L], r->material) == 0) {
-        o->layerSlot = L;
-        break;
-      }
+    o->layerSlot = -1; // texturing is the dedicated road material, not a slot
   }
   BrushWorldSetRoads(s->world, wr, n);
+
+  // Road SURFACE material: independent of the 4 terrain layers. v1 shares one
+  // material across roads (the first road's `material` name from the library).
+  BrushTerrainLayer roadMat;
+  bool haveRoadMat = false;
+  for (int i = 0; i < s->scene.roadCount && !haveRoadMat; i++)
+    if (s->scene.roads[i].material[0])
+      haveRoadMat = BrushSceneMaterialLayer(&s->scene, s->scene.roads[i].material, &roadMat);
+  BrushWorldSetRoadMaterial(s->world, haveRoadMat ? &roadMat : NULL);
 }
 
 // (Re)create the box colliders from the scene data — called after every
