@@ -270,14 +270,14 @@ cut ships the rule-based scatter.
    port. Unit-drive with a synthetic grid (no world yet).
 3. **Foliage shader** — port + rewire to engine sun/shadow/ambient/volfog;
    procedural default tuft + gradient texture so the sandbox has grass with zero
-   assets. **Billboard cross-fade (polish):** add a narrow-band dithered
-   (stochastic `discard`) transition across the mesh→billboard switch to hide the
-   silhouette pop — scoped to that band only (the near→far 3D switch keeps a
-   similar silhouette; the existing distance height-shrink already dissolves the
-   far cull edge). **Caveat:** we run SMAA (spatial), not TAA, so there is no
-   temporal accumulator to resolve dither — keep the band narrow with a
-   per-instance-stable (non-crawling) threshold and tune against shimmer under
-   motion; lean on the height-shrink if dither reads as stipple.
+   assets. **LOD-transition polish — SUPERSEDED by `foliage-lod-plan.md` §5.4:**
+   the dithered (`discard`) cross-fade sketched here is REJECTED — SMAA has no
+   temporal accumulator to resolve it (shimmer) and `discard` breaks Apple-Silicon
+   TBDR hidden-surface-removal/early-Z (raises overdraw). Use **vertex-shrink to
+   the grounded base** instead (no shimmer, no fragment penalty); the near→far and
+   far-cull edges dissolve via the existing per-instance distance shrink, and the
+   mesh→billboard swap stays a hard swap hidden by the bbox-matched impostor
+   silhouette. See `foliage-lod-plan.md` for the full LOD/chunk-leverage design.
 4. **Per-chunk scatter + atomic handoff** — scatter into `pendingFoliage[layer]`
    on the worker, swap in `FinalizeChunk` beside `pendingMesh` (§4), per-layer
    shared visible buffers, cross-chunk unified draw, `distanceScale`, scatter
