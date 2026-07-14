@@ -1118,6 +1118,56 @@ static Model BrushLoadOBJModel(const char *path) {
   return model;
 }
 
+// Find `needle` in `hay` from `start`; -1 if absent.
+static int FindBytes(const unsigned char *hay, int hayLen,
+                     const unsigned char *needle, int nLen, int start) {
+  for (int i = start; i + nLen <= hayLen; i++)
+    if (memcmp(hay + i, needle, (size_t)nLen) == 0) return i;
+  return -1;
+}
+
+// Recover the base-colour texture embedded in a .glb by pulling the first
+// PNG/JPEG out of its binary chunk. raylib drops a glTF texture whose UV set is
+// the 3rd+ ("No more than 2 texture coordinates attributes supported"), leaving
+// the material untextured — this gets the authored look back. Best-effort: the
+// first image is normally the albedo; multi-texture models may need the Albedo
+// picker instead.
+static Texture2D BrushExtractGLBTexture(const char *path) {
+  Texture2D tex = {0};
+  int size = 0;
+  unsigned char *d = LoadFileData(path, &size);
+  if (d == NULL) return tex;
+  const unsigned char pngSig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  int png = FindBytes(d, size, pngSig, 8, 0);
+  if (png >= 0) {
+    const unsigned char iend[4] = {'I', 'E', 'N', 'D'};
+    int e = FindBytes(d, size, iend, 4, png);
+    if (e >= 0) {
+      Image img = LoadImageFromMemory(".png", d + png, (e + 8) - png); // IEND+CRC
+      if (img.data) { tex = LoadTextureFromImage(img); UnloadImage(img); }
+    }
+  }
+  if (tex.id == 0) { // JPEG fallback (FF D8 .. last FF D9)
+    const unsigned char js[3] = {0xFF, 0xD8, 0xFF};
+    int j = FindBytes(d, size, js, 3, 0);
+    if (j >= 0) {
+      const unsigned char je[2] = {0xFF, 0xD9};
+      int last = -1, p = j;
+      while ((p = FindBytes(d, size, je, 2, p + 1)) >= 0) last = p;
+      if (last >= 0) {
+        Image img = LoadImageFromMemory(".jpg", d + j, (last + 2) - j);
+        if (img.data) { tex = LoadTextureFromImage(img); UnloadImage(img); }
+      }
+    }
+  }
+  UnloadFileData(d);
+  if (tex.id != 0) {
+    GenTextureMipmaps(&tex);
+    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+  }
+  return tex;
+}
+
 Model BrushAssetsModel(const char *path) {
   if (path == NULL || path[0] == '\0') return (Model){0};
 
@@ -1151,6 +1201,24 @@ Model BrushAssetsModel(const char *path) {
   extern Shader BrushGetLitShader(void);
   for (int i = 0; i < e->model.materialCount; i++)
     e->model.materials[i].shader = BrushGetLitShader();
+  // glTF whose base-colour texture raylib couldn't attach (3rd+ UV set) comes
+  // back all-white (1x1 default in every diffuse slot). Recover the embedded
+  // texture from the .glb and bind it so the model matches its authored look.
+  if (IsFileExtension(path, ".glb")) {
+    bool hasReal = false;
+    for (int i = 0; i < e->model.materialCount; i++) {
+      Texture2D t = e->model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;
+      if (t.id != 0 && (t.width > 1 || t.height > 1)) { hasReal = true; break; }
+    }
+    if (!hasReal) {
+      Texture2D rec = BrushExtractGLBTexture(path);
+      if (rec.id != 0) {
+        for (int i = 0; i < e->model.materialCount; i++)
+          e->model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture = rec;
+        TraceLog(LOG_INFO, "ASSETS: recovered embedded texture for %s", path);
+      }
+    }
+  }
   // Tangents make normal maps work on the UV path; many exports omit them.
   // Our own generator (unlike raylib 5.5) walks the index buffer, so indexed
   // glTF gets correct tangents instead of geometric-normal fallback.
