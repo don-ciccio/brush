@@ -954,6 +954,23 @@ static bool SurfacePasses(const ScatterCtx *s, float x, float z) {
   return true;
 }
 
+// Rotation that tilts local up (0,1,0) onto the terrain normal, so a clump's
+// grounded base lies FLUSH with a slope instead of floating on the downhill
+// side. `blend` (0..1) eases toward the true normal — 1 = full slope-align
+// (donor behaviour), lower keeps tall grass more upright. Matches the donor's
+// WorldNormal + MatrixAlignUp (racer src/world.c).
+static Matrix FoliageAlignUp(float nx, float ny, float nz, float blend) {
+  // Blend the surface normal toward straight-up, then renormalise.
+  nx *= blend; nz *= blend; ny = 1.0f + (ny - 1.0f) * blend;
+  float len = sqrtf(nx * nx + ny * ny + nz * nz);
+  if (len < 1e-6f) return MatrixIdentity();
+  nx /= len; ny /= len; nz /= len;
+  if (ny > 0.9999f) return MatrixIdentity();
+  if (ny < -0.9999f) return MatrixRotateX(3.14159265f);
+  Vector3 axis = Vector3Normalize((Vector3){nz, 0.0f, -nx}); // cross(up, normal)
+  return MatrixRotate(axis, acosf(ny));
+}
+
 static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCount,
                          int gx, int gz, float bx, float bz, float cw, float cd,
                          float cy) {
@@ -985,13 +1002,15 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     if (!SurfacePasses(s, jx, jz)) continue;
 
     float y = s->s->heightAt(s->s->ctx, jx, jz);
-    if (s->cfg->maxSlopeDeg > 0.0f) {
-      float e = 0.5f;
-      float hx = s->s->heightAt(s->s->ctx, jx + e, jz) - s->s->heightAt(s->s->ctx, jx - e, jz);
-      float hz = s->s->heightAt(s->s->ctx, jx, jz + e) - s->s->heightAt(s->s->ctx, jx, jz - e);
-      float ny = (2.0f * e) / sqrtf(hx * hx + hz * hz + 4.0f * e * e);
-      if (acosf(ny) * 57.29578f > s->cfg->maxSlopeDeg) continue; // too steep
-    }
+    // Central-difference terrain normal (also drives the slope reject). Used to
+    // tilt the clump onto the surface so it doesn't float on steep ground.
+    float e = 0.5f;
+    float hx = s->s->heightAt(s->s->ctx, jx + e, jz) - s->s->heightAt(s->s->ctx, jx - e, jz);
+    float hz = s->s->heightAt(s->s->ctx, jx, jz + e) - s->s->heightAt(s->s->ctx, jx, jz - e);
+    float nlen = sqrtf(hx * hx + hz * hz + 4.0f * e * e);
+    float nx = -hx / nlen, ny = (2.0f * e) / nlen, nz = -hz / nlen;
+    if (s->cfg->maxSlopeDeg > 0.0f &&
+        acosf(ny) * 57.29578f > s->cfg->maxSlopeDeg) continue; // too steep
 
     // Random model variant (deterministic per instance), then scale by that
     // variant's own factor so mixed meshes (rock + grass) size independently.
@@ -1005,8 +1024,13 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     // the geometry), so the scatter point maps straight to the terrain height.
     int i = *index;
     set->positions[i] = (Vector3){jx, y, jz};
+    // scale -> yaw -> tilt-to-slope -> translate. The tilt rotates about the
+    // (grounded) base, so the base point stays on the terrain and the footprint
+    // conforms to the slope. 0.75 blend keeps grass from lying fully flat on
+    // extreme cliffs while still killing the float.
+    Matrix align = FoliageAlignUp(nx, ny, nz, 0.75f);
     set->transforms[i] = MatrixMultiply(
-        MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)),
+        MatrixMultiply(MatrixMultiply(MatrixScale(sc, sc, sc), MatrixRotateY(yaw)), align),
         MatrixTranslate(jx, y + s->cfg->heightOffset, jz));
     set->modelIdx[i] = mi;
     (*index)++;
