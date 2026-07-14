@@ -112,23 +112,31 @@ void main() {
     // 0. Depth of field: circle of confusion from linear distance past the
     //    focus plane; quadratic onset holds sharpness before transitioning.
     //    Sky (depth ~1) bypasses the blur entirely.
+#ifdef ENABLE_DOF
     float depth = texture(uDepth, uv).r;
     float linZ = (uNear * uFar) / (uFar - depth * (uFar - uNear));
     float coc = 0.0;
     if (linZ > uFocusDistance) {
         coc = clamp((linZ - uFocusDistance) / uFocusRange, 0.0, 1.0);
     }
-    coc = coc * coc * uDofStrength * uDofEnabled;
+    coc = coc * coc * uDofStrength;
 
     vec3 sceneCol = (coc < 0.01 || depth >= 0.9999)
                         ? texture(texture0, uv).rgb
                         : BokehBlur(uv, coc, linZ);
+#else
+    vec3 sceneCol = texture(texture0, uv).rgb;
+#endif
 
     // 1. Ambient occlusion on the scene (not on bloom — bloom is light
     //    bleed), god-ray shafts + bloom add (linear HDR), then exposure.
     vec3 hdr = sceneCol;
-    hdr *= mix(1.0, texture(uAO, uv).r, uAOEnabled);
-    hdr += texture(uGodRayTex, uv).rgb * uGodRaysOn;
+#ifdef ENABLE_AO
+    hdr *= texture(uAO, uv).r;
+#endif
+#ifdef ENABLE_GODRAYS
+    hdr += texture(uGodRayTex, uv).rgb;
+#endif
     hdr += texture(uBloom, uv).rgb * uBloomIntensity;
     hdr *= uExposure;
 

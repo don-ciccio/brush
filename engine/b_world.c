@@ -1239,11 +1239,7 @@ int BrushWorldGetActiveChunks(const BrushWorld *w, BrushWorldChunkView *out,
 }
 
 void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
-  // Camera-forward (XZ) for a cheap behind-the-view cull.
-  float fx = camera.target.x - camera.position.x;
-  float fz = camera.target.z - camera.position.z;
-  float fl = sqrtf(fx * fx + fz * fz);
-  if (fl > 1e-4f) { fx /= fl; fz /= fl; } else { fx = 0; fz = 1; }
+  BrushFrustum frustum = BrushRenderMakeFrustum(camera);
   float half = w->cfg.chunkSize * 0.5f;
 
   // Shadow casters only matter within the far cascade's reach (~220 m by
@@ -1265,21 +1261,23 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
     Vector3 o = ChunkOrigin(w, chunk->coord);
     Vector3 ro = WorldToRender(w, o);
     Matrix xf = MatrixTranslate(ro.x, 0.0f, ro.z);
+    // CPU Frustum Culling bounds
+    BoundingBox chunkBox = {
+      .min = { ro.x, -50.0f, ro.z },
+      .max = { ro.x + w->cfg.chunkSize, chunk->maxY + 5.0f, ro.z + w->cfg.chunkSize }
+    };
+
     // Shadow casters aren't view-culled (terrain behind the camera still
     // casts into view when the sun is low behind you), but ARE distance-
     // gated to the shadowed range — no cascade reaches the far LOD rings.
     float scx = o.x + half - camera.position.x;
     float scz = o.z + half - camera.position.z;
-    if (scx * scx + scz * scz <= shadowDist2)
+    if (scx * scx + scz * scz <= shadowDist2) {
+      BrushRenderSetNextBounds(chunkBox);
       BrushRenderSubmitMesh(BRUSH_LAYER_SHADOW, chunk->mesh, &w->material, xf);
-
-    float ccx = o.x + half - camera.position.x;
-    float ccz = o.z + half - camera.position.z;
-    float cd = sqrtf(ccx * ccx + ccz * ccz);
-    if (cd > w->cfg.chunkSize * 1.6f) {
-      float dot = (ccx * fx + ccz * fz) / cd;
-      if (dot < -0.15f) continue; // clearly behind the camera
     }
+
+    if (!BrushFrustumContainsBox(&frustum, chunkBox)) continue;
     if (w->layerCount > 0 && chunk->splatTex.id != 0) {
       BrushSplatDraw sd = {0};
       sd.splat = chunk->splatTex;

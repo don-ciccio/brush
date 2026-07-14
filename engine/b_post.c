@@ -10,6 +10,8 @@
 #include <raymath.h>
 #include <rlgl.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
 static float Frand(void) { return (float)rand() / (float)RAND_MAX; }
 
@@ -72,6 +74,60 @@ static void UnloadHDRTarget(RenderTexture2D *t) {
   }
 }
 
+static void LoadCompositePermutation(BrushPost *pp, int index) {
+  bool dof = (index & 1) != 0;
+  bool godRays = (index & 2) != 0;
+  bool ao = (index & 4) != 0;
+
+  char *baseSrc = LoadFileText(BrushEnginePath("engine/shaders/composite.fs"));
+  if (!baseSrc) return;
+
+  const char *header = "#version 330\n"
+                       "%s%s%s"
+                       "#define COMPILED_PERMUTATION\n";
+  char defines[256];
+  sprintf(defines, header,
+          dof ? "#define ENABLE_DOF\n" : "",
+          godRays ? "#define ENABLE_GODRAYS\n" : "",
+          ao ? "#define ENABLE_AO\n" : "");
+
+  // Remove the #version 330 from the base source if present
+  const char *versionStr = "#version 330\n";
+  char *codeStart = baseSrc;
+  if (strncmp(baseSrc, versionStr, strlen(versionStr)) == 0) {
+    codeStart += strlen(versionStr);
+  }
+
+  char *fullSrc = malloc(strlen(defines) + strlen(codeStart) + 1);
+  strcpy(fullSrc, defines);
+  strcat(fullSrc, codeStart);
+
+  pp->compositePerms[index].shader = LoadShaderFromMemory(NULL, fullSrc);
+  Shader s = pp->compositePerms[index].shader;
+
+  pp->compositePerms[index].locBloomTex = GetShaderLocation(s, "uBloom");
+  pp->compositePerms[index].locBloomIntensity = GetShaderLocation(s, "uBloomIntensity");
+  pp->compositePerms[index].locExposure = GetShaderLocation(s, "uExposure");
+  pp->compositePerms[index].locResolution = GetShaderLocation(s, "uResolution");
+  pp->compositePerms[index].locTime = GetShaderLocation(s, "uTime");
+  pp->compositePerms[index].locDisplayP3 = GetShaderLocation(s, "uDisplayP3");
+  pp->compositePerms[index].locP3Strength = GetShaderLocation(s, "uP3Strength");
+  pp->compositePerms[index].locAOTex = GetShaderLocation(s, "uAO");
+  pp->compositePerms[index].locAOEnabled = GetShaderLocation(s, "uAOEnabled");
+  pp->compositePerms[index].locDofDepth = GetShaderLocation(s, "uDepth");
+  pp->compositePerms[index].locDofNear = GetShaderLocation(s, "uNear");
+  pp->compositePerms[index].locDofFar = GetShaderLocation(s, "uFar");
+  pp->compositePerms[index].locDofFocus = GetShaderLocation(s, "uFocusDistance");
+  pp->compositePerms[index].locDofRange = GetShaderLocation(s, "uFocusRange");
+  pp->compositePerms[index].locDofStrength = GetShaderLocation(s, "uDofStrength");
+  pp->compositePerms[index].locDofEnabled = GetShaderLocation(s, "uDofEnabled");
+  pp->compositePerms[index].locGodRayTex = GetShaderLocation(s, "uGodRayTex");
+  pp->compositePerms[index].locGodRaysOn = GetShaderLocation(s, "uGodRaysOn");
+
+  free(fullSrc);
+  UnloadFileText(baseSrc);
+}
+
 void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   *pp = (BrushPost){0};
   pp->outW = width;
@@ -86,7 +142,7 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   // below that lets the bright sky actually bloom softly.
   pp->bloomThreshold = EnvF("BRUSH_BLOOM_THRESH", 1.5f);
   pp->bloomIntensity = EnvF("BRUSH_BLOOM_INT", 0.32f);
-  pp->blurPasses = 2;
+  pp->blurPasses = 1;
   pp->exposure = EnvF("BRUSH_EXPOSURE", 1.0f);
   pp->sharpenEnabled = (getenv("BRUSH_NO_SHARPEN") == NULL);
   pp->sharpenAmount = EnvF("BRUSH_SHARPEN", 0.10f);
@@ -129,11 +185,8 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
 
   pp->scene = LoadHDRTarget(pp->renderW, pp->renderH, true);
   pp->bloomA = LoadHDRTarget(pp->renderW / 2, pp->renderH / 2, false);
-  pp->bloomB = LoadHDRTarget(pp->renderW / 2, pp->renderH / 2, false);
   pp->bloomC = LoadHDRTarget(pp->renderW / 4, pp->renderH / 4, false);
-  pp->bloomD = LoadHDRTarget(pp->renderW / 4, pp->renderH / 4, false);
   pp->bloomE = LoadHDRTarget(pp->renderW / 8, pp->renderH / 8, false);
-  pp->bloomF = LoadHDRTarget(pp->renderW / 8, pp->renderH / 8, false);
   // LDR composite at logical res; the heavy composite shader runs at 1x and
   // the (retina) backbuffer only pays for the cheap sharpen blit.
   pp->present = LoadRenderTexture(pp->outW, pp->outH);
@@ -164,20 +217,19 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   SetTextureWrap(pp->presentAA.texture, TEXTURE_WRAP_CLAMP);
 
   pp->bright = LoadShader(NULL, BrushEnginePath("engine/shaders/bloom_bright.fs"));
+  pp->kawaseDown = LoadShader(NULL, BrushEnginePath("engine/shaders/kawase_down.fs"));
+  pp->kawaseUp = LoadShader(NULL, BrushEnginePath("engine/shaders/kawase_up.fs"));
   pp->blur = LoadShader(NULL, BrushEnginePath("engine/shaders/blur.fs"));
-  pp->composite = LoadShader(NULL, BrushEnginePath("engine/shaders/composite.fs"));
+  for (int i = 0; i < 8; i++) {
+    LoadCompositePermutation(pp, i);
+  }
   pp->sharpen = LoadShader(NULL, BrushEnginePath("engine/shaders/sharpen.fs"));
 
   pp->locBrightThreshold = GetShaderLocation(pp->bright, "uThreshold");
+  pp->locKawaseDownTexel = GetShaderLocation(pp->kawaseDown, "uTexel");
+  pp->locKawaseUpTexel = GetShaderLocation(pp->kawaseUp, "uTexel");
   pp->locBlurDir = GetShaderLocation(pp->blur, "uDir");
   pp->locBlurTexel = GetShaderLocation(pp->blur, "uTexel");
-  pp->locBloomTex = GetShaderLocation(pp->composite, "uBloom");
-  pp->locBloomIntensity = GetShaderLocation(pp->composite, "uBloomIntensity");
-  pp->locExposure = GetShaderLocation(pp->composite, "uExposure");
-  pp->locResolution = GetShaderLocation(pp->composite, "uResolution");
-  pp->locTime = GetShaderLocation(pp->composite, "uTime");
-  pp->locDisplayP3 = GetShaderLocation(pp->composite, "uDisplayP3");
-  pp->locP3Strength = GetShaderLocation(pp->composite, "uP3Strength");
   pp->locSharpTexel = GetShaderLocation(pp->sharpen, "uTexel");
   pp->locSharpAmount = GetShaderLocation(pp->sharpen, "uSharpen");
 
@@ -194,17 +246,8 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locSsaoBias = GetShaderLocation(pp->ssao, "uBias");
   pp->locSsaoStrength = GetShaderLocation(pp->ssao, "uStrength");
   pp->locSsaoBlurTexel = GetShaderLocation(pp->ssaoBlur, "uTexel");
-  pp->locAOTex = GetShaderLocation(pp->composite, "uAO");
-  pp->locAOEnabled = GetShaderLocation(pp->composite, "uAOEnabled");
 
   // --- DOF (lives in the composite) ---
-  pp->locDofDepth = GetShaderLocation(pp->composite, "uDepth");
-  pp->locDofNear = GetShaderLocation(pp->composite, "uNear");
-  pp->locDofFar = GetShaderLocation(pp->composite, "uFar");
-  pp->locDofFocus = GetShaderLocation(pp->composite, "uFocusDistance");
-  pp->locDofRange = GetShaderLocation(pp->composite, "uFocusRange");
-  pp->locDofStrength = GetShaderLocation(pp->composite, "uDofStrength");
-  pp->locDofEnabled = GetShaderLocation(pp->composite, "uDofEnabled");
 
   // --- God rays ---
   pp->godrays = LoadShader(NULL, BrushEnginePath("engine/shaders/godrays.fs"));
@@ -221,8 +264,6 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->locGRDensity = GetShaderLocation(pp->godrays, "uGodRaysDensity");
   pp->locGRWeight = GetShaderLocation(pp->godrays, "uGodRaysWeight");
   pp->locGRExposure = GetShaderLocation(pp->godrays, "uGodRaysExposure");
-  pp->locGodRayTex = GetShaderLocation(pp->composite, "uGodRayTex");
-  pp->locGodRaysOn = GetShaderLocation(pp->composite, "uGodRaysOn");
 
   // --- Volumetric ground fog ---
   pp->volFog = LoadShader(NULL, BrushEnginePath("engine/shaders/volfog.fs"));
@@ -309,11 +350,8 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
 void BrushPostUnload(BrushPost *pp) {
   UnloadHDRTarget(&pp->scene);
   UnloadHDRTarget(&pp->bloomA);
-  UnloadHDRTarget(&pp->bloomB);
   UnloadHDRTarget(&pp->bloomC);
-  UnloadHDRTarget(&pp->bloomD);
   UnloadHDRTarget(&pp->bloomE);
-  UnloadHDRTarget(&pp->bloomF);
   UnloadRenderTexture(pp->present);
   UnloadRenderTexture(pp->aoRaw);
   UnloadRenderTexture(pp->aoBlur);
@@ -327,8 +365,12 @@ void BrushPostUnload(BrushPost *pp) {
   UnloadTexture(pp->smaaArea);
   UnloadTexture(pp->smaaSearch);
   UnloadShader(pp->bright);
+  UnloadShader(pp->kawaseDown);
+  UnloadShader(pp->kawaseUp);
   UnloadShader(pp->blur);
-  UnloadShader(pp->composite);
+  for (int i = 0; i < 8; i++) {
+    UnloadShader(pp->compositePerms[i].shader);
+  }
   UnloadShader(pp->sharpen);
   UnloadShader(pp->ssao);
   UnloadShader(pp->ssaoBlur);
@@ -383,16 +425,31 @@ static void BlurLevel(BrushPost *pp, RenderTexture2D a, RenderTexture2D b,
   }
 }
 
-// Additively accumulate `src` up into the current target, scaled by `weight`
-// so the wider bloom mips stay below the tight core.
-static void AddUpsample(Texture2D src, int srcW, int srcH, int destW,
-                        int destH, float weight) {
-  unsigned char w = (unsigned char)(weight * 255.0f);
+static void KawaseDownsample(BrushPost *pp, RenderTexture2D src, RenderTexture2D dest,
+                             int srcW, int srcH, int destW, int destH) {
+  float texel[2] = {1.0f / (float)destW, 1.0f / (float)destH};
+  BeginTextureMode(dest);
+  BeginShaderMode(pp->kawaseDown);
+  SetShaderValue(pp->kawaseDown, pp->locKawaseDownTexel, texel, SHADER_UNIFORM_VEC2);
+  BlitTexture(src.texture, srcW, srcH, destW, destH);
+  EndShaderMode();
+  EndTextureMode();
+}
+
+static void KawaseUpsample(BrushPost *pp, RenderTexture2D src, RenderTexture2D dest,
+                           int srcW, int srcH, int destW, int destH, float weight) {
+  float texel[2] = {1.0f / (float)srcW, 1.0f / (float)srcH};
+  BeginTextureMode(dest);
   BeginBlendMode(BLEND_ADDITIVE);
-  DrawTexturePro(src, (Rectangle){0, 0, (float)srcW, (float)srcH},
+  BeginShaderMode(pp->kawaseUp);
+  SetShaderValue(pp->kawaseUp, pp->locKawaseUpTexel, texel, SHADER_UNIFORM_VEC2);
+  unsigned char w = (unsigned char)(weight * 255.0f);
+  DrawTexturePro(src.texture, (Rectangle){0, 0, (float)srcW, (float)srcH},
                  (Rectangle){0, 0, (float)destW, (float)destH}, (Vector2){0, 0},
                  0.0f, (Color){255, 255, 255, w});
+  EndShaderMode();
   EndBlendMode();
+  EndTextureMode();
 }
 
 void BrushPostRunNoPresent(BrushPost *pp, float time) {
@@ -502,28 +559,14 @@ void BrushPostRunNoPresent(BrushPost *pp, float time) {
   EndShaderMode();
   EndTextureMode();
 
-  // 2. Multi-scale bloom: blur each mip, then upsample-accumulate the wider
-  //    levels back into the half-res core (weights < 1 keep the core dominant).
-  BlurLevel(pp, pp->bloomA, pp->bloomB, hw, hh, pp->blurPasses);
+  // 2. Multi-scale Kawase dual-filtering bloom
+  // Downsample pass (A -> C -> E)
+  KawaseDownsample(pp, pp->bloomA, pp->bloomC, hw, hh, qw, qh);
+  KawaseDownsample(pp, pp->bloomC, pp->bloomE, qw, qh, ew, eh);
 
-  BeginTextureMode(pp->bloomC);
-  ClearBackground(BLACK);
-  BlitTexture(pp->bloomA.texture, hw, hh, qw, qh);
-  EndTextureMode();
-  BlurLevel(pp, pp->bloomC, pp->bloomD, qw, qh, pp->blurPasses);
-
-  BeginTextureMode(pp->bloomE);
-  ClearBackground(BLACK);
-  BlitTexture(pp->bloomC.texture, qw, qh, ew, eh);
-  EndTextureMode();
-  BlurLevel(pp, pp->bloomE, pp->bloomF, ew, eh, pp->blurPasses);
-
-  BeginTextureMode(pp->bloomC);
-  AddUpsample(pp->bloomE.texture, ew, eh, qw, qh, 0.8f);
-  EndTextureMode();
-  BeginTextureMode(pp->bloomA);
-  AddUpsample(pp->bloomC.texture, qw, qh, hw, hh, 0.8f);
-  EndTextureMode();
+  // Upsample pass (E -> C -> A)
+  KawaseUpsample(pp, pp->bloomE, pp->bloomC, ew, eh, qw, qh, 0.8f);
+  KawaseUpsample(pp, pp->bloomC, pp->bloomA, qw, qh, hw, hh, 0.8f);
 
   // 2b. God rays: raymarch the sun shadow map at quarter res, then a
   //     separable blur smooths the march dither. Skipped (target stays
@@ -561,48 +604,55 @@ void BrushPostRunNoPresent(BrushPost *pp, float time) {
   // 3. Composite into the logical-res present target. The composite shader
   //    flips Y (render textures are stored bottom-up); the final blit flips
   //    back, so the parity nets out upright.
+  int permIndex = 0;
+  if (pp->dofEnabled) permIndex |= 1;
+  if (raysOn) permIndex |= 2;
+  if (pp->ssaoEnabled) permIndex |= 4;
+  
+  // Create a local alias for cleaner code
+  #define COMP pp->compositePerms[permIndex]
+
   float res[2] = {(float)pp->outW, (float)pp->outH};
-  SetShaderValue(pp->composite, pp->locResolution, res, SHADER_UNIFORM_VEC2);
-  SetShaderValue(pp->composite, pp->locBloomIntensity, &pp->bloomIntensity,
+  SetShaderValue(COMP.shader, COMP.locResolution, res, SHADER_UNIFORM_VEC2);
+  SetShaderValue(COMP.shader, COMP.locBloomIntensity, &pp->bloomIntensity,
                  SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locExposure, &pp->exposure,
+  SetShaderValue(COMP.shader, COMP.locExposure, &pp->exposure,
                  SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locTime, &time, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locDisplayP3, &pp->displayP3,
+  SetShaderValue(COMP.shader, COMP.locTime, &time, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(COMP.shader, COMP.locDisplayP3, &pp->displayP3,
                  SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locP3Strength, &pp->p3Strength,
+  SetShaderValue(COMP.shader, COMP.locP3Strength, &pp->p3Strength,
                  SHADER_UNIFORM_FLOAT);
 
-  float aoOn = pp->ssaoEnabled ? 1.0f : 0.0f;
-  SetShaderValue(pp->composite, pp->locAOEnabled, &aoOn, SHADER_UNIFORM_FLOAT);
-
-  // DOF: auto-focus at the camera target; near/far match raylib's projection
-  // cull planes (rlgl RL_CULL_DISTANCE_NEAR/FAR).
-  float dofOn = pp->dofEnabled ? 1.0f : 0.0f;
-  float nearP = 0.01f, farP = 1000.0f;
-  SetShaderValue(pp->composite, pp->locDofEnabled, &dofOn,
-                 SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locDofNear, &nearP, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locDofFar, &farP, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locDofFocus, &pp->focusDist,
-                 SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locDofRange, &pp->dofRange,
-                 SHADER_UNIFORM_FLOAT);
-  SetShaderValue(pp->composite, pp->locDofStrength, &pp->dofStrength,
-                 SHADER_UNIFORM_FLOAT);
-  float raysOnF = raysOn ? 1.0f : 0.0f;
-  SetShaderValue(pp->composite, pp->locGodRaysOn, &raysOnF,
-                 SHADER_UNIFORM_FLOAT);
+  if (pp->dofEnabled) {
+    float nearP = 0.01f, farP = 1000.0f;
+    SetShaderValue(COMP.shader, COMP.locDofNear, &nearP, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(COMP.shader, COMP.locDofFar, &farP, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(COMP.shader, COMP.locDofFocus, &pp->focusDist,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(COMP.shader, COMP.locDofRange, &pp->dofRange,
+                   SHADER_UNIFORM_FLOAT);
+    SetShaderValue(COMP.shader, COMP.locDofStrength, &pp->dofStrength,
+                   SHADER_UNIFORM_FLOAT);
+  }
 
   BeginTextureMode(pp->present);
-  BeginShaderMode(pp->composite);
-  SetShaderValueTexture(pp->composite, pp->locBloomTex, pp->bloomA.texture);
-  SetShaderValueTexture(pp->composite, pp->locAOTex, pp->aoBlur.texture);
-  SetShaderValueTexture(pp->composite, pp->locDofDepth, pp->scene.depth);
-  SetShaderValueTexture(pp->composite, pp->locGodRayTex, pp->godRayA.texture);
+  BeginShaderMode(COMP.shader);
+  SetShaderValueTexture(COMP.shader, COMP.locBloomTex, pp->bloomA.texture);
+  if (pp->ssaoEnabled) {
+    SetShaderValueTexture(COMP.shader, COMP.locAOTex, pp->aoBlur.texture);
+  }
+  if (pp->dofEnabled) {
+    SetShaderValueTexture(COMP.shader, COMP.locDofDepth, pp->scene.depth);
+  }
+  if (raysOn) {
+    SetShaderValueTexture(COMP.shader, COMP.locGodRayTex, pp->godRayA.texture);
+  }
   BlitTexture(pp->scene.texture, pp->renderW, pp->renderH, pp->outW, pp->outH);
   EndShaderMode();
   EndTextureMode();
+  
+  #undef COMP
 
   // 4. SMAA 1x on the LDR present image: edges -> blend weights ->
   //    neighborhood blend. The FBO path has no MSAA, so this is the engine's

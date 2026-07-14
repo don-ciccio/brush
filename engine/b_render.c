@@ -28,6 +28,8 @@ typedef struct BrushDrawCmd {
   bool hasProps;
   BrushSplatDraw splat; // terrain layer blending (hasSplat gates)
   bool hasSplat;
+  BoundingBox bounds; // for object-level cascade culling
+  bool hasBounds;
 } BrushDrawCmd;
 
 typedef struct BrushRenderState {
@@ -95,6 +97,13 @@ typedef struct BrushRenderState {
 } BrushRenderState;
 
 static BrushRenderState g_r = {0};
+static BoundingBox g_nextBounds = {0};
+static bool g_nextHasBounds = false;
+
+void BrushRenderSetNextBounds(BoundingBox box) {
+  g_nextBounds = box;
+  g_nextHasBounds = true;
+}
 
 void BrushRenderInit(int width, int height, float renderScale) {
   g_r.lit = LoadShader(BrushEnginePath("engine/shaders/lit.vs"), BrushEnginePath("engine/shaders/lit.fs"));
@@ -278,6 +287,9 @@ void BrushRenderSubmitEx(BrushLayer layer, Model *model, Matrix transform,
     cmd->props = *props;
     cmd->hasProps = true;
   }
+  cmd->bounds = g_nextBounds;
+  cmd->hasBounds = g_nextHasBounds;
+  g_nextHasBounds = false;
   (*count)++;
 }
 
@@ -347,6 +359,9 @@ void BrushRenderSubmitMeshSplat(BrushLayer layer, Mesh mesh,
     cmd->splat = *splat;
     cmd->hasSplat = true;
   }
+  cmd->bounds = g_nextBounds;
+  cmd->hasBounds = g_nextHasBounds;
+  g_nextHasBounds = false;
   (*count)++;
 }
 
@@ -619,8 +634,14 @@ void BrushRenderExecute(Camera3D camera) {
     // One depth pass per cascade over the same caster list.
     for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++) {
       BrushShadowBeginCascade(&g_r.shadow, c, g_r.sunDir, camera);
-      for (int i = 0; i < shadowCount; i++)
-        DrawCmd(&g_r.cmds[BRUSH_LAYER_SHADOW][i]);
+      BrushFrustum cascadeFrustum = BrushFrustumExtract(g_r.shadow.lightVP[c]);
+      for (int i = 0; i < shadowCount; i++) {
+        BrushDrawCmd *cmd = &g_r.cmds[BRUSH_LAYER_SHADOW][i];
+        if (cmd->hasBounds && !BrushFrustumContainsBox(&cascadeFrustum, cmd->bounds)) {
+          continue; // Object-level cascade cull!
+        }
+        DrawCmd(cmd);
+      }
       BrushShadowEnd(&g_r.shadow);
     }
 
@@ -814,16 +835,7 @@ static Vector4 NormalizePlane(float a, float b, float c, float d) {
   return (Vector4){a / len, b / len, c / len, d / len};
 }
 
-BrushFrustum BrushRenderMakeFrustum(Camera3D camera) {
-  // Mirror BeginMode3D exactly: screen aspect, camera fovy, rl cull near/far.
-  float aspect = (float)GetScreenWidth() / (float)GetScreenHeight();
-  Matrix view = GetCameraMatrix(camera);
-  Matrix proj = MatrixPerspective(camera.fovy * DEG2RAD, aspect,
-                                  rlGetCullDistanceNear(),
-                                  rlGetCullDistanceFar());
-  // clip = Vector3Transform(worldPos, m): clip.x uses (m0,m4,m8,m12),
-  // clip.w uses (m3,m7,m11,m15). Gribb-Hartmann plane extraction on those.
-  Matrix m = MatrixMultiply(view, proj);
+BrushFrustum BrushFrustumExtract(Matrix m) {
   BrushFrustum f;
   f.planes[0] = NormalizePlane(m.m0 + m.m3, m.m4 + m.m7, m.m8 + m.m11, m.m12 + m.m15);  // left
   f.planes[1] = NormalizePlane(m.m3 - m.m0, m.m7 - m.m4, m.m11 - m.m8, m.m15 - m.m12);  // right
@@ -834,12 +846,39 @@ BrushFrustum BrushRenderMakeFrustum(Camera3D camera) {
   return f;
 }
 
+BrushFrustum BrushRenderMakeFrustum(Camera3D camera) {
+  // Mirror BeginMode3D exactly: screen aspect, camera fovy, rl cull near/far.
+  float aspect = (float)GetScreenWidth() / (float)GetScreenHeight();
+  Matrix view = GetCameraMatrix(camera);
+  Matrix proj = MatrixPerspective(camera.fovy * DEG2RAD, aspect,
+                                  rlGetCullDistanceNear(),
+                                  rlGetCullDistanceFar());
+  // clip = Vector3Transform(worldPos, m): clip.x uses (m0,m4,m8,m12),
+  // clip.w uses (m3,m7,m11,m15). Gribb-Hartmann plane extraction on those.
+  return BrushFrustumExtract(MatrixMultiply(view, proj));
+}
+
 bool BrushFrustumContainsSphere(const BrushFrustum *f, Vector3 center,
                                 float radius) {
   for (int i = 0; i < 6; i++) {
     const Vector4 *p = &f->planes[i];
     float dist = p->x * center.x + p->y * center.y + p->z * center.z + p->w;
     if (dist < -radius) return false; // fully outside this plane
+  }
+  return true;
+}
+
+bool BrushFrustumContainsBox(const BrushFrustum *f, BoundingBox box) {
+  for (int i = 0; i < 6; i++) {
+    const Vector4 *p = &f->planes[i];
+    // Find the p-vertex (the corner furthest in the direction of the plane normal)
+    Vector3 pVertex = {
+      p->x > 0 ? box.max.x : box.min.x,
+      p->y > 0 ? box.max.y : box.min.y,
+      p->z > 0 ? box.max.z : box.min.z
+    };
+    float dist = p->x * pVertex.x + p->y * pVertex.y + p->z * pVertex.z + p->w;
+    if (dist < 0.0f) return false; // fully outside this plane
   }
   return true;
 }

@@ -246,11 +246,18 @@ typedef struct BrushFrustum {
   Vector4 planes[6];
 } BrushFrustum;
 
+BrushFrustum BrushFrustumExtract(Matrix m);
 BrushFrustum BrushRenderMakeFrustum(Camera3D camera);
+
+// Optional: Set bounds for the very next Submit call for object-level culling
+void BrushRenderSetNextBounds(BoundingBox box);
 
 // True if the sphere is inside or touching the frustum (conservative).
 bool BrushFrustumContainsSphere(const BrushFrustum *f, Vector3 center,
                                 float radius);
+
+// True if the AABB is inside or touching the frustum.
+bool BrushFrustumContainsBox(const BrushFrustum *f, BoundingBox box);
 
 // Conservative world bounding sphere of a local AABB under a transform: all 8
 // corners are transformed (handles rotation + non-uniform scale).

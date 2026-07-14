@@ -46,6 +46,10 @@ Vector3 BrushCharacterMove(BrushCharacter *c, BrushPhysics *pw, Vector3 inputVel
 // target is clear.
 void BrushCharacterWarp(BrushCharacter *c, Vector3 feetPos);
 
+// Change the dimensions of the character's collision capsule dynamically.
+// Keeps the feet position at the same height and updates the shape in Jolt.
+bool BrushCharacterSetDimensions(BrushCharacter *c, BrushPhysics *pw, float radius, float totalHeight);
+
 #ifdef __cplusplus
 }
 #endif

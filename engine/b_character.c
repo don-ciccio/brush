@@ -45,7 +45,7 @@ bool BrushCharacterInit(BrushCharacter *c, BrushPhysics *pw, Vector3 startPos, f
     settings.mass = 80.0f;
     settings.maxStrength = 100.0f;
     settings.predictiveContactDistance = 0.1f;
-    settings.characterPadding = 0.02f;
+    settings.characterPadding = 0.04f;
     settings.maxNumHits = 16;
     settings.penetrationRecoverySpeed = 1.0f;
 
@@ -78,6 +78,66 @@ void BrushCharacterCleanup(BrushCharacter *c, BrushPhysics *pw) {
     }
     // Capsule shape is owned by the virtual character; JPH_CharacterBase_Destroy handles releasing it.
     c->capsuleShape = NULL;
+}
+
+bool BrushCharacterSetDimensions(BrushCharacter *c, BrushPhysics *pw, float radius, float totalHeight) {
+    if (!c || !c->character || !pw || !pw->system) return false;
+
+    float halfHeightOfCylinder = (totalHeight * 0.5f) - radius;
+    if (halfHeightOfCylinder <= 0.0f) {
+        TraceLog(LOG_ERROR, "BrushCharacterSetDimensions: Invalid capsule dimensions (height too small for radius)");
+        return false;
+    }
+
+    // Create new Capsule Shape
+    JPH_CapsuleShapeSettings* capsuleSettings = JPH_CapsuleShapeSettings_Create(halfHeightOfCylinder, radius);
+    JPH_Shape* newShape = (JPH_Shape*)JPH_CapsuleShapeSettings_CreateShape(capsuleSettings);
+    JPH_ShapeSettings_Destroy((JPH_ShapeSettings*)capsuleSettings);
+    if (!newShape) {
+        TraceLog(LOG_ERROR, "BrushCharacterSetDimensions: Failed to create capsule shape");
+        return false;
+    }
+
+    float oldOffset = c->comOffset;
+    float newOffset = radius + halfHeightOfCylinder;
+
+    // Get current COM position
+    JPH_RVec3 comPos;
+    JPH_CharacterVirtual_GetPosition(c->character, &comPos);
+
+    // Adjust position so that feet position remains constant
+    JPH_RVec3 newComPos = {
+        comPos.x,
+        comPos.y - oldOffset + newOffset,
+        comPos.z
+    };
+
+    JPH_CharacterVirtual_SetPosition(c->character, &newComPos);
+
+    bool ok = JPH_CharacterVirtual_SetShape(
+        c->character,
+        newShape,
+        1.5f,
+        BRUSH_PHYS_LAYER_MOVING,
+        pw->system,
+        NULL,
+        NULL
+    );
+
+    if (ok) {
+        if (c->capsuleShape) {
+            JPH_Shape_Destroy(c->capsuleShape);
+        }
+        c->capsuleShape = newShape;
+        c->comOffset = newOffset;
+        c->position = (Vector3){ (float)newComPos.x, (float)newComPos.y - newOffset, (float)newComPos.z };
+        return true;
+    } else {
+        // Rollback position and destroy the new shape
+        JPH_CharacterVirtual_SetPosition(c->character, &comPos);
+        JPH_Shape_Destroy(newShape);
+        return false;
+    }
 }
 
 void BrushCharacterWarp(BrushCharacter *c, Vector3 feetPos) {

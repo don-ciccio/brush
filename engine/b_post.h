@@ -41,11 +41,8 @@ typedef struct BrushPost {
 
   RenderTexture2D scene;  // HDR (RGBA16F) + depth texture — the scene target
   RenderTexture2D bloomA; // 1/2-res HDR ping-pong (mip 0)
-  RenderTexture2D bloomB;
   RenderTexture2D bloomC; // 1/4-res HDR (mip 1)
-  RenderTexture2D bloomD;
   RenderTexture2D bloomE; // 1/8-res HDR (mip 2, widest)
-  RenderTexture2D bloomF;
   RenderTexture2D present; // LDR composite at logical res, upscaled at the end
   RenderTexture2D aoRaw;   // half-render-res SSAO (R), 8-bit
   RenderTexture2D aoBlur;  // 4x4 box-blurred SSAO
@@ -54,8 +51,9 @@ typedef struct BrushPost {
   RenderTexture2D volFogTex;        // half-render-res HDR fog (straight alpha)
 
   Shader bright;
-  Shader blur;
-  Shader composite;
+  Shader kawaseDown;
+  Shader kawaseUp;
+  Shader blur; // still used? maybe remove? wait, maybe keep it in case.
   Shader sharpen;
   Shader ssao, ssaoBlur;
   Shader smaaEdges, smaaWeights, smaaBlend;
@@ -64,21 +62,27 @@ typedef struct BrushPost {
   Texture2D noise;               // 4x4 SSAO rotation vectors
   Texture2D smaaArea, smaaSearch; // SMAA precomputed lookups (assets/smaa)
 
+  struct {
+    Shader shader;
+    int locBloomTex, locBloomIntensity, locExposure, locResolution, locTime;
+    int locDisplayP3, locP3Strength;
+    int locAOTex, locAOEnabled;
+    int locDofDepth, locDofNear, locDofFar, locDofFocus, locDofRange;
+    int locDofStrength, locDofEnabled;
+    int locGodRayTex, locGodRaysOn;
+  } compositePerms[8]; // 3 bits: [0]=DOF, [1]=GodRays, [2]=AO
+
   int locBrightThreshold;
+
+  int locKawaseDownTexel, locKawaseUpTexel;
   int locBlurDir, locBlurTexel;
-  int locBloomTex, locBloomIntensity, locExposure, locResolution, locTime;
-  int locDisplayP3, locP3Strength;
   int locSharpTexel, locSharpAmount;
-  int locAOTex, locAOEnabled;
   int locSsaoDepth, locSsaoNoise, locSsaoKernel, locSsaoProj, locSsaoInvProj;
   int locSsaoNoiseScale, locSsaoRadius, locSsaoBias, locSsaoStrength;
   int locSsaoBlurTexel;
   int locEdgesMetrics, locEdgesThreshold;
   int locWeightsMetrics, locWeightsArea, locWeightsSearch;
   int locBlendMetrics, locBlendWeights;
-  int locDofDepth, locDofNear, locDofFar, locDofFocus, locDofRange;
-  int locDofStrength, locDofEnabled;
-  int locGodRayTex, locGodRaysOn; // composite-side god-ray samplers
   int locGRDepth, locGRShadowMap, locGRInvVP, locGRMatLight, locGRCamPos;
   int locGRSunDir, locGRSunCol, locGRRes, locGRTime;
   int locGRDecay, locGRDensity, locGRWeight, locGRExposure;

@@ -771,6 +771,25 @@ static void SandboxFixedUpdate(void *user, float dt) {
   else if (s->velY < 0.0f) s->velY = -2.0f; // gentle stick-to-floor bias
 
   BrushPhysicsStep(&s->phys, dt);
+  // Determine desired capsule size based on state (standing vs crouching vs rolling)
+  float targetHeight = 1.80f;
+  float targetRadius = 0.30f;
+  if (BrushAnimatorState(&s->animator) == BRUSH_ANIM_ROLL) {
+    targetHeight = 0.90f;
+    targetRadius = 0.35f;
+  } else if (s->crouched) {
+    targetHeight = 1.15f;
+    targetRadius = 0.30f;
+  }
+
+  if (s->body.capsuleShape != NULL) {
+    float curHeight = s->body.comOffset * 2.0f;
+    float curRadius = JPH_CapsuleShape_GetRadius((const JPH_CapsuleShape*)s->body.capsuleShape);
+    if (fabsf(curHeight - targetHeight) > 0.01f || fabsf(curRadius - targetRadius) > 0.01f) {
+      BrushCharacterSetDimensions(&s->body, &s->phys, targetRadius, targetHeight);
+    }
+  }
+
   BrushCharacterMove(&s->body, &s->phys,
                      (Vector3){s->vel.x, s->velY, s->vel.z}, dt);
   s->pos = s->body.position;
