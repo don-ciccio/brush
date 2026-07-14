@@ -952,6 +952,113 @@ static void GenMeshTangentsIndexed(Mesh *mesh) {
   }
 }
 
+// Grow a float array (raylib MemRealloc), returning the (possibly moved) base.
+static float *ObjGrow(float *a, int *cap, int need) {
+  if (need <= *cap) return a;
+  int nc = (*cap < 256) ? 256 : *cap;
+  while (nc < need) nc *= 2;
+  a = (float *)MemRealloc(a, (unsigned int)nc * sizeof(float));
+  *cap = nc;
+  return a;
+}
+
+// Minimal, robust Wavefront OBJ -> Model loader. raylib 5.5's LoadModel
+// SEGFAULTS on OBJs that omit vertex normals (very common in hand-made or
+// "don't write normals" exports), so parse positions/uvs/normals ourselves,
+// triangulate n-gon faces (fan), and GENERATE flat normals when a face corner
+// has none. One non-indexed mesh + a default material — enough for foliage/props.
+static Model BrushLoadOBJModel(const char *path) {
+  char *text = LoadFileText(path); // pak-aware file hooks (as raylib LoadModel)
+  if (text == NULL) return (Model){0};
+
+  float *vp = NULL, *vt = NULL, *vn = NULL; // source pools (x3 / x2 / x3)
+  int vpN = 0, vtN = 0, vnN = 0, vpC = 0, vtC = 0, vnC = 0;
+  float *ov = NULL, *ot = NULL, *on = NULL; // per-triangle-vertex output
+  int oN = 0, ovC = 0, otC = 0, onC = 0;    // oN counts output VERTICES
+
+  char *cur = text;
+  while (*cur) {
+    char *nl = strchr(cur, '\n');
+    if (nl) *nl = '\0';
+    char *p = cur;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p[0] == 'v' && p[1] == ' ') {
+      float x, y, z;
+      if (sscanf(p + 2, "%f %f %f", &x, &y, &z) == 3) {
+        vp = ObjGrow(vp, &vpC, (vpN + 1) * 3);
+        vp[vpN*3] = x; vp[vpN*3+1] = y; vp[vpN*3+2] = z; vpN++;
+      }
+    } else if (p[0] == 'v' && p[1] == 't') {
+      float u, v = 0.0f;
+      if (sscanf(p + 3, "%f %f", &u, &v) >= 1) {
+        vt = ObjGrow(vt, &vtC, (vtN + 1) * 2);
+        vt[vtN*2] = u; vt[vtN*2+1] = v; vtN++;
+      }
+    } else if (p[0] == 'v' && p[1] == 'n') {
+      float x, y, z;
+      if (sscanf(p + 3, "%f %f %f", &x, &y, &z) == 3) {
+        vn = ObjGrow(vn, &vnC, (vnN + 1) * 3);
+        vn[vnN*3] = x; vn[vnN*3+1] = y; vn[vnN*3+2] = z; vnN++;
+      }
+    } else if (p[0] == 'f' && (p[1] == ' ' || p[1] == '\t')) {
+      int fv[64], ft[64], fn[64], fc = 0; // face corners
+      char *tok = strtok(p + 1, " \t\r");
+      while (tok && fc < 64) {
+        int vi = 0, ti = 0, ni = 0; // forms: v | v/t | v//n | v/t/n
+        if (sscanf(tok, "%d/%d/%d", &vi, &ti, &ni) == 3) {}
+        else if (sscanf(tok, "%d//%d", &vi, &ni) == 2) ti = 0;
+        else if (sscanf(tok, "%d/%d", &vi, &ti) == 2) ni = 0;
+        else { sscanf(tok, "%d", &vi); ti = 0; ni = 0; }
+        fv[fc] = (vi < 0) ? vpN + vi : vi - 1; // 1-based; neg = relative
+        ft[fc] = (ti == 0) ? -1 : ((ti < 0) ? vtN + ti : ti - 1);
+        fn[fc] = (ni == 0) ? -1 : ((ni < 0) ? vnN + ni : ni - 1);
+        fc++;
+        tok = strtok(NULL, " \t\r");
+      }
+      for (int i = 1; i + 1 < fc; i++) { // fan-triangulate
+        int idx[3] = {0, i, i + 1};
+        float fnx = 0, fny = 1, fnz = 0; // face normal (fallback when no vn)
+        if (fv[0] >= 0 && fv[0] < vpN && fv[i] >= 0 && fv[i] < vpN &&
+            fv[i+1] >= 0 && fv[i+1] < vpN) {
+          const float *A = &vp[fv[0]*3], *B = &vp[fv[i]*3], *C = &vp[fv[i+1]*3];
+          float ax = B[0]-A[0], ay = B[1]-A[1], az = B[2]-A[2];
+          float bx = C[0]-A[0], by = C[1]-A[1], bz = C[2]-A[2];
+          fnx = ay*bz - az*by; fny = az*bx - ax*bz; fnz = ax*by - ay*bx;
+          float l = sqrtf(fnx*fnx + fny*fny + fnz*fnz);
+          if (l > 1e-8f) { fnx /= l; fny /= l; fnz /= l; } else { fnx = 0; fny = 1; fnz = 0; }
+        }
+        for (int k = 0; k < 3; k++) {
+          int c = idx[k], pv = fv[c], tv = ft[c], nv = fn[c];
+          ov = ObjGrow(ov, &ovC, (oN + 1) * 3);
+          ot = ObjGrow(ot, &otC, (oN + 1) * 2);
+          on = ObjGrow(on, &onC, (oN + 1) * 3);
+          if (pv >= 0 && pv < vpN) { ov[oN*3]=vp[pv*3]; ov[oN*3+1]=vp[pv*3+1]; ov[oN*3+2]=vp[pv*3+2]; }
+          else { ov[oN*3]=ov[oN*3+1]=ov[oN*3+2]=0; }
+          if (tv >= 0 && tv < vtN) { ot[oN*2]=vt[tv*2]; ot[oN*2+1]=vt[tv*2+1]; }
+          else { ot[oN*2]=0; ot[oN*2+1]=0; }
+          if (nv >= 0 && nv < vnN) { on[oN*3]=vn[nv*3]; on[oN*3+1]=vn[nv*3+1]; on[oN*3+2]=vn[nv*3+2]; }
+          else { on[oN*3]=fnx; on[oN*3+1]=fny; on[oN*3+2]=fnz; }
+          oN++;
+        }
+      }
+    }
+    if (!nl) break;
+    cur = nl + 1;
+  }
+  UnloadFileText(text);
+  MemFree(vp); MemFree(vt); MemFree(vn);
+
+  if (oN < 3) { MemFree(ov); MemFree(ot); MemFree(on); return (Model){0}; }
+  Mesh mesh = {0};
+  mesh.vertexCount = oN;
+  mesh.triangleCount = oN / 3;
+  mesh.vertices = ov;
+  mesh.texcoords = ot;
+  mesh.normals = on;
+  Model model = LoadModelFromMesh(mesh); // uploads + attaches a default material
+  return model;
+}
+
 Model BrushAssetsModel(const char *path) {
   if (path == NULL || path[0] == '\0') return (Model){0};
 
@@ -972,7 +1079,10 @@ Model BrushAssetsModel(const char *path) {
   memset(e, 0, sizeof(*e));
   strncpy(e->path, path, sizeof(e->path) - 1);
   e->refs = 1;
-  e->model = LoadModel(path); // pak-aware via the file-load hooks
+  // OBJ goes through our own parser: raylib 5.5's OBJ loader segfaults on files
+  // without vertex normals. glTF/others use raylib's LoadModel (pak-aware hooks).
+  e->model = IsFileExtension(path, ".obj") ? BrushLoadOBJModel(path)
+                                           : LoadModel(path);
   if (e->model.meshCount == 0) {
     TraceLog(LOG_WARNING, "ASSETS: missing/empty model %s", path);
     return e->model;

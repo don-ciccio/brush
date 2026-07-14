@@ -427,8 +427,10 @@ static void SandboxInit(void *user) {
       const Model *mdl = &fl->modelRes[m];
       if (mdl->meshCount <= 0) continue;
       c.meshes[mc] = mdl->meshes[0];
+      int mat = (mdl->meshMaterial && mdl->meshMaterial[0] >= 0 &&
+                 mdl->meshMaterial[0] < mdl->materialCount) ? mdl->meshMaterial[0] : 0;
       Texture2D t = (mdl->materialCount > 0)
-          ? mdl->materials[mdl->meshMaterial[0]].maps[MATERIAL_MAP_DIFFUSE].texture
+          ? mdl->materials[mat].maps[MATERIAL_MAP_DIFFUSE].texture
           : (Texture2D){0};
       c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
       c.meshScale[mc] = fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f;
