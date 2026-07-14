@@ -563,6 +563,67 @@ static void DrawFolderContents(const char* parentFolder, int& selAsset, BrushTex
     }
 }
 
+// Copy a source file to a destination path (raw bytes). Returns true on success.
+static bool CopyFileTo(const char *src, const char *dst) {
+    int size = 0;
+    unsigned char *data = LoadFileData(src, &size);
+    if (data == NULL) return false;
+    bool ok = SaveFileData(dst, data, size);
+    UnloadFileData(data);
+    return ok;
+}
+
+// When an OBJ is imported, bring its companion .mtl (next to assets/models/obj)
+// and the diffuse texture it references (into assets/textures/) so downloaded
+// packs are textured out of the box — otherwise only the bare .obj lands and
+// map_Kd can't resolve. Best-effort; a missing sidecar is fine (assign a
+// foliage Albedo instead).
+static void ImportOBJSidecars(const char *srcObjPath) {
+    char *obj = LoadFileText(srcObjPath);
+    if (obj == NULL) return;
+    const char *srcDir = GetDirectoryPath(srcObjPath);
+    char mtllib[256] = {0};
+    for (char *ln = obj; *ln;) {
+        char *e = strchr(ln, '\n'); if (e) *e = '\0';
+        char *q = ln; while (*q == ' ' || *q == '\t') q++;
+        if (strncmp(q, "mtllib ", 7) == 0) { sscanf(q + 7, "%255s", mtllib); break; }
+        if (!e) break; ln = e + 1;
+    }
+    UnloadFileText(obj);
+    if (!mtllib[0]) return;
+    char mtlSrc[512], mtlDst[512];
+    snprintf(mtlSrc, sizeof(mtlSrc), "%s/%s", srcDir, mtllib);
+    snprintf(mtlDst, sizeof(mtlDst), "assets/models/%s", GetFileName(mtllib));
+    if (!FileExists(mtlSrc)) return;
+    CopyFileTo(mtlSrc, mtlDst); // .mtl rides next to the .obj so mtllib resolves
+    char *mtl = LoadFileText(mtlSrc);
+    if (mtl == NULL) return;
+    char tex[256] = {0};
+    for (char *ln = mtl; *ln;) {
+        char *e = strchr(ln, '\n'); if (e) *e = '\0';
+        char *q = ln; while (*q == ' ' || *q == '\t') q++;
+        if (strncmp(q, "map_Kd", 6) == 0) {
+            char last[256] = {0};
+            for (char *t = strtok(q + 6, " \t\r"); t; t = strtok(NULL, " \t\r"))
+                snprintf(last, sizeof(last), "%s", t);
+            snprintf(tex, sizeof(tex), "%s", last);
+            break;
+        }
+        if (!e) break; ln = e + 1;
+    }
+    UnloadFileText(mtl);
+    if (!tex[0]) return;
+    char texSrc[512], texDst[512];
+    snprintf(texSrc, sizeof(texSrc), "%s/%s", srcDir, tex);
+    if (!FileExists(texSrc)) snprintf(texSrc, sizeof(texSrc), "%s/%s", srcDir, GetFileName(tex));
+    if (FileExists(texSrc)) {
+        mkdir("assets/textures", 0755);
+        snprintf(texDst, sizeof(texDst), "assets/textures/%s", GetFileName(tex));
+        if (CopyFileTo(texSrc, texDst))
+            AddEditorLog("Imported OBJ texture %s", GetFileName(tex));
+    }
+}
+
 // Copy image files into the project's assets/textures (creating it on
 // demand — the Empty template starts without one) and rescan the pickers.
 // This is how textures enter a project: drag & drop onto the editor, or
@@ -594,6 +655,8 @@ static int ImportTextureFiles(const char **paths, int count) {
         if (ok) {
             imported++;
             AddEditorLog("Imported %s", dst);
+            if (isModel && IsFileExtension(paths[i], ".obj"))
+                ImportOBJSidecars(paths[i]); // bring the .mtl + its texture
         }
     }
     if (imported > 0) {
@@ -2671,9 +2734,12 @@ int main(int argc, char **argv) {
                 }
                 if (fl->modelCount == 0)
                     ImGui::TextDisabled("(procedural grass — drop .glb models to mix real meshes)");
-                ImGui::InputText("Albedo", fl->albedo, sizeof(fl->albedo));
-                if (ImGui::IsItemDeactivatedAfterEdit()) { g_dirty = true; g_foliageResyncPending = true; }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty = procedural gradient card.");
+                // Albedo texture for the grass cards (applies to all model
+                // variants + the procedural tuft). Pick any imported texture;
+                // Import… / drag-drop images into assets/textures to add more.
+                if (TexPathCombo("Albedo", fl->albedo, sizeof(fl->albedo)))
+                    { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Texture for the grass cards.\nEmpty = the model's own texture, else a procedural gradient.");
 
                 ImGui::SeparatorText("Placement");
                 if (ImGui::SliderFloat("Density", &fl->density, 0.05f, 6.0f, "%.2f /m2")) { g_dirty = true; g_foliageResyncPending = true; }

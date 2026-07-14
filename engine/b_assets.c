@@ -975,6 +975,7 @@ static Model BrushLoadOBJModel(const char *path) {
   int vpN = 0, vtN = 0, vnN = 0, vpC = 0, vtC = 0, vnC = 0;
   float *ov = NULL, *ot = NULL, *on = NULL; // per-triangle-vertex output
   int oN = 0, ovC = 0, otC = 0, onC = 0;    // oN counts output VERTICES
+  char mtllib[256] = {0};                   // companion .mtl (for map_Kd)
 
   char *cur = text;
   while (*cur) {
@@ -982,7 +983,9 @@ static Model BrushLoadOBJModel(const char *path) {
     if (nl) *nl = '\0';
     char *p = cur;
     while (*p == ' ' || *p == '\t') p++;
-    if (p[0] == 'v' && p[1] == ' ') {
+    if (strncmp(p, "mtllib ", 7) == 0) {
+      sscanf(p + 7, "%255s", mtllib);
+    } else if (p[0] == 'v' && p[1] == ' ') {
       float x, y, z;
       if (sscanf(p + 2, "%f %f %f", &x, &y, &z) == 3) {
         vp = ObjGrow(vp, &vpC, (vpN + 1) * 3);
@@ -1068,6 +1071,50 @@ static Model BrushLoadOBJModel(const char *path) {
   model.materials[0] = LoadMaterialDefault();
   model.meshMaterial = (int *)MemAlloc(sizeof(int));
   model.meshMaterial[0] = 0;
+
+  // Companion .mtl: pull the diffuse texture (map_Kd) so downloaded OBJ packs
+  // bring their texture in automatically. Resolve the map_Kd path next to the
+  // .obj, then fall back to assets/textures/<basename> (a separately-imported
+  // texture) — either way the foliage layer's own Albedo override still wins.
+  if (mtllib[0]) {
+    const char *dir = GetDirectoryPath(path);
+    char mtlPath[512];
+    snprintf(mtlPath, sizeof(mtlPath), "%s/%s", dir, mtllib);
+    char *mtl = LoadFileText(mtlPath);
+    if (mtl) {
+      char tex[256] = {0};
+      for (char *ln = mtl; *ln;) {
+        char *e = strchr(ln, '\n'); if (e) *e = '\0';
+        char *q = ln; while (*q == ' ' || *q == '\t') q++;
+        if (strncmp(q, "map_Kd", 6) == 0) {
+          char last[256] = {0}; // last whitespace token = the path (skip options)
+          for (char *t = strtok(q + 6, " \t\r"); t; t = strtok(NULL, " \t\r"))
+            snprintf(last, sizeof(last), "%s", t);
+          snprintf(tex, sizeof(tex), "%s", last);
+          break;
+        }
+        if (!e) break; ln = e + 1;
+      }
+      UnloadFileText(mtl);
+      if (tex[0]) {
+        char cand[512];
+        snprintf(cand, sizeof(cand), "%s/%s", dir, tex);
+        if (!FileExists(cand))
+          snprintf(cand, sizeof(cand), "assets/textures/%s", GetFileName(tex));
+        if (FileExists(cand)) {
+          Texture2D t = LoadTexture(cand);
+          if (t.id != 0) {
+            GenTextureMipmaps(&t);
+            SetTextureFilter(t, TEXTURE_FILTER_TRILINEAR);
+            model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture = t;
+          }
+        } else {
+          TraceLog(LOG_INFO, "ASSETS: OBJ %s map_Kd '%s' not found (assign a "
+                   "foliage Albedo instead)", GetFileName(path), tex);
+        }
+      }
+    }
+  }
   return model;
 }
 
