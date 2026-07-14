@@ -73,6 +73,14 @@ uniform float uRoadEnabled;
 uniform sampler2D uRoadMask;   // R = road coverage 0..1
 uniform sampler2D uRoadAlbedo;
 uniform float uRoadTile;
+// Road POM + height-blend reuse the terrain height sampler (uLayerHeight, unit
+// 9): when the road material has a displacement map, its height is bound there
+// and terrain-layer POM is disabled for the draw (the paving use case is now the
+// road). Scalars only — no extra texture unit.
+uniform float uRoadPom;         // 1 = parallax-occlusion the road surface
+uniform float uRoadPomScale;    // road displacement scale
+uniform float uRoadHeightBlend; // 1 = relief-follow the corridor edge
+uniform float uRoadBlendSharp;  // edge transition band
 // Auto-slope mask: steep terrain auto-blends toward one layer beneath the
 // painted weights (x = layer index or -1 off, y = cos(startDeg),
 // z = cos(endDeg); start < end in degrees so cosStart > cosEnd).
@@ -485,9 +493,28 @@ void main()
         // blend by the coverage mask. Independent of the 4 layers above and of
         // auto-slope/auto-height, so it only appears on the road corridor.
         if (uRoadEnabled > 0.5) {
+            // POM: ray-march the road's OWN displacement (bound to uLayerHeight
+            // when the road material has one) and shift its sample position, so
+            // the paving's displacement map produces real parallax depth.
+            vec3 wpRoad = wp;
+            if (uRoadPom > 0.5 && !steep) {
+                float pomFade = 1.0 - smoothstep(12.0, 24.0, length(viewPos - fragPosition));
+                if (pomFade > 0.0) {
+                    vec2 uv = wp.xz / uRoadTile;
+                    vec3 vts = vec3(V.x, V.z, V.y);
+                    vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uRoadPomScale);
+                    wpRoad.xz = wp.xz + (pomUV - uv) * uRoadTile * pomFade;
+                }
+            }
             float rm = clamp(texture(uRoadMask, suv).r, 0.0, 1.0);
+            // Height-blend: let the road surface relief drive the corridor edge so
+            // the border follows mortar/cracks instead of a flat feather.
+            if (uRoadHeightBlend > 0.5 && rm > 0.001 && rm < 0.999) {
+                float h = texture(uLayerHeight, wpRoad.xz / uRoadTile).r;
+                rm = clamp((rm - 1.0 + h) / max(uRoadBlendSharp, 0.05) + 0.5, 0.0, 1.0);
+            }
             if (rm > 0.001) {
-                a = mix(a, SampleLayer(uRoadAlbedo, uRoadTile, wp, triW, steep), rm);
+                a = mix(a, SampleLayer(uRoadAlbedo, uRoadTile, wpRoad, triW, steep), rm);
                 albedo = a;
                 // Road inherits the terrain surface normal (flattens the layer
                 // bump under the paving); a dedicated road normal map is a future
