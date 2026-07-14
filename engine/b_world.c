@@ -470,6 +470,16 @@ static void ChunkSplatAt(void *ctx, float wx, float wz, float out[4]) {
   for (int k = 0; k < 4; k++) out[k] = (float)px[k] / 255.0f;
 }
 
+// Road surface coverage 0..1 at a world point (0 where there's no road). Lets
+// foliage exclude itself from roads now that they're a separate mask, not a
+// terrain splat slot. Baked before the foliage scatter in BuildCpu.
+static float ChunkRoadAt(void *ctx, float wx, float wz) {
+  ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
+  if (!h->c->roadValid || h->c->roadPixels == NULL) return 0.0f;
+  int i = ChunkGridIndex(h->w, h->c, wx, wz);
+  return (float)h->c->roadPixels[i] / 255.0f;
+}
+
 // Vertex colour by slope: green lowland fading to grey rock on steep faces.
 // Zero-asset default shading (the lit shader multiplies albedo by this).
 static void SlopeColor(float ny, unsigned char *out) {
@@ -769,7 +779,7 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     if (chunk->pendingHandle && w->cfg.chunkFree)
       w->cfg.chunkFree(w->cfg.chunkUser, chunk->pendingHandle);
     ChunkHeightCtx hc = {w, chunk};
-    BrushChunkSamplers samplers = {ChunkHeightAt, ChunkDensityAt, ChunkSplatAt, &hc};
+    BrushChunkSamplers samplers = {ChunkHeightAt, ChunkDensityAt, ChunkSplatAt, ChunkRoadAt, &hc};
     chunk->pendingHandle = w->cfg.chunkBake(w->cfg.chunkUser, chunk->coord, o,
                                             w->cfg.chunkSize, &samplers);
   }

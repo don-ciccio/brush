@@ -195,6 +195,8 @@ typedef struct BrushFoliageLayerConfig {
   int   avoidLayer;     // exclude where terrain layer N weight > threshold
                         // (-1 = none) — e.g. the road/paving layer
   float avoidThreshold; // 0..1 (0 -> default 0.5)
+  bool  avoidRoad;      // exclude foliage from the road surface (road coverage
+                        // mask, independent of the terrain layers)
 } BrushFoliageLayerConfig;
 
 typedef struct BrushFoliage BrushFoliage;

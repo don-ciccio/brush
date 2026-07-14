@@ -292,6 +292,7 @@ static void BuildFoliageLayers() {
         c.growLayer = fl->growLayer;
         c.avoidLayer = fl->avoidLayer;
         c.avoidThreshold = fl->avoidThreshold;
+        c.avoidRoad = fl->avoidRoad;
         // Model palette: mesh + texture per resolved variant ({0} -> procedural).
         int mc = 0;
         for (int m = 0; m < fl->modelCount; m++) {
@@ -1251,7 +1252,7 @@ static bool OpenProjectAt(const char *dir) {
         fl->scale = 1.0f; fl->scaleJitter = 0.35f; fl->heightOffset = -0.04f;
         fl->maxSlopeDeg = 42.0f; fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f;
         fl->tint = (Vector3){1, 1, 1};
-        fl->growLayer = -1; fl->avoidLayer = -1; fl->avoidThreshold = 0.5f;
+        fl->growLayer = -1; fl->avoidLayer = -1; fl->avoidThreshold = 0.5f; fl->avoidRoad = true;
     }
     BuildFoliageLayers();
     BrushFoliageInstallHooks(g_foliage, &wcfg);
@@ -2673,7 +2674,7 @@ int main(int argc, char **argv) {
                 fl->density = 1.0f; fl->drawDistance = 60.0f; fl->lodDistance = 24.0f;
                 fl->scale = 1.0f; fl->scaleJitter = 0.3f; fl->maxSlopeDeg = 42.0f;
                 fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f; fl->tint = (Vector3){1, 1, 1};
-                fl->growLayer = -1; fl->avoidLayer = -1; fl->avoidThreshold = 0.5f;
+                fl->growLayer = -1; fl->avoidLayer = -1; fl->avoidThreshold = 0.5f; fl->avoidRoad = true;
                 g_selectedFoliage = g_scene.foliageCount++;
                 g_dirty = true; g_foliageResyncPending = true;
             }
@@ -2795,6 +2796,11 @@ int main(int argc, char **argv) {
                     if (ImGui::SliderFloat("Avoid Above", &fl->avoidThreshold, 0.05f, 1.0f, "%.2f"))
                         { g_dirty = true; g_foliageResyncPending = true; }
                 }
+                if (ImGui::Checkbox("Avoid Roads", &fl->avoidRoad))
+                    { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Keep this foliage off the road surface (its own\n"
+                                      "coverage mask, independent of the terrain layers).");
 
                 ImGui::Spacing();
                 if (g_selectedFoliage < BRUSH_FOLIAGE_PAINT_MAX) {

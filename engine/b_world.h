@@ -58,7 +58,8 @@ typedef struct BrushChunkCoord {
 typedef struct BrushChunkSamplers {
   float (*heightAt)(void *ctx, float wx, float wz);       // terrain Y
   float (*densityAt)(void *ctx, float wx, float wz, int foliageLayer); // paint multiplier (0..MAX_BOOST; 1 = base)
-  void  (*splatAt)(void *ctx, float wx, float wz, float outWeights[4]); // terrain layer weights 0..1 (incl. roads)
+  void  (*splatAt)(void *ctx, float wx, float wz, float outWeights[4]); // terrain layer weights 0..1
+  float (*roadAt)(void *ctx, float wx, float wz);         // road surface coverage 0..1 (for foliage exclusion)
   void *ctx;
 } BrushChunkSamplers;
 

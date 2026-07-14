@@ -938,6 +938,11 @@ typedef struct {
 
 // True if this position passes the layer's surface-layer rules (grow/avoid).
 static bool SurfacePasses(const ScatterCtx *s, float x, float z) {
+  // Roads are a separate coverage mask (not a splat slot), so exclude foliage
+  // from them here rather than via avoidLayer.
+  if (s->cfg->avoidRoad && s->s->roadAt &&
+      s->s->roadAt(s->s->ctx, x, z) > 0.5f)
+    return false;
   if (!s->s->splatAt || (s->cfg->growLayer < 0 && s->cfg->avoidLayer < 0))
     return true;
   float w[4];

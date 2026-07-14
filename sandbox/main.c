@@ -389,6 +389,7 @@ static void SandboxInit(void *user) {
     fl->growLayer = -1;
     fl->avoidLayer = -1;
     fl->avoidThreshold = 0.5f;
+    fl->avoidRoad = true;
   }
   if (getenv("BRUSH_TEST_FOLIAGE_AVOID") != NULL && s->scene.foliageCount > 0)
     s->scene.foliage[0].avoidLayer = 1; // grass avoids the painted 'path' layer
@@ -420,7 +421,8 @@ static void SandboxInit(void *user) {
         .macroHigh = fl->macroHigh,
         .growLayer = fl->growLayer,
         .avoidLayer = fl->avoidLayer,
-        .avoidThreshold = fl->avoidThreshold};
+        .avoidThreshold = fl->avoidThreshold,
+        .avoidRoad = fl->avoidRoad};
     // Model palette: mesh + texture per resolved variant ({0} -> procedural).
     int mc = 0;
     for (int m = 0; m < fl->modelCount; m++) {

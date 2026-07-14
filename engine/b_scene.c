@@ -203,14 +203,14 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
               wind = 1, farK = 0.4f;
         float tr = 1, tg = 1, tb = 1, mlr = 0, mlg = 0, mlb = 0, mhr = 0,
               mhg = 0, mhb = 0;
-        int grow = -1, avoid = -1;
+        int grow = -1, avoid = -1, avoidRoad = 1;
         float avoidThr = 0.5f, ms0 = 1.0f;
         int fn = sscanf(p,
                         "foliage %63s %127s %127s %f %f %f %f %f %f %f %f %f "
-                        "%f %f %f %f %f %f %f %f %f %d %d %f %f",
+                        "%f %f %f %f %f %f %f %f %f %d %d %f %f %d",
                         fw1, fw2, fw3, &dens, &drawD, &lodD, &sc, &jit, &ho,
                         &slope, &wind, &farK, &tr, &tg, &tb, &mlr, &mlg, &mlb,
-                        &mhr, &mhg, &mhb, &grow, &avoid, &avoidThr, &ms0);
+                        &mhr, &mhg, &mhb, &grow, &avoid, &avoidThr, &ms0, &avoidRoad);
         if (fn >= 6) { // name + 2 paths + density + drawD + lodD
           BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount++];
           memset(fl, 0, sizeof(*fl));
@@ -237,6 +237,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
           fl->growLayer = (fn >= 22) ? grow : -1;
           fl->avoidLayer = (fn >= 23) ? avoid : -1;
           fl->avoidThreshold = (fn >= 24) ? avoidThr : 0.5f;
+          // Road exclusion defaults ON (grass shouldn't grow through paving).
+          fl->avoidRoad = (fn >= 26) ? (avoidRoad != 0) : true;
         }
       }
     } else if (strncmp(p, "foliage_model ", 14) == 0) {
@@ -346,11 +348,11 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   if (s->foliageCount > 0)
     fprintf(f, "\n# foliage  name model albedo  density drawD lodD  scale jitter"
                " hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)"
-               "  growLayer avoidLayer avoidThreshold\n");
+               "  growLayer avoidLayer avoidThreshold modelScale0 avoidRoad\n");
   for (int i = 0; i < s->foliageCount; i++) {
     const BrushSceneFoliageLayer *fl = &s->foliage[i];
     fprintf(f,
-            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g %g\n",
+            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g %g %d\n",
             fl->name[0] ? fl->name : "-", fl->models[0][0] ? fl->models[0] : "-",
             fl->albedo[0] ? fl->albedo : "-", fl->density, fl->drawDistance,
             fl->lodDistance, fl->scale, fl->scaleJitter, fl->heightOffset,
@@ -358,7 +360,7 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
             fl->tint.y, fl->tint.z, fl->macroLow.x, fl->macroLow.y,
             fl->macroLow.z, fl->macroHigh.x, fl->macroHigh.y, fl->macroHigh.z,
             fl->growLayer, fl->avoidLayer, fl->avoidThreshold,
-            fl->modelScale[0] > 0.0f ? fl->modelScale[0] : 1.0f);
+            fl->modelScale[0] > 0.0f ? fl->modelScale[0] : 1.0f, fl->avoidRoad ? 1 : 0);
     for (int m = 1; m < fl->modelCount; m++) // extra palette variants + scale
       if (fl->models[m][0])
         fprintf(f, "foliage_model %s %g\n", fl->models[m],
