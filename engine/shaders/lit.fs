@@ -81,6 +81,7 @@ uniform float uRoadPom;         // 1 = parallax-occlusion the road surface
 uniform float uRoadPomScale;    // road displacement scale
 uniform float uRoadHeightBlend; // 1 = relief-follow the corridor edge
 uniform float uRoadBlendSharp;  // edge transition band
+uniform float uRoadHasHeight;   // 1 = road displacement bound -> derive its normal
 // Auto-slope mask: steep terrain auto-blends toward one layer beneath the
 // painted weights (x = layer index or -1 off, y = cos(startDeg),
 // z = cos(endDeg); start < end in degrees so cosStart > cosEnd).
@@ -516,10 +517,22 @@ void main()
             if (rm > 0.001) {
                 a = mix(a, SampleLayer(uRoadAlbedo, uRoadTile, wpRoad, triW, steep), rm);
                 albedo = a;
-                // Road inherits the terrain surface normal (flattens the layer
-                // bump under the paving); a dedicated road normal map is a future
-                // extension gated by the texture-unit budget.
-                splatBump = mix(splatBump, vec3(0.0), rm);
+                // Surface normal: DERIVE it from the road's own displacement
+                // (central-difference gradient of uLayerHeight) so the relief
+                // catches the sun — highlights on the crowns, shade in the joints
+                // — without a separate normal map / sampler. Falls back to flat
+                // (inherit the terrain normal) when the road has no displacement.
+                vec3 roadBump = vec3(0.0);
+                if (uRoadHasHeight > 0.5) {
+                    vec2 ruv = wpRoad.xz / uRoadTile;
+                    float e = 0.003;
+                    float hL = texture(uLayerHeight, ruv - vec2(e, 0.0)).r;
+                    float hR = texture(uLayerHeight, ruv + vec2(e, 0.0)).r;
+                    float hD = texture(uLayerHeight, ruv - vec2(0.0, e)).r;
+                    float hU = texture(uLayerHeight, ruv + vec2(0.0, e)).r;
+                    roadBump = vec3(-(hR - hL), 0.0, -(hU - hD)) * (uRoadPomScale * 25.0);
+                }
+                splatBump = mix(splatBump, roadBump, rm);
             }
         }
     }

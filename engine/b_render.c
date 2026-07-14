@@ -50,7 +50,7 @@ typedef struct BrushRenderState {
   int locPomLayer, locPomTile, locPomScale;
   int locHeightBlendLayer, locHeightBlendSharp;
   int locRoadEnabled, locRoadTile;
-  int locRoadPom, locRoadPomScale, locRoadHeightBlend, locRoadBlendSharp;
+  int locRoadPom, locRoadPomScale, locRoadHeightBlend, locRoadBlendSharp, locRoadHasHeight;
   float specDefault; // uSpecStrength for draws without material props
   float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
@@ -168,6 +168,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locRoadPomScale = GetShaderLocation(g_r.lit, "uRoadPomScale");
   g_r.locRoadHeightBlend = GetShaderLocation(g_r.lit, "uRoadHeightBlend");
   g_r.locRoadBlendSharp = GetShaderLocation(g_r.lit, "uRoadBlendSharp");
+  g_r.locRoadHasHeight = GetShaderLocation(g_r.lit, "uRoadHasHeight");
   g_r.locPointPos = GetShaderLocation(g_r.lit, "uPointPos");
   g_r.locPointColor = GetShaderLocation(g_r.lit, "uPointColor");
   g_r.locPointRadius = GetShaderLocation(g_r.lit, "uPointRadius");
@@ -434,10 +435,11 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   bool road = sp->hasRoad && sp->roadMask.id != 0 && sp->roadLayer.albedo.id != 0;
   // The road's displacement, if any, takes the single POM height unit (9) — the
   // paving use case moved from a terrain layer to the road — and disables
-  // terrain-layer POM for this draw (they share the one unit).
-  bool roadPom = road && sp->roadLayer.displacement.id != 0 &&
-                 (sp->roadLayer.parallax || sp->roadLayer.heightBlend);
-  if (roadPom) {
+  // terrain-layer POM for this draw (they share the one unit). That height also
+  // drives POM, height-blend, AND a derived surface normal (no separate normal
+  // map / sampler needed to light the relief).
+  bool roadHasHeight = road && sp->roadLayer.displacement.id != 0;
+  if (roadHasHeight) {
     rlActiveTextureSlot(9);
     rlEnableTexture(sp->roadLayer.displacement.id);
     specialLayer = -1; // unit 9 now holds the ROAD height, not a terrain layer
@@ -506,15 +508,18 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   float roadTile = (sp->roadLayer.tile > 0.01f) ? sp->roadLayer.tile : 4.0f;
   SetShaderValue(g_r.lit, g_r.locRoadEnabled, &roadOn, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locRoadTile, &roadTile, SHADER_UNIFORM_FLOAT);
-  // Road POM (parallax) needs the pom-quality gate; height-blend is independent.
-  float roadPomOn = (roadPom && sp->roadLayer.parallax && g_r.pomQuality > 0) ? 1.0f : 0.0f;
+  // Road POM (parallax) needs the pom-quality gate; height-blend + the derived
+  // normal are independent (they only need a displacement bound to unit 9).
+  float roadPomOn = (roadHasHeight && sp->roadLayer.parallax && g_r.pomQuality > 0) ? 1.0f : 0.0f;
   float roadPomScale = (sp->roadLayer.heightScale > 0.0f) ? sp->roadLayer.heightScale : 0.05f;
-  float roadHbOn = (roadPom && sp->roadLayer.heightBlend) ? 1.0f : 0.0f;
+  float roadHbOn = (roadHasHeight && sp->roadLayer.heightBlend) ? 1.0f : 0.0f;
   float roadHbSharp = (sp->roadLayer.blendSharp > 0.0f) ? sp->roadLayer.blendSharp : 0.2f;
+  float roadHasHeightF = roadHasHeight ? 1.0f : 0.0f;
   SetShaderValue(g_r.lit, g_r.locRoadPom, &roadPomOn, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locRoadPomScale, &roadPomScale, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locRoadHeightBlend, &roadHbOn, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locRoadBlendSharp, &roadHbSharp, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locRoadHasHeight, &roadHasHeightF, SHADER_UNIFORM_FLOAT);
   // Matte terrain: override the prop-default specular ApplyMaterialProps set
   // (runs before this) so grass/dirt don't get a plasticky sun sheen.
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &g_r.terrainSpec,
