@@ -23,7 +23,9 @@ uniform vec3 viewPos;
 uniform float uLinearize; // 1 = sRGB albedo -> linear (post path); 0 = direct LDR
 uniform vec3 uGrassTint;  // per-layer albedo tint (1,1,1 = none)
 uniform float uAlphaCutoff; // discard below this texture alpha (card cutout)
-uniform float uImpostor;    // 1 = billboard: output the pre-lit baked atlas as-is
+uniform sampler2D texture2; // billboard impostor: baked NORMAL atlas (RGB = N*0.5+0.5)
+uniform float uImpostor;    // 1 = billboard: albedo from atlas, normal from texture2
+uniform float uImpostorBake; // bake pass: 1 = emit albedo, 2 = emit encoded normal
 
 // Sun shadow (CSM) — mirrors lit.fs's cascade selection, single tap. Gated off
 // by default (uShadowEnabled 0) so a shader with no shadow maps bound still runs.
@@ -57,12 +59,18 @@ void main() {
     vec4 tex = texture(texture0, fragTexCoord);
     if (tex.a < uAlphaCutoff) discard;
 
-    // Billboard impostor: the atlas already holds the clump's fully-lit LINEAR
-    // colour (baked once from the 3D mesh with the scene sun), so output it
-    // directly — re-lighting a flat card can't reproduce the mesh's averaged
-    // per-blade shading and reads too dark. Just apply the distance fade.
-    if (uImpostor > 0.5) { finalColor = vec4(tex.rgb, tex.a * fragFade * colDiffuse.a); return; }
+    // Impostor atlas bake passes (rendered once at load): emit the two
+    // time-invariant channels so the billboard can be lit live at draw time.
+    if (uImpostorBake > 1.5) { finalColor = vec4(normalize(fragNormal) * 0.5 + 0.5, tex.a); return; }
+    if (uImpostorBake > 0.5) { finalColor = vec4(tex.rgb, tex.a); return; }
 
+    // Albedo + shading normal: the mesh uses its own card + interpolated normal;
+    // the billboard impostor pulls the clump's baked albedo (texture0) and baked
+    // per-texel normal (texture2). Lighting below is IDENTICAL for both, run with
+    // the CURRENT sun every frame — so the impostor tracks day/night continuously
+    // with no atlas re-bake and no sudden colour shift.
+    vec3 N = (uImpostor > 0.5) ? normalize(texture(texture2, fragTexCoord).rgb * 2.0 - 1.0)
+                               : normalize(fragNormal);
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb * uGrassTint;
     albedo *= fragMacroColor; // low-frequency patch variation
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
@@ -70,7 +78,6 @@ void main() {
     // Half-Lambert (Valve wrap): grass cards are thin and two-sided, so shade
     // view-independently and never let a face go fully black. This avoids the
     // hard left/right seam a view-dependent normal flip produces.
-    vec3 N = normalize(fragNormal);
     vec3 L = normalize(uSunDir);
     float raw = dot(N, L);
     float wrap = raw * 0.5 + 0.5;

@@ -596,6 +596,11 @@ Shader BrushFoliageLoadShader(void) {
   s.locs[SHADER_LOC_MATRIX_MVP] = GetShaderLocation(s, "mvp");
   s.locs[SHADER_LOC_VECTOR_VIEW] = GetShaderLocation(s, "viewPos");
   s.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocationAttrib(s, "instanceTransform");
+  // Map slots for the material textures: diffuse -> texture0, and the billboard
+  // impostor's baked NORMAL atlas on the NORMAL slot -> texture2 (raylib binds
+  // material map i to unit i and sets shader.locs[SHADER_LOC_MAP_DIFFUSE + i]).
+  s.locs[SHADER_LOC_MAP_DIFFUSE] = GetShaderLocation(s, "texture0");
+  s.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(s, "texture2");
   return s;
 }
 
@@ -612,7 +617,8 @@ typedef struct BrushFoliageLayer {
   // the clump, drawn beyond billboardDistance in place of the far mesh.
   Mesh billboardMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   Material billboardMat[BRUSH_FOLIAGE_MODELS_PER_LAYER];
-  RenderTexture2D impostorRT[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // owns the atlas tex
+  RenderTexture2D impostorRT[BRUSH_FOLIAGE_MODELS_PER_LAYER];    // albedo atlas
+  RenderTexture2D impostorNrmRT[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // normal atlas
   bool hasImpostor[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   float billboardDistance; // 0 = no billboard band (2-tier)
   BrushFoliageDrawBatch nearB, farB, bbB; // per-model visible buffers (main thread)
@@ -635,8 +641,8 @@ struct BrushFoliage {
   bool qualityShadows; // whether foliage samples the shadow map
   int locTime, locWindDir, locWindStr, locFadeStart, locFadeEnd, locFadeNearEnd;
   int locMacroLow, locMacroHigh, locGrassTint, locAlphaCutoff;
-  int locSunDir, locSunColor, locAmbient, locLinearize; // for the impostor bake
-  int locImpostor; // 1 = output the pre-lit baked atlas directly
+  int locImpostor;     // 1 = billboard draw (albedo atlas + baked-normal lighting)
+  int locImpostorBake; // bake pass: 1 = emit albedo, 2 = emit encoded normal
   bool impostor; // BRUSH_FOLIAGE_IMPOSTOR: bake a billboard far-tier per variant
 };
 
@@ -673,22 +679,67 @@ BrushFoliage *BrushFoliageCreate(void) {
   f->locMacroHigh = GetShaderLocation(f->shader, "uMacroHigh");
   f->locGrassTint = GetShaderLocation(f->shader, "uGrassTint");
   f->locAlphaCutoff = GetShaderLocation(f->shader, "uAlphaCutoff");
-  f->locSunDir = GetShaderLocation(f->shader, "uSunDir");
-  f->locSunColor = GetShaderLocation(f->shader, "uSunColor");
-  f->locAmbient = GetShaderLocation(f->shader, "uAmbient");
-  f->locLinearize = GetShaderLocation(f->shader, "uLinearize");
   f->locImpostor = GetShaderLocation(f->shader, "uImpostor");
+  f->locImpostorBake = GetShaderLocation(f->shader, "uImpostorBake");
   f->impostor = (getenv("BRUSH_FOLIAGE_IMPOSTOR") != NULL);
   return f;
 }
 
-// Bake one grass clump (its NEAR mesh + albedo) into an impostor atlas: an
-// orthographic front-view render capturing the lit-neutral albedo + cutout
-// alpha, framed to match BrushFoliageBuildBillboardMesh's cross-quad so the
-// quad's [0,1] UVs map the clump 1:1. Grass is only ever seen from a narrow,
-// near-horizontal pitch, so a single view (reused on both cross planes) reads
-// convincingly at distance — no octahedral angle atlas needed. One-time cost.
-// Stores the render target (owns the texture) + a ready billboard mesh/material.
+// One bake pass: render the clump into `rt` with the given uImpostorBake mode
+// (1 = albedo, 2 = encoded normal) through a manual orthographic front view.
+// The manual rlOrtho matters: raylib's BeginMode3D derives aspect from the
+// SCREEN, not the bound render target, which would distort a non-square atlas.
+static void BrushFoliageBakePass(BrushFoliage *f, Mesh mesh, Texture2D albedo,
+                                 RenderTexture2D rt, float bw, float bh, float D,
+                                 float mode) {
+  float zero = 0.0f, cutoff = 0.3f, vp[3] = {0, 0, D};
+  BeginTextureMode(rt);
+  ClearBackground((Color){0, 0, 0, 0}); // transparent atlas
+  rlDrawRenderBatchActive();
+  rlMatrixMode(RL_PROJECTION);
+  rlPushMatrix();
+  rlLoadIdentity();
+  rlOrtho(-bw, bw, 0.0, bh, 0.01, 2.0 * D); // exact framing -> no aspect distortion
+  rlMatrixMode(RL_MODELVIEW);
+  rlLoadIdentity();
+  rlTranslatef(0.0f, 0.0f, -D); // look down -Z from +Z, no rotation
+
+  SetShaderValue(f->shader, f->locImpostorBake, &mode, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locTime, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locWindStr, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeStart, &zero, SHADER_UNIFORM_FLOAT); // fragFade unused here
+  SetShaderValue(f->shader, f->locAlphaCutoff, &cutoff, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->shader.locs[SHADER_LOC_VECTOR_VIEW], vp, SHADER_UNIFORM_VEC3);
+
+  Material bakeMat = LoadMaterialDefault();
+  bakeMat.shader = f->shader;
+  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
+  bakeMat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+  Matrix idn = MatrixIdentity();
+  rlDisableBackfaceCulling();
+  DrawMeshInstanced(mesh, bakeMat, &idn, 1);
+  rlDrawRenderBatchActive();
+
+  rlMatrixMode(RL_PROJECTION);
+  rlPopMatrix();
+  rlMatrixMode(RL_MODELVIEW);
+  rlLoadIdentity();
+  EndTextureMode();
+
+  bakeMat.shader = (Shader){0}; // shared, not owned
+  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+  UnloadMaterial(bakeMat);
+  SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
+}
+
+// Bake one grass clump into a billboard impostor: two atlases — ALBEDO and a
+// per-texel NORMAL map — captured from the NEAR mesh, framed to match
+// BrushFoliageBuildBillboardMesh's cross-quad so the quad's [0,1] UVs map the
+// clump 1:1. Grass is only ever seen from a narrow, near-horizontal pitch, so a
+// single view (reused on both cross planes) reads convincingly at distance — no
+// octahedral angle atlas. Both channels are LIGHT-INDEPENDENT, so the billboard
+// is lit live at draw with the current sun (see foliage.fs) and tracks day/night
+// with no re-bake and no sudden colour shift. One-time cost.
 static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L, int m,
                                      Texture2D albedo) {
   Mesh mesh = L->nearMesh[m];
@@ -710,70 +761,24 @@ static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L, int 
   int rtH = 256;
   int rtW = (int)lroundf(256.0f * (2.0f * bw) / bh);
   if (rtW < 32) rtW = 32; if (rtW > 1024) rtW = 1024;
-  RenderTexture2D rt = LoadRenderTexture(rtW, rtH);
-  if (rt.id == 0) return;
+  RenderTexture2D albedoRT = LoadRenderTexture(rtW, rtH);
+  RenderTexture2D nrmRT = LoadRenderTexture(rtW, rtH);
+  if (albedoRT.id == 0 || nrmRT.id == 0) return;
 
   float D = bw + bh + 1.0f; // ortho eye distance (rotation-free front view)
-  BeginTextureMode(rt);
-  ClearBackground((Color){0, 0, 0, 0}); // transparent atlas
-  rlDrawRenderBatchActive();
-  rlMatrixMode(RL_PROJECTION);
-  rlPushMatrix();
-  rlLoadIdentity();
-  rlOrtho(-bw, bw, 0.0, bh, 0.01, 2.0 * D); // exact framing -> no aspect distortion
-  rlMatrixMode(RL_MODELVIEW);
-  rlLoadIdentity();
-  rlTranslatef(0.0f, 0.0f, -D); // look down -Z from +Z, no rotation
+  BrushFoliageBakePass(f, mesh, albedo, albedoRT, bw, bh, D, 1.0f); // albedo
+  BrushFoliageBakePass(f, mesh, albedo, nrmRT, bw, bh, D, 2.0f);    // normal
+  float zero = 0.0f;
+  SetShaderValue(f->shader, f->locImpostorBake, &zero, SHADER_UNIFORM_FLOAT); // back to draw mode
 
-  // Fully-lit bake: pull the live scene sun/ambient, then render the clump with
-  // the layer's tint + a representative (mid) macro colour into LINEAR HDR. The
-  // atlas thus stores the mesh's real per-blade shading, output as-is at draw so
-  // the billboard matches the mesh (a flat re-lit card would read too dark).
-  BrushRenderApplySceneLighting(f->shader); // live uSunDir/uSunColor/uAmbient
-  float zero = 0.0f, one = 1.0f, big = 1.0e9f, cutoff = 0.3f, vp[3] = {0, 0, D};
-  Vector3 macroMid = {(L->cfg.macroLow.x + L->cfg.macroHigh.x) * 0.5f,
-                      (L->cfg.macroLow.y + L->cfg.macroHigh.y) * 0.5f,
-                      (L->cfg.macroLow.z + L->cfg.macroHigh.z) * 0.5f};
-  SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locLinearize, &one, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locTime, &zero, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locWindStr, &zero, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locFadeStart, &big, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locFadeEnd, &big, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locFadeNearEnd, &zero, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locMacroLow, &macroMid, SHADER_UNIFORM_VEC3);
-  SetShaderValue(f->shader, f->locMacroHigh, &macroMid, SHADER_UNIFORM_VEC3);
-  SetShaderValue(f->shader, f->locGrassTint, &L->cfg.tint, SHADER_UNIFORM_VEC3);
-  SetShaderValue(f->shader, f->locAlphaCutoff, &cutoff, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->shader.locs[SHADER_LOC_VECTOR_VIEW], vp, SHADER_UNIFORM_VEC3);
-  SetShaderValue(f->shader, GetShaderLocation(f->shader, "uShadowEnabled"), &zero, SHADER_UNIFORM_FLOAT);
-
-  Material bakeMat = LoadMaterialDefault();
-  bakeMat.shader = f->shader;
-  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
-  bakeMat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-  Matrix idn = MatrixIdentity();
-  rlDisableBackfaceCulling();
-  DrawMeshInstanced(mesh, bakeMat, &idn, 1);
-  rlDrawRenderBatchActive();
-
-  rlMatrixMode(RL_PROJECTION);
-  rlPopMatrix();
-  rlMatrixMode(RL_MODELVIEW);
-  rlLoadIdentity();
-  EndTextureMode();
-
-  bakeMat.shader = (Shader){0}; // shared, not owned
-  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
-  UnloadMaterial(bakeMat);
-
-  SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
-  L->impostorRT[m] = rt;
+  L->impostorRT[m] = albedoRT;
+  L->impostorNrmRT[m] = nrmRT;
   L->billboardMesh[m] = BrushFoliageBuildBillboardMesh(mesh);
   L->billboardMat[m] = LoadMaterialDefault();
   L->billboardMat[m].shader = f->shader;
-  L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].texture = rt.texture;
+  L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].texture = albedoRT.texture;
   L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+  L->billboardMat[m].maps[MATERIAL_MAP_NORMAL].texture = nrmRT.texture; // -> texture2
   L->hasImpostor[m] = true;
 }
 
@@ -891,8 +896,10 @@ void BrushFoliageClearLayers(BrushFoliage *f) {
         UnloadMesh(L->billboardMesh[m]);
         L->billboardMat[m].shader = (Shader){0};
         L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+        L->billboardMat[m].maps[MATERIAL_MAP_NORMAL].texture = (Texture2D){0};
         UnloadMaterial(L->billboardMat[m]);
-        UnloadRenderTexture(L->impostorRT[m]); // owns the atlas texture
+        UnloadRenderTexture(L->impostorRT[m]);    // owns the albedo atlas
+        UnloadRenderTexture(L->impostorNrmRT[m]); // owns the normal atlas
       }
       if (L->nearB.buf[m]) MemFree(L->nearB.buf[m]);
       if (L->farB.buf[m]) MemFree(L->farB.buf[m]);
