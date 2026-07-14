@@ -681,7 +681,10 @@ BrushFoliage *BrushFoliageCreate(void) {
   f->locAlphaCutoff = GetShaderLocation(f->shader, "uAlphaCutoff");
   f->locImpostor = GetShaderLocation(f->shader, "uImpostor");
   f->locImpostorBake = GetShaderLocation(f->shader, "uImpostorBake");
-  f->impostor = (getenv("BRUSH_FOLIAGE_IMPOSTOR") != NULL);
+  // Billboard impostor far-tier: ON by default (day/night-correct, ~+21% under
+  // heavy grass load); set BRUSH_FOLIAGE_IMPOSTOR=0 to disable.
+  const char *impEnv = getenv("BRUSH_FOLIAGE_IMPOSTOR");
+  f->impostor = !(impEnv && impEnv[0] == '0');
   return f;
 }
 
