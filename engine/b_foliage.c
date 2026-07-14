@@ -203,6 +203,18 @@ static inline void BatchAppend(BrushFoliageDrawBatch *b, unsigned char mi,
   if (b->count[idx] < b->cap) b->buf[idx][b->count[idx]++] = m;
 }
 
+// LOD cross-fade transition widths. The SAME value must drive three things or
+// the fade tears: the CPU double-draw overlap band (BrushFoliageCull), the
+// outgoing band's height fade-OUT, and the incoming band's height fade-IN (both
+// set as shader windows in the draw). One boundary width for near->far (scaled
+// to the near range) and one for the longer far->billboard->cull edges.
+static inline float BrushFoliageNearTransition(float lodDistance) {
+  return (lodDistance * 0.2f < 5.0f) ? (lodDistance * 0.2f) : 5.0f;
+}
+static inline float BrushFoliageFarTransition(float drawDistance) {
+  return (drawDistance * 0.1f < 10.0f) ? (drawDistance * 0.1f) : 10.0f;
+}
+
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
                       float billboardDistance, BrushFoliageDrawBatch *nearB,
@@ -211,9 +223,12 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
   if (!CullWalkBegin(set, viewPos, viewTarget, drawDistance, &w)) return;
 
   float maxDist2 = drawDistance * drawDistance;
-  float lodDist2 = lodDistance * lodDistance;
   bool useBB = (bbB != NULL && billboardDistance > 0.0f);
-  float bbDist2 = billboardDistance * billboardDistance;
+  // Cross-fade overlap widths, per boundary. The draw computes these with the
+  // SAME helpers, so the outgoing band's height-fade-out and the incoming band's
+  // fade-in line up exactly with this double-draw overlap.
+  float tNear = BrushFoliageNearTransition(lodDistance);
+  float tFar = BrushFoliageFarTransition(drawDistance);
 
   for (int cz = w.startCz; cz != w.endCz + w.stepZ; cz += w.stepZ) {
     for (int cx = w.startCx; cx != w.endCx + w.stepX; cx += w.stepX) {
@@ -226,63 +241,53 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
       float projC = (cwx - viewPos.x) * w.fwdX + (cwz - viewPos.z) * w.fwdZ;
       if (projC < -(w.cellRadiusWorld + 4.0f)) continue;
 
-      for (int k = 0; k < cell->count; k++) {
-        int i = set->gridIndices[cell->offset + k];
-        float dist2;
-        if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, &dist2))
-          continue;
-        unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
-        BrushFoliageDrawBatch *dst = (dist2 < lodDist2) ? nearB
-            : (useBB && dist2 >= bbDist2) ? bbB : farB;
-        BatchAppend(dst, mi, set->transforms[i]);
-      }
-    }
-  }
-}
+      float dx = cwx - viewPos.x;
+      float dz = cwz - viewPos.z;
+      float cDist = sqrtf(dx * dx + dz * dz);
+      float minDist = cDist - w.cellRadiusWorld;
+      float maxDist = cDist + w.cellRadiusWorld;
 
-void BrushFoliageCull3(const BrushFoliageSet *set, Vector3 viewPos,
-                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                       float billboardDistance,
-                       Matrix *outNear, int maxNear, int *nearCount,
-                       Matrix *outFar, int maxFar, int *farCount,
-                       Matrix *outBillboard, int maxBillboard, int *billboardCount) {
-  CullWalk w;
-  if (!CullWalkBegin(set, viewPos, viewTarget, drawDistance, &w)) return;
+      // A cell takes the block-copy fast path only if EVERY instance lands in
+      // one band (no overlap straddle) AND is safely inside the cull cone. The
+      // far band's far edge is the billboard boundary (or the cull edge when the
+      // impostor tier is off) — bounding it here keeps the fast path from
+      // block-copying instances past drawDistance.
+      float farEdge = useBB ? billboardDistance : drawDistance;
+      bool fullyNear = (maxDist < lodDistance - tNear);
+      bool fullyFar = (minDist >= lodDistance && maxDist < farEdge - tFar);
+      bool fullyBB = (useBB && minDist >= billboardDistance && maxDist < drawDistance - tFar);
+      bool fullyInCone = (cDist < 6.0f) || (projC > 0.0f && projC * projC > 0.36f * (dx * dx + dz * dz));
 
-  float maxDist2 = drawDistance * drawDistance;
-  float lodDist2 = lodDistance * lodDistance;
-  float bbDist2 = billboardDistance * billboardDistance;
-  int nc = *nearCount, fc = *farCount, bc = *billboardCount;
-
-  for (int cz = w.startCz; cz != w.endCz + w.stepZ; cz += w.stepZ) {
-    for (int cx = w.startCx; cx != w.endCx + w.stepX; cx += w.stepX) {
-      BrushFoliageGridCell *cell = &set->cells[cz * set->gridResX + cx];
-      if (cell->count == 0) continue;
-
-      float cwx = set->originX + (cx + 0.5f) * set->cellSize;
-      float cwz = set->originZ + (cz + 0.5f) * set->cellSize;
-      float projC = (cwx - viewPos.x) * w.fwdX + (cwz - viewPos.z) * w.fwdZ;
-      if (projC < -(w.cellRadiusWorld + 4.0f)) continue;
-
-      for (int k = 0; k < cell->count; k++) {
-        int i = set->gridIndices[cell->offset + k];
-        float dist2;
-        if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, &dist2))
-          continue;
-        if (dist2 < lodDist2) {
-          if (nc < maxNear) outNear[nc++] = set->transforms[i];
-        } else if (dist2 < bbDist2) {
-          if (fc < maxFar) outFar[fc++] = set->transforms[i];
-        } else {
-          if (bc < maxBillboard) outBillboard[bc++] = set->transforms[i];
+      if (fullyInCone && (fullyNear || fullyFar || fullyBB)) {
+        BrushFoliageDrawBatch *dst = fullyNear ? nearB : (fullyFar ? farB : bbB);
+        for (int k = 0; k < cell->count; k++) {
+          int i = set->gridIndices[cell->offset + k];
+          unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
+          BatchAppend(dst, mi, set->transforms[i]);
+        }
+      } else {
+        for (int k = 0; k < cell->count; k++) {
+          int i = set->gridIndices[cell->offset + k];
+          float dist2;
+          if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, &dist2))
+            continue;
+          float dist = sqrtf(dist2);
+          unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
+          // Bands overlap by their transition width so the outgoing/incoming
+          // meshes cross-fade (double-drawn there, each height-faded).
+          if (dist < lodDistance) {
+            BatchAppend(nearB, mi, set->transforms[i]);
+          }
+          if (dist >= lodDistance - tNear && (!useBB || dist < billboardDistance)) {
+            BatchAppend(farB, mi, set->transforms[i]);
+          }
+          if (useBB && dist >= billboardDistance - tFar) {
+            BatchAppend(bbB, mi, set->transforms[i]);
+          }
         }
       }
     }
   }
-
-  *nearCount = nc;
-  *farCount = fc;
-  *billboardCount = bc;
 }
 
 void BrushFoliageSetCleanup(BrushFoliageSet *set) {
@@ -639,7 +644,8 @@ struct BrushFoliage {
   BrushFoliageQuality quality;
   float qualityScale;  // draw-distance multiplier from the preset
   bool qualityShadows; // whether foliage samples the shadow map
-  int locTime, locWindDir, locWindStr, locFadeStart, locFadeEnd, locFadeNearEnd;
+  int locTime, locWindDir, locWindStr, locFadeStart, locFadeEnd;
+  int locFadeNearStart, locFadeNearEnd;
   int locMacroLow, locMacroHigh, locGrassTint, locAlphaCutoff;
   int locImpostor;     // 1 = billboard draw (albedo atlas + baked-normal lighting)
   int locImpostorBake; // bake pass: 1 = emit albedo, 2 = emit encoded normal
@@ -674,6 +680,7 @@ BrushFoliage *BrushFoliageCreate(void) {
   f->locWindStr = GetShaderLocation(f->shader, "uWindStrength");
   f->locFadeStart = GetShaderLocation(f->shader, "uFadeStart");
   f->locFadeEnd = GetShaderLocation(f->shader, "uFadeEnd");
+  f->locFadeNearStart = GetShaderLocation(f->shader, "uFadeNearStart");
   f->locFadeNearEnd = GetShaderLocation(f->shader, "uFadeNearEnd");
   f->locMacroLow = GetShaderLocation(f->shader, "uMacroLow");
   f->locMacroHigh = GetShaderLocation(f->shader, "uMacroHigh");
@@ -1084,6 +1091,8 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
   int nv = BrushWorldGetActiveChunks(f->world, views, 2048);
   if (nv == 0) return;
 
+  BrushFrustum frustum = BrushRenderMakeFrustum(cam);
+
   rlDisableBackfaceCulling(); // grass cards are two-sided
   for (int li = 0; li < f->layerCount; li++) {
     BrushFoliageLayer *L = &f->layers[li];
@@ -1100,6 +1109,27 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     for (int ci = 0; ci < nv; ci++) {
       FoliageChunkHandle *H = (FoliageChunkHandle *)views[ci].handle;
       if (li >= H->setCount) continue;
+
+      // Distance culling: closest point on chunk's XZ AABB to camera
+      float camX = cam.position.x;
+      float camZ = cam.position.z;
+      float minX = views[ci].origin.x;
+      float minZ = views[ci].origin.z;
+      float maxX = minX + views[ci].size;
+      float maxZ = minZ + views[ci].size;
+      float dx = (camX < minX) ? (minX - camX) : ((camX > maxX) ? (camX - maxX) : 0.0f);
+      float dz = (camZ < minZ) ? (minZ - camZ) : ((camZ > maxZ) ? (camZ - maxZ) : 0.0f);
+      if (dx * dx + dz * dz > draw * draw) continue;
+
+      // Frustum culling: chunk AABB with foliage height padding
+      float pad = L->cfg.scale * 10.0f;
+      if (pad < 5.0f) pad = 5.0f;
+      BoundingBox chunkBox = {
+        .min = { minX, -50.0f, minZ },
+        .max = { maxX, views[ci].maxY + pad, maxZ }
+      };
+      if (!BrushFrustumContainsBox(&frustum, chunkBox)) continue;
+
       BrushFoliageCull(&H->sets[li], cam.position, cam.target, draw, lod,
                        bbDist, &L->nearB, &L->farB, &L->bbB);
     }
@@ -1115,11 +1145,7 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     SetShaderValue(f->shader, f->locTime, &f->time, SHADER_UNIFORM_FLOAT);
     SetShaderValue(f->shader, f->locWindDir, &f->windDir, SHADER_UNIFORM_VEC2);
     SetShaderValue(f->shader, f->locWindStr, &wind, SHADER_UNIFORM_FLOAT);
-    float fadeStart = draw * 0.72f;
-    float fadeNearEnd = 0.0f, cutoff = 0.3f;
-    SetShaderValue(f->shader, f->locFadeStart, &fadeStart, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(f->shader, f->locFadeEnd, &draw, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(f->shader, f->locFadeNearEnd, &fadeNearEnd, SHADER_UNIFORM_FLOAT);
+    float cutoff = 0.3f;
     SetShaderValue(f->shader, f->locMacroLow, &L->cfg.macroLow, SHADER_UNIFORM_VEC3);
     SetShaderValue(f->shader, f->locMacroHigh, &L->cfg.macroHigh, SHADER_UNIFORM_VEC3);
     SetShaderValue(f->shader, f->locGrassTint, &L->cfg.tint, SHADER_UNIFORM_VEC3);
@@ -1131,22 +1157,56 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
                      &off, SHADER_UNIFORM_FLOAT);
     }
 
+    // Transition widths MUST match BrushFoliageCull's overlap bands (shared
+    // helpers) so each band's height fade-out and the next band's fade-in line
+    // up exactly with the double-draw region — a clean 0<->100% cross-fade.
+    float tNear = BrushFoliageNearTransition(lod);
+    float tFar = BrushFoliageFarTransition(draw);
+    float bbEdge = (bbDist > 0.0f) ? bbDist : draw; // far band's far edge
+
+    // Per-band height-fade window: fade IN over [nearStart, nearEnd] (grow from
+    // the ground as the previous band shrinks out) and fade OUT over
+    // [fadeStart, fadeEnd]. nearEnd == 0 disables the fade-in (the near band).
+    #define BRUSH_FOLIAGE_SET_FADE(nStart, nEnd, oStart, oEnd) do { \
+      float _ns=(nStart), _ne=(nEnd), _os=(oStart), _oe=(oEnd); \
+      SetShaderValue(f->shader, f->locFadeNearStart, &_ns, SHADER_UNIFORM_FLOAT); \
+      SetShaderValue(f->shader, f->locFadeNearEnd, &_ne, SHADER_UNIFORM_FLOAT); \
+      SetShaderValue(f->shader, f->locFadeStart, &_os, SHADER_UNIFORM_FLOAT); \
+      SetShaderValue(f->shader, f->locFadeEnd, &_oe, SHADER_UNIFORM_FLOAT); \
+    } while (0)
+
     // Lit mesh bands first (near + far LOD), one instanced draw per variant.
     if (f->impostor) {
       float zero = 0.0f;
       SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
     }
-    for (int m = 0; m < L->meshCount; m++) {
-      if (L->nearB.count[m] > 0)
-        DrawMeshInstanced(L->nearMesh[m], L->material[m], L->nearB.buf[m], L->nearB.count[m]);
-      if (L->farB.count[m] > 0)
-        DrawMeshInstanced(L->hasFar[m] ? L->farMesh[m] : L->nearMesh[m],
-                          L->material[m], L->farB.buf[m], L->farB.count[m]);
+
+    // Draw Near Mesh: no fade-in, fade OUT over [lod - tNear, lod].
+    {
+      BRUSH_FOLIAGE_SET_FADE(0.0f, 0.0f, lod - tNear, lod);
+      for (int m = 0; m < L->meshCount; m++) {
+        if (L->nearB.count[m] > 0)
+          DrawMeshInstanced(L->nearMesh[m], L->material[m], L->nearB.buf[m], L->nearB.count[m]);
+      }
     }
-    // Billboard band: pre-lit atlas output as-is (uImpostor), one draw / variant.
+
+    // Draw Far Mesh: fade IN over [lod - tNear, lod] (matches the near band's
+    // fade-out), fade OUT over [bbEdge - tFar, bbEdge].
+    {
+      BRUSH_FOLIAGE_SET_FADE(lod - tNear, lod, bbEdge - tFar, bbEdge);
+      for (int m = 0; m < L->meshCount; m++) {
+        if (L->farB.count[m] > 0)
+          DrawMeshInstanced(L->hasFar[m] ? L->farMesh[m] : L->nearMesh[m],
+                            L->material[m], L->farB.buf[m], L->farB.count[m]);
+      }
+    }
+
+    // Billboard band: fade IN over [bbDist - tFar, bbDist] (matches the far
+    // band's fade-out), fade OUT over [draw - tFar, draw]. Pre-lit atlas.
     if (bc > 0) {
       float one = 1.0f;
       SetShaderValue(f->shader, f->locImpostor, &one, SHADER_UNIFORM_FLOAT);
+      BRUSH_FOLIAGE_SET_FADE(bbDist - tFar, bbDist, draw - tFar, draw);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->bbB.count[m] > 0 && L->hasImpostor[m])
           DrawMeshInstanced(L->billboardMesh[m], L->billboardMat[m],
@@ -1155,6 +1215,7 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       float zero = 0.0f;
       SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
     }
+    #undef BRUSH_FOLIAGE_SET_FADE
   }
   rlEnableBackfaceCulling();
 }

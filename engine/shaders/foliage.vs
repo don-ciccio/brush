@@ -21,7 +21,8 @@ uniform vec3 viewPos;
 // to nothing exactly as they are culled — no pop). uFadeEnd == drawDistance.
 uniform float uFadeStart;
 uniform float uFadeEnd;
-uniform float uFadeNearEnd; // if > 0, fade IN from 0 to this distance (far layers)
+uniform float uFadeNearStart; // fade-IN begins here — grow from the ground
+uniform float uFadeNearEnd;   // if > 0, fade IN completes here (far/billboard bands)
 
 // Macro-color ramp endpoints (data-driven per layer; neutral greens by default).
 uniform vec3 uMacroLow;
@@ -76,8 +77,7 @@ void main() {
     float grassFade = smoothstep(1.0, 0.0, fadeNorm);
     float nearFade = 1.0;
     if (uFadeNearEnd > 0.0) {
-        float nearStart = uFadeNearEnd * 0.70;
-        nearFade = clamp((instDist - nearStart) / max(uFadeNearEnd - nearStart, 0.001), 0.0, 1.0);
+        nearFade = clamp((instDist - uFadeNearStart) / max(uFadeNearEnd - uFadeNearStart, 0.001), 0.0, 1.0);
     }
     float heightScale = grassFade * nearFade;
 

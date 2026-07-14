@@ -118,16 +118,6 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       float billboardDistance, BrushFoliageDrawBatch *nearB,
                       BrushFoliageDrawBatch *farB, BrushFoliageDrawBatch *bbB);
 
-// 3-tier cull: near (< lodDistance), far (< billboardDistance), billboard
-// (< drawDistance) — each appended to its own caller buffer, so the three
-// bands become three draw calls with no cross-chunk ordering constraint.
-void BrushFoliageCull3(const BrushFoliageSet *set, Vector3 viewPos,
-                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                       float billboardDistance,
-                       Matrix *outNear, int maxNear, int *nearCount,
-                       Matrix *outFar, int maxFar, int *farCount,
-                       Matrix *outBillboard, int maxBillboard, int *billboardCount);
-
 // Free the set's instance + grid buffers (safe on a zeroed/partial set).
 void BrushFoliageSetCleanup(BrushFoliageSet *set);
 
