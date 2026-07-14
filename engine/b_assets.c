@@ -1055,7 +1055,19 @@ static Model BrushLoadOBJModel(const char *path) {
   mesh.vertices = ov;
   mesh.texcoords = ot;
   mesh.normals = on;
-  Model model = LoadModelFromMesh(mesh); // uploads + attaches a default material
+  UploadMesh(&mesh, false); // allocate + fill the GPU buffers (vaoId/vboId) —
+                            // LoadModelFromMesh does NOT upload, and downstream
+                            // grounding calls UpdateMeshBuffer, which needs vboId.
+  Model model = {0};
+  model.transform = MatrixIdentity();
+  model.meshCount = 1;
+  model.meshes = (Mesh *)MemAlloc(sizeof(Mesh));
+  model.meshes[0] = mesh;
+  model.materialCount = 1;
+  model.materials = (Material *)MemAlloc(sizeof(Material));
+  model.materials[0] = LoadMaterialDefault();
+  model.meshMaterial = (int *)MemAlloc(sizeof(int));
+  model.meshMaterial[0] = 0;
   return model;
 }
 
