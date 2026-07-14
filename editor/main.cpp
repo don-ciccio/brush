@@ -303,7 +303,12 @@ static void BuildFoliageLayers() {
             Texture2D t = (mdl->materialCount > 0)
                 ? mdl->materials[mat].maps[MATERIAL_MAP_DIFFUSE].texture
                 : (Texture2D){0};
-            c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
+            // A model with no real base-colour texture carries raylib's 1x1
+            // default (white) here — treat that as "none" so we fall back to the
+            // layer Albedo / procedural gradient (tint then colours it) instead
+            // of rendering flat white.
+            bool realTex = (t.id != 0 && (t.width > 1 || t.height > 1));
+            c.albedos[mc] = realTex ? t : fl->albedoTex;
             c.meshScale[mc] = fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f;
             mc++;
         }

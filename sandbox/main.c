@@ -432,7 +432,10 @@ static void SandboxInit(void *user) {
       Texture2D t = (mdl->materialCount > 0)
           ? mdl->materials[mat].maps[MATERIAL_MAP_DIFFUSE].texture
           : (Texture2D){0};
-      c.albedos[mc] = (t.id != 0) ? t : fl->albedoTex;
+      // raylib's 1x1 default (white) texture means "no real texture" -> fall
+      // back to the layer Albedo / procedural gradient instead of flat white.
+      bool realTex = (t.id != 0 && (t.width > 1 || t.height > 1));
+      c.albedos[mc] = realTex ? t : fl->albedoTex;
       c.meshScale[mc] = fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f;
       mc++;
     }
