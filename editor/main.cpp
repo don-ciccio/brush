@@ -2218,11 +2218,12 @@ int main(int argc, char **argv) {
                                        1.0f)) matEdited = true;
                 if (reresolve) BrushSceneResolveMaterials(&g_scene);
                 if (matEdited || reresolve) {
-                    // A material may back a terrain layer; re-push so the world
-                    // re-bakes with the new textures/flags (POM, tile, …). Blocks
-                    // and models rebuild their props each frame, but terrain
-                    // layers are cached in the world.
+                    // A material may back a terrain layer OR the road surface;
+                    // both are cached in the world, so re-push them to pick up
+                    // the new textures/flags (POM, height-blend, tile, …). Blocks
+                    // and models rebuild their props each frame.
                     ApplyTerrainLayers();
+                    SyncRoadsToWorld();
                     g_dirty = true;
                 }
                 if (ImGui::SmallButton("Rescan texture folder"))
