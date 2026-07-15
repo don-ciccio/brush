@@ -2,7 +2,7 @@
 version 4
 
 spawn 0 0.5 6
-time 12.4215
+time 13.3968
 
 # block  x y z  rx ry rz  sx sy sz  r g b  material
 
@@ -30,11 +30,11 @@ post volfog_top 3
 post volfog_coverage 0.44
 post shadow_softness 4
 
-# foliage  name model albedo  density drawD lodD  scale jitter hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)  growLayer avoidLayer avoidThreshold modelScale0 avoidRoad minHeight maxHeight
-foliage grass assets/models/Grass1.glb - 0.5 72 26 1 0.4 -0.02 42 0.5 0.4 1.7 1.8 1.4 0 0 0 0 0 0 -1 -1 0.5 5 1 0 0
+# foliage  name model albedo  density drawD lodD  scale jitter hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)  growLayer avoidLayer avoidThreshold modelScale0 avoidRoad minHeight maxHeight biomeId
+foliage grass assets/models/Grass1.glb - 0.5 72 26 1 0.4 -0.02 42 0.5 0.4 1.7 1.8 1.4 0 0 0 0 0 0 -1 -1 0.5 5 1 0 0 0
 foliage_model assets/models/Grass4.glb 2.5
 foliage_model assets/models/Grass_5.glb 6.2
-foliage poppies assets/models/RedPoppy.glb - 0.12 55 22 1 0.2 0 42 0.7 0.4 1 1 1 0 0 0 0 0 0 -1 -1 0.5 1.5 1 0 0
+foliage poppies assets/models/RedPoppy.glb - 0.12 55 22 1 0.2 0 42 0.7 1 1 1 1 0 0 0 0 0 0 -1 -1 0.5 1.5 1 0 0 1
 
 # biome  name id  r g b  [priority] [p0 p1 p2 p3]
 biome meadow 0 76 166 64 0 -1 -1 -1 -1
@@ -42,5 +42,5 @@ biome drygrass 1 217 191 89 0 -1 -1 -1 -1
 biome desert 2 204 115 77 0 -1 -1 -1 -1
 biome highland 3 51 140 178 0 -1 -1 -1 -1
 biome forest 4 102 191 140 0 -1 -1 -1 -1
-biome_climate 260 220 0.006 0 50 10 1337
+biome_climate 110 95 0.008 0 40 8 1337
 biome_whittaker 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 3 1 1 1 0 0 0 4 4 1 1 1 0 0 0 4 4 1 1 1 0 0 0 4 4 1 1 1 0 0 0 4 4 2 2 2 2 0 0 0 0 2 2 2 2 0 0 0 0

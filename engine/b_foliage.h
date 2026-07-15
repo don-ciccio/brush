@@ -195,6 +195,8 @@ typedef struct BrushFoliageLayerConfig {
   float avoidThreshold; // 0..1 (0 -> default 0.5)
   bool  avoidRoad;      // exclude foliage from the road surface (road coverage
                         // mask, independent of the terrain layers)
+  int   biomeId;        // grow only in this biome (-1 = all biomes); density is
+                        // scaled by the biome weight so layers fade at borders
 } BrushFoliageLayerConfig;
 
 typedef struct BrushFoliage BrushFoliage;

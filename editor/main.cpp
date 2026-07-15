@@ -295,6 +295,7 @@ static void BuildFoliageLayers() {
         c.avoidLayer = fl->avoidLayer;
         c.avoidThreshold = fl->avoidThreshold;
         c.avoidRoad = fl->avoidRoad;
+        c.biomeId = fl->biomeId;
         // Model palette: mesh + texture per resolved variant ({0} -> procedural).
         int mc = 0;
         for (int m = 0; m < fl->modelCount; m++) {
@@ -749,6 +750,12 @@ static void ApplyTerrainLayers() {
                            g_scene.autoSlopeStart, g_scene.autoSlopeEnd);
     BrushWorldSetLayerHeights(g_world, g_scene.layerHeightOn,
                               g_scene.layerHeightStart, g_scene.layerHeightFull);
+    // Biome field: without this the editor world has no biomes, so biome-gated
+    // foliage (e.g. poppies -> drygrass) gets zero weight and never scatters in
+    // the preview even though it appears in the running game.
+    BrushBiomeClimate cl;
+    BrushWorldSetBiomeClimate(g_world,
+                              BrushSceneBiomeClimate(&g_scene, &cl) ? &cl : NULL);
 }
 
 static void ReloadScene() {
@@ -2801,6 +2808,22 @@ int main(int argc, char **argv) {
                         if (ImGui::Selectable(TerrainSlotLabel(i), fl->avoidLayer == i)) { fl->avoidLayer = i; g_dirty = true; g_foliageResyncPending = true; }
                     }
                     ImGui::EndCombo();
+                }
+                // Biome gate: grow only in one biome; density fades across the
+                // border. Needs biomes defined in the scene (v4).
+                {
+                    const char *cur = "all biomes";
+                    if (fl->biomeId >= 0)
+                        for (int i = 0; i < g_scene.biomeCount; i++)
+                            if (g_scene.biomes[i].id == fl->biomeId) { cur = g_scene.biomes[i].name; break; }
+                    if (ImGui::BeginCombo("Biome", cur)) {
+                        if (ImGui::Selectable("all biomes", fl->biomeId < 0)) { fl->biomeId = -1; g_dirty = true; g_foliageResyncPending = true; }
+                        for (int i = 0; i < g_scene.biomeCount; i++) {
+                            const BrushSceneBiome *bm = &g_scene.biomes[i];
+                            if (ImGui::Selectable(bm->name[0] ? bm->name : "?", fl->biomeId == bm->id)) { fl->biomeId = bm->id; g_dirty = true; g_foliageResyncPending = true; }
+                        }
+                        ImGui::EndCombo();
+                    }
                 }
                 if (fl->avoidLayer >= 0) {
                     if (fl->avoidThreshold <= 0.0f) fl->avoidThreshold = 0.5f;

@@ -425,7 +425,8 @@ static void SandboxInit(void *user) {
         .growLayer = fl->growLayer,
         .avoidLayer = fl->avoidLayer,
         .avoidThreshold = fl->avoidThreshold,
-        .avoidRoad = fl->avoidRoad};
+        .avoidRoad = fl->avoidRoad,
+        .biomeId = fl->biomeId};
     // Model palette: mesh + texture per resolved variant ({0} -> procedural).
     int mc = 0;
     for (int m = 0; m < fl->modelCount; m++) {

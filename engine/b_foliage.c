@@ -1085,6 +1085,21 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     if (s->cfg->maxSlopeDeg > 0.0f &&
         acosf(ny) * 57.29578f > s->cfg->maxSlopeDeg) continue; // too steep
 
+    // Biome gate: grow only in this layer's biome, thinning to nothing across
+    // the border (the neighbour biome's layers fade in over the same band, so
+    // total density is conserved). Probabilistic reject on a distinct hash slice.
+    if (s->cfg->biomeId >= 0 && s->s->biomeAt) {
+      BrushBiomeSample bs;
+      s->s->biomeAt(s->s->ctx, jx, jz, &bs);
+      float bw = (bs.id0 == s->cfg->biomeId) ? (1.0f - bs.blend) : 0.0f;
+      if (bs.id1 == s->cfg->biomeId) bw += bs.blend;
+      if (bw <= 0.001f) continue;
+      if (bw < 1.0f) {
+        float rp = (float)((h >> 3) & 0xffff) / 65535.0f;
+        if (rp > bw) continue;
+      }
+    }
+
     // Random model variant (deterministic per instance), then scale by that
     // variant's own factor so mixed meshes (rock + grass) size independently.
     unsigned char mi = (s->meshCount > 1)
@@ -1243,19 +1258,26 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       SetShaderValue(f->shader, f->locImpostor, &zero, SHADER_UNIFORM_FLOAT);
     }
 
-    // Draw Near Mesh: no fade-in, fade OUT over [lod - tNear, lod].
+    // Draw Near Mesh: no fade-in, fade OUT over the SECOND half of the overlap
+    // [lod - tNear/2, lod]. Offsetting so the near mesh only starts shrinking
+    // AFTER the far mesh has reached full height (see below) keeps the visible
+    // height ~constant across the crossfade — otherwise both copies sit at ~50%
+    // height in the middle of the band and the grass reads as lying flat, then
+    // "standing up" as you approach.
     {
-      BRUSH_FOLIAGE_SET_FADE(0.0f, 0.0f, lod - tNear, lod);
+      BRUSH_FOLIAGE_SET_FADE(0.0f, 0.0f, lod - tNear * 0.5f, lod);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->nearB.count[m] > 0)
           DrawMeshInstanced(L->nearMesh[m], L->material[m], L->nearB.buf[m], L->nearB.count[m]);
       }
     }
 
-    // Draw Far Mesh: fade IN over [lod - tNear, lod] (matches the near band's
-    // fade-out), fade OUT over [bbEdge - tFar, bbEdge].
+    // Draw Far Mesh: fade IN over the FIRST half of the overlap [lod - tNear,
+    // lod - tNear/2] (full by the midpoint, before the near mesh fades), fade
+    // OUT over [bbEdge - tFar, bbEdge]. The detail swap happens at the midpoint
+    // where BOTH are full height, so it's a subtle mesh change, not a height dip.
     {
-      BRUSH_FOLIAGE_SET_FADE(lod - tNear, lod, bbEdge - tFar, bbEdge);
+      BRUSH_FOLIAGE_SET_FADE(lod - tNear, lod - tNear * 0.5f, bbEdge - tFar, bbEdge);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->farB.count[m] > 0)
           DrawMeshInstanced(L->hasFar[m] ? L->farMesh[m] : L->nearMesh[m],
