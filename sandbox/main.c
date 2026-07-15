@@ -36,7 +36,8 @@ typedef struct Sandbox {
   Vector3 vel;
   float yaw, prevYaw; // radians
   bool grounded;
-  bool jumpQueued;
+  float coyoteTimer;
+  float jumpBufferTimer;
 
   // Render state (interpolated)
   Vector3 renderPos;
@@ -413,6 +414,8 @@ static void SandboxInit(void *user) {
         .scale = fl->scale,
         .scaleJitter = fl->scaleJitter,
         .heightOffset = fl->heightOffset,
+        .minHeight = fl->minHeight,
+        .maxHeight = fl->maxHeight,
         .maxSlopeDeg = fl->maxSlopeDeg,
         .windStrength = fl->windStrength,
         .farKeepRatio = fl->farKeepRatio,
@@ -618,7 +621,7 @@ static void SandboxFixedUpdate(void *user, float dt) {
   // capsule Y + ground state for each fixed step around the landing.
   if (getenv("BRUSH_AUTO_JUMP") != NULL) {
     static int jf = 0;
-    if (++jf % 90 == 0) s->jumpQueued = true;
+    if (++jf % 90 == 0) s->jumpBufferTimer = 0.15f;
     TraceLog(LOG_INFO, "LANDDBG t=%d y=%+.4f velY=%+.3f grounded=%d state=%d",
              jf, s->pos.y, s->velY, s->grounded,
              (int)BrushAnimatorState(&s->animator));
@@ -680,7 +683,7 @@ static void SandboxFixedUpdate(void *user, float dt) {
     s->airTime = 0.0f;
     s->ikWeight = 0.0f;
     s->stepSmooth = 0.0f; // the scripted ride is already smooth
-    s->jumpQueued = false;
+    s->jumpBufferTimer = 0.0f;
     return;
   }
 
@@ -721,11 +724,20 @@ static void SandboxFixedUpdate(void *user, float dt) {
   s->vel.x += (wishVel.x - s->vel.x) * blend;
   s->vel.z += (wishVel.z - s->vel.z) * blend;
 
+  if (s->jumpBufferTimer > 0.0f) {
+    s->jumpBufferTimer -= dt;
+  }
+  if (s->grounded) {
+    s->coyoteTimer = 0.15f;
+  } else {
+    s->coyoteTimer -= dt;
+  }
+
   // --- Mantle detection: jumping while facing a waist-to-chest-high ledge
   // climbs it instead (UAL2's ClimbUp_1m). Chest ray finds the face, a probe
   // over the lip finds a standable top; taller obstacles (walls, stacked
   // crates) reject on the rise limit and fall through to a normal jump.
-  if (s->jumpQueued && s->grounded) {
+  if (s->jumpBufferTimer > 0.0f && (s->grounded || s->coyoteTimer > 0.0f)) {
     Vector3 fwd = {sinf(s->yaw), 0.0f, cosf(s->yaw)};
     Vector3 chest = Vector3Add(s->pos, (Vector3){0.0f, 0.7f, 0.0f});
     Vector3 wallHit, wallN;
@@ -752,7 +764,8 @@ static void SandboxFixedUpdate(void *user, float dt) {
             s->mantleTo = (Vector3){wallHit.x + into.x * 0.4f, topHit.y,
                                     wallHit.z + into.z * 0.4f};
             s->yaw = atan2f(into.x, into.z);
-            s->jumpQueued = false;
+            s->jumpBufferTimer = 0.0f;
+            s->coyoteTimer = 0.0f;
           }
         }
       }
@@ -761,12 +774,13 @@ static void SandboxFixedUpdate(void *user, float dt) {
 
   // Jump + gravity; the kinematic capsule handles collision, wall sliding,
   // slopes, and stair steps.
-  if (s->jumpQueued && s->grounded) {
+  if (s->jumpBufferTimer > 0.0f && (s->grounded || s->coyoteTimer > 0.0f)) {
     s->velY = JUMP_VELOCITY;
     s->grounded = false;
     s->airTime = 0.1f; // trip the debounced flag NOW so takeoff isn't delayed
+    s->jumpBufferTimer = 0.0f;
+    s->coyoteTimer = 0.0f;
   }
-  s->jumpQueued = false;
   if (!s->grounded) s->velY -= GRAVITY * dt;
   else if (s->velY < 0.0f) s->velY = -2.0f; // gentle stick-to-floor bias
 
@@ -872,8 +886,8 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
     return; // no gameplay input while the menu is up
   }
 
-  // Latch jump between fixed steps so a tap on a fast frame isn't lost.
-  if (BrushInputPressed(BRUSH_BTN_JUMP)) s->jumpQueued = true;
+  // Latch jump for 0.15s (jump buffer) so a tap on a fast frame or right before landing isn't lost.
+  if (BrushInputPressed(BRUSH_BTN_JUMP)) s->jumpBufferTimer = 0.15f;
 
   // Roll: one-shot anim + a short forward movement burst.
   if (BrushInputPressed(BRUSH_BTN_ROLL) && s->grounded &&
@@ -1025,8 +1039,11 @@ static void SandboxDraw(void *user) {
                           hasMat ? &mprops : NULL);
       modelsSubmitted++;
     }
-    if (d2 <= shadowD2)
+    if (d2 <= shadowD2) {
+      BoundingBox sb = { .min = { c.x - r, c.y - r, c.z - r }, .max = { c.x + r, c.y + r, c.z + r } };
+      BrushRenderSetNextBounds(sb);
       BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, xf, WHITE);
+    }
   }
   if (cullDbg)
     TraceLog(LOG_INFO, "CULL: models %d/%d submitted", modelsSubmitted,

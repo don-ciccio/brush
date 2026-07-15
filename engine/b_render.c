@@ -48,6 +48,7 @@ typedef struct BrushRenderState {
   int pomQuality; // 0 = off, 1 = POM, 2 = POM + self-shadow (BRUSH_POM)
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
+  int locLayerRoughness; // per-layer terrain roughness (shiny/matte)
   int locGrassGroundColor, locGrassGroundStrength, locGrassGrowLayer, locGrassGroundFar;
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
   int locPomLayer, locPomTile, locPomScale;
@@ -143,6 +144,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locSplatSize = GetShaderLocation(g_r.lit, "uSplatSize");
   g_r.locSplatRes = GetShaderLocation(g_r.lit, "uSplatRes");
   g_r.locLayerTiles = GetShaderLocation(g_r.lit, "uLayerTiles");
+  g_r.locLayerRoughness = GetShaderLocation(g_r.lit, "uLayerRoughness");
   g_r.locLayerSwizzled = GetShaderLocation(g_r.lit, "uLayerSwizzled");
   g_r.locLayerCount = GetShaderLocation(g_r.lit, "uLayerCount");
   g_r.locAutoSlope = GetShaderLocation(g_r.lit, "uAutoSlope");
@@ -501,6 +503,11 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   float size = sp->size;
   float res = (float)sp->res;
   float tiles[4], swiz[4];
+  // Per-layer roughness: default matte (0.95) where a layer is absent or unset,
+  // so existing scenes stay matte and only authored layers turn shiny.
+  float rough[4] = {0.95f, 0.95f, 0.95f, 0.95f};
+  for (int i = 0; i < sp->layerCount && i < 4; i++)
+    if (sp->layers[i].roughness > 0.0f) rough[i] = sp->layers[i].roughness;
   // Normal mapping is on if ANY painted layer carries a normal (was gated on
   // layer 0 only — a textured layer 1..3 would never light). Intensity comes
   // from the first layer that has one (default 1.0); without this the terrain
@@ -539,6 +546,7 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locSplatSize, &size, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSplatRes, &res, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locLayerTiles, tiles, SHADER_UNIFORM_VEC4);
+  SetShaderValue(g_r.lit, g_r.locLayerRoughness, rough, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNrm, SHADER_UNIFORM_FLOAT);

@@ -169,6 +169,8 @@ typedef struct BrushFoliageLayerConfig {
   float scale;          // base instance scale
   float scaleJitter;    // +/- fraction of random scale variation (0..1)
   float heightOffset;   // sink into ground to avoid floaters
+  float minHeight;      // don't grow below this altitude
+  float maxHeight;      // don't grow above this altitude
   float maxSlopeDeg;    // skip terrain steeper than this (0 = no limit)
   float windStrength;   // per-layer sway amount
   float farKeepRatio;   // far-LOD decimation (1 = no far LOD, share near mesh)

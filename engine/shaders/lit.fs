@@ -66,6 +66,7 @@ uniform float uSplatRes;   // splat texture resolution per side
 uniform vec4 uLayerTiles;  // metres per repeat, per layer
 uniform vec4 uLayerSwizzled; // DXT5nm flag per layer
 uniform int uLayerCount;
+uniform vec4 uLayerRoughness; // per-layer terrain roughness (0 smooth/shiny .. 1 matte)
 // Grass-ground tint (foliage F3): the ground reads as a grass field where the
 // foliage grow-layer sits, so the terrain doesn't end in bare dirt past the 3D
 // blades. Pure uniform + reuses the splat weights (no sampler). strength 0 = off;
@@ -415,6 +416,7 @@ void main()
     vec3 geoN = normalize(fragNormal);
     float pomShadow = 1.0; // POM self-shadow, applied to the sun term below
     float gGrassMask = 0.0; // grass-ground coverage (set in the tint blocks) -> grass specular
+    float gTerrainRough = 0.95; // per-layer weighted roughness (set in the splat block)
     vec3 triW = TriplanarWeights(geoN);
     float ts = max(uTexScale, 0.001);
 
@@ -568,6 +570,10 @@ void main()
             }
         }
 
+        // Per-layer roughness, weighted by the FINAL splat weights (sw is local
+        // to this block, so it must be captured here for the lighting section).
+        gTerrainRough = clamp(dot(sw, uLayerRoughness), 0.0, 1.0);
+
         // Steep surfaces get full triplanar per layer; flat ground keeps
         // the cheap single XZ projection.
         bool steep = (geoN.y < 0.85);
@@ -659,12 +665,21 @@ void main()
                 vec3 roadBump = vec3(0.0);
                 if (uRoadHasHeight > 0.5) {
                     vec2 ruv = wpRoad.xz / uRoadTile;
-                    float e = 0.003;
-                    float hL = texture(uLayerHeight, ruv - vec2(e, 0.0)).r;
-                    float hR = texture(uLayerHeight, ruv + vec2(e, 0.0)).r;
-                    float hD = texture(uLayerHeight, ruv - vec2(0.0, e)).r;
-                    float hU = texture(uLayerHeight, ruv + vec2(0.0, e)).r;
-                    roadBump = vec3(-(hR - hL), 0.0, -(hU - hD)) * (uRoadPomScale * 25.0);
+                    float rdist = length(viewPos - fragPosition);
+                    // Push the height samples to coarser mips with distance (like
+                    // the terrain nbias) AND widen the central-difference footprint,
+                    // so the derived normal low-passes instead of catching per-texel
+                    // joint noise — that noise is what reads as fuzz on the paving.
+                    float rbias = clamp((rdist - 8.0) * 0.06, 0.0, 3.0);
+                    float e = 0.003 * (1.0 + rbias);
+                    float hL = texture(uLayerHeight, ruv - vec2(e, 0.0), rbias).r;
+                    float hR = texture(uLayerHeight, ruv + vec2(e, 0.0), rbias).r;
+                    float hD = texture(uLayerHeight, ruv - vec2(0.0, e), rbias).r;
+                    float hU = texture(uLayerHeight, ruv + vec2(0.0, e), rbias).r;
+                    // Ease the relief toward flat far out so distant paving is smooth.
+                    float bumpFade = 1.0 - smoothstep(24.0, 48.0, rdist);
+                    roadBump = vec3(-(hR - hL), 0.0, -(hU - hD)) *
+                               (uRoadPomScale * 25.0 * bumpFade);
                 }
                 splatBump = mix(splatBump, roadBump, rm);
             }
@@ -760,9 +775,13 @@ void main()
         ao = 1.0 - (1.0 - ao) * uAoStrength;
     }
     
-    // For terrain splat, we default to matte (since we haven't implemented per-layer roughness yet)
+    // Per-layer terrain roughness: shiny mud vs matte grass. Drives BOTH the
+    // Oren-Nayar diffuse (via `roughness`) AND the specular (via `isMatte`, which
+    // gates specPower/specStr below) — setting only `roughness` would leave every
+    // terrain layer matte, since the specular reads isMatte, not roughness.
     if (uSplatEnabled > 0.5) {
-        roughness = 0.95; 
+        roughness = gTerrainRough;
+        isMatte   = gTerrainRough;
     }
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 0.0);

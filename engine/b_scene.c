@@ -205,12 +205,13 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
               mhg = 0, mhb = 0;
         int grow = -1, avoid = -1, avoidRoad = 1;
         float avoidThr = 0.5f, ms0 = 1.0f;
+        float minH = 0.0f, maxH = 0.0f;
         int fn = sscanf(p,
                         "foliage %63s %127s %127s %f %f %f %f %f %f %f %f %f "
-                        "%f %f %f %f %f %f %f %f %f %d %d %f %f %d",
+                        "%f %f %f %f %f %f %f %f %f %d %d %f %f %d %f %f",
                         fw1, fw2, fw3, &dens, &drawD, &lodD, &sc, &jit, &ho,
                         &slope, &wind, &farK, &tr, &tg, &tb, &mlr, &mlg, &mlb,
-                        &mhr, &mhg, &mhb, &grow, &avoid, &avoidThr, &ms0, &avoidRoad);
+                        &mhr, &mhg, &mhb, &grow, &avoid, &avoidThr, &ms0, &avoidRoad, &minH, &maxH);
         if (fn >= 6) { // name + 2 paths + density + drawD + lodD
           BrushSceneFoliageLayer *fl = &temp.foliage[temp.foliageCount++];
           memset(fl, 0, sizeof(*fl));
@@ -239,6 +240,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
           fl->avoidThreshold = (fn >= 24) ? avoidThr : 0.5f;
           // Road exclusion defaults ON (grass shouldn't grow through paving).
           fl->avoidRoad = (fn >= 26) ? (avoidRoad != 0) : true;
+          fl->minHeight = (fn >= 27) ? minH : 0.0f;
+          fl->maxHeight = (fn >= 28) ? maxH : 0.0f;
         }
       }
     } else if (strncmp(p, "foliage_model ", 14) == 0) {
@@ -348,11 +351,11 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   if (s->foliageCount > 0)
     fprintf(f, "\n# foliage  name model albedo  density drawD lodD  scale jitter"
                " hOff maxSlope wind farKeep  tint(3) macroLow(3) macroHigh(3)"
-               "  growLayer avoidLayer avoidThreshold modelScale0 avoidRoad\n");
+               "  growLayer avoidLayer avoidThreshold modelScale0 avoidRoad minHeight maxHeight\n");
   for (int i = 0; i < s->foliageCount; i++) {
     const BrushSceneFoliageLayer *fl = &s->foliage[i];
     fprintf(f,
-            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g %g %d\n",
+            "foliage %s %s %s %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %d %d %g %g %d %g %g\n",
             fl->name[0] ? fl->name : "-", fl->models[0][0] ? fl->models[0] : "-",
             fl->albedo[0] ? fl->albedo : "-", fl->density, fl->drawDistance,
             fl->lodDistance, fl->scale, fl->scaleJitter, fl->heightOffset,
@@ -360,7 +363,7 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
             fl->tint.y, fl->tint.z, fl->macroLow.x, fl->macroLow.y,
             fl->macroLow.z, fl->macroHigh.x, fl->macroHigh.y, fl->macroHigh.z,
             fl->growLayer, fl->avoidLayer, fl->avoidThreshold,
-            fl->modelScale[0] > 0.0f ? fl->modelScale[0] : 1.0f, fl->avoidRoad ? 1 : 0);
+            fl->modelScale[0] > 0.0f ? fl->modelScale[0] : 1.0f, fl->avoidRoad ? 1 : 0, fl->minHeight, fl->maxHeight);
     for (int m = 1; m < fl->modelCount; m++) // extra palette variants + scale
       if (fl->models[m][0])
         fprintf(f, "foliage_model %s %g\n", fl->models[m],
@@ -552,6 +555,9 @@ bool BrushSceneMaterialLayer(const BrushScene *s, const char *name,
   out->tile = (m->tile > 0.01f) ? m->tile : 1.0f;
   out->heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
   out->normalDepth = (m->normalDepth > 0.0f) ? m->normalDepth : 1.0f;
+  // Per-layer terrain roughness (shiny mud vs matte grass). 0 -> the shader's
+  // matte terrain default (0.95); authored via the material's Roughness Default.
+  out->roughness = m->roughnessDefault;
   out->normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
   out->parallax = m->parallax;
   out->heightBlend = m->heightBlend;

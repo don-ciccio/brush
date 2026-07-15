@@ -283,6 +283,8 @@ static void BuildFoliageLayers() {
         c.scale = fl->scale;
         c.scaleJitter = fl->scaleJitter;
         c.heightOffset = fl->heightOffset;
+        c.minHeight = fl->minHeight;
+        c.maxHeight = fl->maxHeight;
         c.maxSlopeDeg = fl->maxSlopeDeg;
         c.windStrength = fl->windStrength;
         c.farKeepRatio = fl->farKeepRatio;
@@ -1553,6 +1555,8 @@ int main(int argc, char **argv) {
                 BrushRenderSubmitEx(BRUSH_LAYER_OPAQUE, &mi->model, mxf, WHITE,
                                     hasMMat ? &mprops : NULL);
             }
+            BoundingBox sb = { .min = { c.x - r, c.y - r, c.z - r }, .max = { c.x + r, c.y + r, c.z + r } };
+            BrushRenderSetNextBounds(sb);
             BrushRenderSubmit(BRUSH_LAYER_SHADOW, &mi->model, mxf, WHITE);
         }
 
@@ -2757,6 +2761,8 @@ int main(int argc, char **argv) {
                 if (ImGui::SliderFloat("Scale", &fl->scale, 0.1f, 5.0f, "%.2f")) { g_dirty = true; g_foliageResyncPending = true; }
                 if (ImGui::SliderFloat("Scale Jitter", &fl->scaleJitter, 0.0f, 1.0f, "%.2f")) { g_dirty = true; g_foliageResyncPending = true; }
                 if (ImGui::SliderFloat("Height Offset", &fl->heightOffset, -0.5f, 0.5f, "%.2f m")) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::SliderFloat("Min Height", &fl->minHeight, -100.0f, 1000.0f)) { g_dirty = true; g_foliageResyncPending = true; }
+                if (ImGui::SliderFloat("Max Height", &fl->maxHeight, -100.0f, 1000.0f)) { g_dirty = true; g_foliageResyncPending = true; }
                 if (ImGui::SliderFloat("Max Slope", &fl->maxSlopeDeg, 0.0f, 90.0f, fl->maxSlopeDeg < 0.5f ? "any" : "%.0f deg")) { g_dirty = true; g_foliageResyncPending = true; }
 
                 ImGui::SeparatorText("Distances (overdraw lever)");

@@ -133,7 +133,7 @@ typedef struct BrushSceneFoliageLayer {
   float density;       // instances / m^2
   float drawDistance;  // hard cull (m)
   float lodDistance;   // near -> far LOD switch (m)
-  float scale, scaleJitter, heightOffset, maxSlopeDeg, windStrength, farKeepRatio;
+  float scale, scaleJitter, heightOffset, minHeight, maxHeight, maxSlopeDeg, windStrength, farKeepRatio;
   Vector3 tint, macroLow, macroHigh;
   int   growLayer;     // grow only where terrain layer N dominates (-1 = any)
   int   avoidLayer;    // exclude where terrain layer N > threshold (-1 = none)

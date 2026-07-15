@@ -1430,48 +1430,113 @@ void BrushAssetsShutdown(void) {
 
 // Loads separate AO, Roughness, and Height maps and packs them into a single
 // ORH (R=AO, G=Roughness, B=Height) Texture2D caching it automatically.
+// One source map for the packed ORH surface, resolved exactly like any other
+// material texture: loose raw off the cwd (editor/dev), else the cooked .ctex
+// (loose or in the mounted release pak), else a raw source that happens to sit
+// in the pak. Returned as an UNCACHED GPU texture the caller frees. We keep it
+// on the GPU — never as CPU pixels — because a release pak ships BCn-compressed
+// .ctex, which desktop GL (glGetTexImage) cannot read back; the compositing has
+// to happen with a GPU pass instead. (This is the packaging fix: the old code
+// LoadImage()'d the raw sources, which simply don't ship in a release build.)
+static Texture2D SurfaceSourceTex(const char *path) {
+  if (path == NULL || path[0] == '\0') return (Texture2D){0};
+  if (FileExists(path)) {                       // loose raw source (editor/dev)
+    Texture2D t = LoadTexture(path);
+    if (t.id != 0) return t;
+  }
+  char ctex[BRUSH_ASSETS_PATH_MAX + 32];
+  CtexPath(path, ctex, sizeof(ctex));
+  bool sw = false;
+  if (FileExists(ctex)) {                        // loose cooked
+    Texture2D t = LoadCtex(ctex, &sw);
+    if (t.id != 0) return t;
+  }
+  if (g_pak != NULL) {
+    const PakEntry *pe = PakFind(ctex);          // cooked in the pak (the norm)
+    if (pe != NULL) {
+      int n = 0; unsigned char *b = PakRead(pe, &n);
+      Texture2D t = LoadCtexFromMemory(b, n, &sw);
+      free(b);
+      if (t.id != 0) return t;
+    }
+    const PakEntry *pr = PakFind(path);          // uncooked source in the pak
+    if (pr != NULL) {
+      int n = 0; unsigned char *b = PakRead(pr, &n);
+      Image img = LoadImageFromMemory(GetFileExtension(path), b, n);
+      free(b);
+      Texture2D t = LoadTextureFromImage(img);
+      UnloadImage(img);
+      return t;
+    }
+  }
+  return (Texture2D){0};
+}
+
 Texture2D BrushAssetsSurfaceMap(const char *ao, const char *rough, const char *height) {
   if ((ao == NULL || ao[0] == '\0') && (rough == NULL || rough[0] == '\0') && (height == NULL || height[0] == '\0'))
     return (Texture2D){0};
 
-  Image imgAo = {0}, imgRough = {0}, imgHeight = {0};
-  if (ao && ao[0] != '\0') imgAo = LoadImage(BrushEnginePath(ao));
-  if (rough && rough[0] != '\0') imgRough = LoadImage(BrushEnginePath(rough));
-  if (height && height[0] != '\0') imgHeight = LoadImage(BrushEnginePath(height));
+  Texture2D tAo = SurfaceSourceTex(ao);
+  Texture2D tRo = SurfaceSourceTex(rough);
+  Texture2D tHe = SurfaceSourceTex(height);
+  Texture2D primary = tAo.id ? tAo : (tRo.id ? tRo : tHe);
+  if (primary.id == 0) return (Texture2D){0}; // every source failed to resolve
 
-  int w = 1, h = 1;
-  if (imgAo.data) { w = imgAo.width; h = imgAo.height; }
-  else if (imgRough.data) { w = imgRough.width; h = imgRough.height; }
-  else if (imgHeight.data) { w = imgHeight.width; h = imgHeight.height; }
-  else return (Texture2D){0}; // all failed to load
-
-  if (imgAo.data && (imgAo.width != w || imgAo.height != h)) ImageResize(&imgAo, w, h);
-  if (imgRough.data && (imgRough.width != w || imgRough.height != h)) ImageResize(&imgRough, w, h);
-  if (imgHeight.data && (imgHeight.width != w || imgHeight.height != h)) ImageResize(&imgHeight, w, h);
-
-  Image surface = GenImageColor(w, h, WHITE);
-  Color *px = (Color *)surface.data;
-  
-  Color *c_ao = imgAo.data ? LoadImageColors(imgAo) : NULL;
-  Color *c_ro = imgRough.data ? LoadImageColors(imgRough) : NULL;
-  Color *c_he = imgHeight.data ? LoadImageColors(imgHeight) : NULL;
-
-  for (int i = 0; i < w * h; i++) {
-    unsigned char r = c_ao ? c_ao[i].r : 255;
-    unsigned char g = c_ro ? c_ro[i].r : 128; 
-    unsigned char b = c_he ? c_he[i].r : 0;
-    px[i] = (Color){r, g, b, 255};
+  // Pack R=AO, G=Roughness, B=Height with a GPU pass (sources may be compressed
+  // and are sampled at 0..1 so mismatched sizes just resample). One-time shader.
+  static Shader s_orh = {0};
+  static int s_locRo = -1, s_locHe = -1, s_locHas = -1;
+  static bool s_init = false;
+  if (!s_init) {
+    const char *fs =
+        "#version 330\n"
+        "in vec2 fragTexCoord; out vec4 finalColor;\n"
+        "uniform sampler2D texture0;   // AO (the drawn texture)\n"
+        "uniform sampler2D uRough;\n"
+        "uniform sampler2D uHeight;\n"
+        "uniform vec3 uHas;            // which channels have a real source\n"
+        "void main(){\n"
+        "  float a = (uHas.x > 0.5) ? texture(texture0, fragTexCoord).r : 1.0;\n"
+        "  float r = (uHas.y > 0.5) ? texture(uRough,   fragTexCoord).r : 0.5;\n"
+        "  float b = (uHas.z > 0.5) ? texture(uHeight,  fragTexCoord).r : 0.0;\n"
+        "  finalColor = vec4(a, r, b, 1.0);\n"
+        "}\n";
+    s_orh = LoadShaderFromMemory(NULL, fs);
+    s_locRo = GetShaderLocation(s_orh, "uRough");
+    s_locHe = GetShaderLocation(s_orh, "uHeight");
+    s_locHas = GetShaderLocation(s_orh, "uHas");
+    s_init = true;
   }
 
-  if (c_ao) UnloadImageColors(c_ao);
-  if (c_ro) UnloadImageColors(c_ro);
-  if (c_he) UnloadImageColors(c_he);
+  int w = primary.width, h = primary.height;
+  RenderTexture2D rt = LoadRenderTexture(w, h);
+  Vector3 has = {tAo.id ? 1.0f : 0.0f, tRo.id ? 1.0f : 0.0f, tHe.id ? 1.0f : 0.0f};
+  Texture2D drawn = tAo.id ? tAo : primary; // AO feeds texture0; ignored if absent
+  BeginTextureMode(rt);
+    ClearBackground((Color){255, 128, 0, 255}); // AO=1, rough=0.5, height=0 default
+    BeginShaderMode(s_orh);
+      SetShaderValue(s_orh, s_locHas, &has, SHADER_UNIFORM_VEC3);
+      SetShaderValueTexture(s_orh, s_locRo, tRo.id ? tRo : primary);
+      SetShaderValueTexture(s_orh, s_locHe, tHe.id ? tHe : primary);
+      DrawTexturePro(drawn, (Rectangle){0, 0, (float)drawn.width, (float)drawn.height},
+                     (Rectangle){0, 0, (float)w, (float)h}, (Vector2){0, 0}, 0.0f, WHITE);
+    EndShaderMode();
+  EndTextureMode();
 
-  if (imgAo.data) UnloadImage(imgAo);
-  if (imgRough.data) UnloadImage(imgRough);
-  if (imgHeight.data) UnloadImage(imgHeight);
-
-  Texture2D tex = LoadTextureFromImage(surface);
-  UnloadImage(surface);
-  return tex;
+  // Copy to a standalone, mipmapped texture the material owns: the RT colour is
+  // RGBA8 (read-back allowed) and this frees the FBO/depth cleanly.
+  Image out = LoadImageFromTexture(rt.texture);
+  ImageFlipVertical(&out); // render targets are stored bottom-up
+  UnloadRenderTexture(rt);
+  if (tAo.id) UnloadTexture(tAo);
+  if (tRo.id) UnloadTexture(tRo);
+  if (tHe.id) UnloadTexture(tHe);
+  Texture2D surf = LoadTextureFromImage(out);
+  UnloadImage(out);
+  if (surf.id != 0) {
+    GenTextureMipmaps(&surf);
+    SetTextureFilter(surf, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(surf, TEXTURE_WRAP_REPEAT);
+  }
+  return surf;
 }

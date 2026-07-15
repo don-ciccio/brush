@@ -1058,6 +1058,23 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     if (!SurfacePasses(s, jx, jz)) continue;
 
     float y = s->s->heightAt(s->s->ctx, jx, jz);
+    if (s->cfg->minHeight < s->cfg->maxHeight) {
+      if (y < s->cfg->minHeight || y > s->cfg->maxHeight) continue;
+      // Thin out over a fade band inside each limit rather than a hard ring:
+      // grass fades to nothing AT the limit, so a blade grounded a few cm under
+      // maxHeight (mesh surface sits below the 1 m heightmap on broad peaks)
+      // doesn't survive as a stray band right at the ceiling.
+      float band = fminf(2.0f, (s->cfg->maxHeight - s->cfg->minHeight) * 0.4f);
+      if (band > 0.001f) {
+        float edge = fminf(y - s->cfg->minHeight, s->cfg->maxHeight - y);
+        float keep = edge / band; // 0 at a limit -> 1 a full band inside
+        if (keep < 1.0f) {
+          float rp = (float)((h >> 7) & 0xffff) / 65535.0f;
+          if (rp > keep) continue;
+        }
+      }
+    }
+    
     // Central-difference terrain normal (also drives the slope reject). Used to
     // tilt the clump onto the surface so it doesn't float on steep ground.
     float e = 0.5f;

@@ -427,15 +427,53 @@ static float SampleHeightApron(const BrushWorld *w, const WorldChunk *c,
   float h10 = hm[(z0 + 1) * tr + (x1 + 1)];
   float h01 = hm[(z1 + 1) * tr + (x0 + 1)];
   float h11 = hm[(z1 + 1) * tr + (x1 + 1)];
-  return Lerp(Lerp(h00, h10, fx), Lerp(h01, h11, fx), fz);
+  
+  // The mesh uses two triangles per cell, split along the (1,0)->(0,1) diagonal.
+  // Barycentric interpolation ensures the sample exactly matches the geometry,
+  // preventing foliage from floating or sinking on steep slopes.
+  if (fx + fz <= 1.0f) {
+      return h00 + (h10 - h00) * fx + (h01 - h00) * fz;
+  } else {
+      return h11 + (h10 - h11) * (1.0f - fz) + (h01 - h11) * (1.0f - fx);
+  }
 }
 
-// Binds SampleHeightApron to one chunk so a per-chunk subsystem (foliage) can
-// sample this chunk's just-baked surface without knowing the heightmap layout.
+// Height ON the RENDERED terrain mesh: barycentric over the lod mesh triangles
+// (LodMeshRes grid), NOT the finer hmRes heightmap. The mesh linear-interpolates
+// between 2 m vertices, so on a convex hilltop it sits BELOW the 1 m heightmap;
+// foliage grounded to the heightmap would then float above what's drawn. Sampling
+// the same triangles the mesh is built from keeps grass planted on the surface.
+static float SampleMeshHeight(const BrushWorld *w, const WorldChunk *c,
+                             float wx, float wz) {
+  Vector3 o = ChunkOrigin(w, c->coord);
+  int mr = LodMeshRes(w, c->lod);              // mesh vertices per side (2 m @ lod0)
+  int factor = (w->cfg.hmRes - 1) / (mr - 1);  // heightmap samples per mesh cell
+  if (factor < 1) factor = 1;
+  float step = w->cfg.chunkSize / (float)(mr - 1);
+  float gx = Clamp((wx - o.x) / step, 0.0f, (float)(mr - 1));
+  float gz = Clamp((wz - o.z) / step, 0.0f, (float)(mr - 1));
+  int x0 = (int)floorf(gx), z0 = (int)floorf(gz);
+  int x1 = (x0 + 1 < mr) ? x0 + 1 : x0;
+  int z1 = (z0 + 1 < mr) ? z0 + 1 : z0;
+  float fx = gx - (float)x0, fz = gz - (float)z0;
+  int tr = w->hmTexRes;
+  const float *hm = c->heightmap;
+  // Mesh vertex k samples heightmap texel k*factor; +1 is the apron offset.
+  float h00 = hm[(z0 * factor + 1) * tr + (x0 * factor + 1)];
+  float h10 = hm[(z0 * factor + 1) * tr + (x1 * factor + 1)];
+  float h01 = hm[(z1 * factor + 1) * tr + (x0 * factor + 1)];
+  float h11 = hm[(z1 * factor + 1) * tr + (x1 * factor + 1)];
+  // Same two-triangle split as the mesh (diagonal (1,0)->(0,1)).
+  if (fx + fz <= 1.0f) return h00 + (h10 - h00) * fx + (h01 - h00) * fz;
+  return h11 + (h10 - h11) * (1.0f - fz) + (h01 - h11) * (1.0f - fx);
+}
+
+// Binds the mesh-height sampler to one chunk so a per-chunk subsystem (foliage)
+// can ground to this chunk's just-baked surface without knowing the layout.
 typedef struct { const BrushWorld *w; const WorldChunk *c; } ChunkHeightCtx;
 static float ChunkHeightAt(void *ctx, float wx, float wz) {
   ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
-  return SampleHeightApron(h->w, h->c, wx, wz);
+  return SampleMeshHeight(h->w, h->c, wx, wz);
 }
 
 // Nearest chunk-local grid index (hmRes^2, no apron) for a world XZ.
