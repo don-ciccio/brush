@@ -7,6 +7,13 @@ Locked choices: climate base + painted override · 2 biomes/texel (`id0,id1,blen
 Each phase compiles, runs, and is independently verifiable. Constants:
 `BRUSH_MAX_BIOMES 16`, `BRUSH_TERRAIN_LAYERS 4` (unchanged), scene `version 4`.
 
+> **Rev 2 (review incorporated).** Fixed the Phase 0 fast path (per-texel raw-id
+> compare, not corners — altitude+noise flip the interior); pinned `blend`
+> filtering to manual bilinear + documented the within-pair caveat; biomes use
+> the pure base `heightFn` (deadlock-safe, verified); Phase 2 array assembly now
+> addresses the compressed-`.ctex` readback wall (GPU-blit assemble or cook
+> uncompressed) + layer dedupe + normalise normals at assemble time.
+
 ---
 
 ## Phase 0 — Biome field + plumbing (no visible change)
@@ -42,8 +49,21 @@ looks identical — this phase is pure infrastructure.
   **scattered blend** — jittered hex points in a fixed radius (precomputed
   offset list), each weighted `max(0, r²−d²)²` by the id it lands on; keep the
   **top 2** ids, normalise → `blend`. Single-id neighbourhood → `{id,id,0}`.
-- **Fast path:** before blending a chunk, test the 4 chunk-corner ids (+painted
-  tiles present?). All equal & no paint → fill the whole map `{id,id,0}`, skip.
+- Biomes read the **base `heightFn`** for the lapse term — NOT the sculpted /
+  road-flattened heightmap. Reasons: (a) `Height()` is pure (verified — no
+  locks), so neighbour-point evals under `sculptMutex` can't deadlock; (b) hand
+  sculpting a hill shouldn't silently repaint the biome under it.
+- **Fast path (corrected).** The naïve "test 4 corners" is **wrong**: because
+  `temp` is altitude-modulated *and* has a noise term, the biome can flip at an
+  interior peak/dip the corners never see. Instead — the raw id is *cheap* (2
+  noise taps + a lookup), the scattered blend is the ~10–20× cost. So:
+  1. Precompute the **raw id per texel** into a scratch `hmRes²` buffer (cheap).
+  2. If every raw id is equal **and** no painted biome tiles touch the chunk →
+     fill the map `{id,id,0}`, skip the blend entirely.
+  3. Otherwise scatter-blend, *reusing* the scratch ids as the point lookups.
+  This is fully correct (no corner assumption), needs no min/max-height tracking
+  (only `maxY` exists today anyway), and the scratch buffer feeds the blend so
+  the raw ids aren't recomputed.
 
 ### 0.3 Chunk storage + bake (`b_world.c`)
 - `WorldChunk`: `unsigned char *biomePixels; bool biomeValid; Texture2D biomeTex;`
@@ -53,7 +73,19 @@ looks identical — this phase is pure infrastructure.
   `biomePixels` via `BiomeWeightsAt`. Always valid when `biomeCount>0`.
 - Free in the chunk teardown (mirror `splatPixels`/`maskPixels`).
 - Finalize (main thread): upload `biomeTex` **point-filtered** (`GL_NEAREST`) —
-  IDs must not interpolate. (Bilinear blending is done in-shader in Phase 2.)
+  IDs must never interpolate (lerping id 2 and id 5 → 3.5 is nonsense).
+- **Filtering the `blend` (corrected).** `GL_NEAREST` on the packed RGBA snaps
+  `blend` too → stepped borders. Fix = **manual bilinear in the shader** (Phase 2)
+  and in `ChunkBiomeAt` (Phase 1, CPU): take `id0,id1` from the **nearest** texel,
+  but bilinear-interpolate **`blend`** from the 4 neighbours using the UV
+  fraction. One NEAREST texture, ~4 taps on a tiny map — cheaper than a second
+  sampler, and it keeps us under the unit budget.
+  - **Caveat the review missed:** a single `blend` scalar is only meaningful
+    *within a region where the (id0,id1) pair is constant*. Where the dominant
+    pair flips (triple-junctions), bilinearly mixing `blend` across the flip is
+    technically wrong — but at `hmRes` (~1 m texels) that's a ≤1-texel seam,
+    below the noise floor. If it ever shows, widen the scattered-blend radius so
+    pairs change more slowly; do NOT try to hardware-filter it.
 
 ### 0.4 Sampler (`b_world.h`/`.c`)
 - Extend `BrushChunkSamplers`:
@@ -108,10 +140,12 @@ Goal: a foliage layer only scatters inside its biome, fading across borders.
             + (bs.id1==cfg->biomeId ? bs.blend      : 0.0f);
     if (w <= 0.001f) continue;
     // smooth border: probabilistic reject like the maxHeight fade band
-    float rp = (float)((h >> 5) & 0xffff)/65535.0f;
-    if (rp > w) continue;
+    float rp = (float)((h >> 3) & 0xffff)/65535.0f; // distinct hash slice —
+    if (rp > w) continue;                           // heightfade uses >>7, model >>9
   }
   ```
+- `ChunkBiomeAt` does the **manual-bilinear-on-`blend`** from §0.3 so the fade is
+  smooth per-instance (nearest ids, bilinear blend).
 - Cap combined density in blend bands: since each biome's layers reject by their
   own weight and the two weights sum to 1, total instances are conserved — no
   stacking. (Verify by eye at a border.)
@@ -131,13 +165,32 @@ the shader lerps two biomes' palette samples by `blend`. Removes the 16-sampler
 ceiling permanently.
 
 ### 2.1 Texture arrays (`b_assets.c`)
-- `Texture2D BrushAssetsTextureArray(const char *paths[], int count, ...)` →
-  a `sampler2DArray` (raylib: `rlLoadTextureDepth`/manual `glTexImage3D`, or
-  build via `rlLoadTexture` per layer into an array target). Resize every layer
-  to a common size (the max, or a fixed 1K). Pak-aware per layer (reuse the
-  `SurfaceSourceTex` ladder). Build **three** arrays: albedo, normal, ORH.
-- One array per role, indexed by the biome palette. All terrain textures across
-  all biomes live here (≤ e.g. 32 layers).
+- rlgl has **no** `TEXTURE_2D_ARRAY` path — this is a **raw-GL** block:
+  `glGenTextures` → `glBindTexture(GL_TEXTURE_2D_ARRAY)` →
+  `glTexImage3D(..., depth=count)` → `glGenerateMipmap`. Wrap the id in a
+  `Texture2D` (id + a flag) or a small `BrushTexArray` handle.
+- **Where the pixels come from — this is the ORH lesson again.** Assembling the
+  array needs each layer's pixels at a **uniform size**, and `ImageResize` only
+  works on **uncompressed** images. In a release pak the sources are cooked BCn
+  `.ctex`, and desktop GL **cannot read compressed pixels back** (we proved this
+  fixing the surface map — `rlReadTexturePixels` refuses `format ≥ DXT1`). So:
+  - **Editor / loose PNGs:** `LoadImage` → `ImageResize` → `ImageFormat(R8G8B8A8)`
+    → copy each into the `glTexImage3D` upload. Simple, works today.
+  - **Release robustness (two options):**
+    1. Cook terrain layers **uncompressed** (they're few, ≤~32) so the CPU-assemble
+       path also works from the pak — simplest.
+    2. Or **GPU-assemble**: load each layer as a GPU texture (pak-aware, compressed
+       OK via `SurfaceSourceTex`), then blit it into the array layer with
+       `glFramebufferTextureLayer` + a quad (GL 4.1 — `glCopyImageSubData` is 4.3,
+       unavailable on macOS). This also lets us normalise normal encoding in the
+       blit (see 2.2). Recommend option 2 — it reuses the ORH-composite pattern
+       and keeps cooking/compression intact.
+- **Dedupe:** the array holds the **union** of all biomes' terrain layers, keyed
+  by source path — a rock shared by 3 biomes is **one** array layer, and each
+  biome's `palette[]` just points at it. Size the array to the actual union, not
+  a fixed 32.
+- Build **three** arrays (albedo, normal, ORH). VRAM ≈ layers × 1K² × 3 × mips —
+  order ~150 MB at 32 layers, fine for desktop and "free" per the perf audit.
 
 ### 2.2 Shader (`lit.fs`)
 - Replace `uLayerAlbedo0..3`, `uLayerNormal0..3`, `uLayerSurface*` **discrete**
@@ -168,16 +221,22 @@ ceiling permanently.
   pale tint) blend seamlessly across a border; sampler count ≤ current.
 
 ### 2.5 Risks specific to Phase 2
-- **`blend` bilinear vs id point-sample:** keep ids in a NEAREST-sampled texture;
-  put `blend` where bilinear is safe (its own R8 texture, or accept 1-texel
-  border steps at hmRes — likely invisible). Decide during 2.2.
-- **Array layer resolution:** all layers must share dimensions — resize on load;
-  warn if a source is wildly off.
-- **Normal-map array + DXT5nm swizzle:** the array must hold normal-format
-  layers consistently; keep the existing swizzle handling per layer.
+- **`blend` filtering:** resolved in §0.3 — manual bilinear on `blend`, ids from
+  the nearest texel. No second texture, no hardware filtering of ids.
+- **Array layer resolution:** all layers must share dimensions in the array —
+  resize to a fixed 1K (or the union max) at assemble; warn if a source is wildly
+  off (a 4K terrain in a 1K array wastes the source detail).
+- **Normal encoding — normalise at assemble time (not in the shader).** A
+  `sampler2DArray` can't carry a per-layer "is DXT5nm" flag without a bool array
+  uniform + a branch per tap. Instead, **reconstruct every normal layer to plain
+  RGB when building the array** — trivial in the GPU-assemble blit (apply the
+  DXT5nm→RGB reconstruction in the blit shader for swizzled sources), or on the
+  CPU for the uncompressed path. `uNormalArr` is then uniformly RGB and the main
+  shader samples it with **zero** conditional swizzle.
 - **8 taps vs 4:** ~2× terrain texture work per pixel. Per the perf audit
-  textures are near-free (<2% at 4×), so acceptable; the single-biome fast path
-  (id0==id1) can early-out to 4 taps.
+  textures are near-free (<2% at 4×), so acceptable; the single-biome dynamic
+  branch (`id0==id1`) early-outs to 4 taps and coheres per warp since borders are
+  thin — the vast majority of screen pixels take the fast path.
 
 ---
 
