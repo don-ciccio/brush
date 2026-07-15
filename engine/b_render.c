@@ -48,6 +48,7 @@ typedef struct BrushRenderState {
   int locHasAoMap, locAoStrength;
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
+  int locGrassGroundColor, locGrassGroundStrength, locGrassGrowLayer, locGrassGroundFar;
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
   int locPomLayer, locPomTile, locPomScale;
   int locHeightBlendLayer, locHeightBlendSharp;
@@ -57,7 +58,7 @@ typedef struct BrushRenderState {
   float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
   int locLightVP[BRUSH_SHADOW_CASCADES];
-  int locShadowMap[BRUSH_SHADOW_CASCADES];
+  int locShadowAtlas; // single sampler2D — all cascades share one 2x2 atlas
   int locCascadeFar;
   int locShadowEnabled;
   int locShadowSoftness, locShadowTexel, locShadowStrength;
@@ -143,6 +144,12 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLayerSwizzled = GetShaderLocation(g_r.lit, "uLayerSwizzled");
   g_r.locLayerCount = GetShaderLocation(g_r.lit, "uLayerCount");
   g_r.locAutoSlope = GetShaderLocation(g_r.lit, "uAutoSlope");
+  g_r.locGrassGroundColor = GetShaderLocation(g_r.lit, "uGrassGroundColor");
+  g_r.locGrassGroundStrength = GetShaderLocation(g_r.lit, "uGrassGroundStrength");
+  g_r.locGrassGrowLayer = GetShaderLocation(g_r.lit, "uGrassGrowLayer");
+  g_r.locGrassGroundFar = GetShaderLocation(g_r.lit, "uGrassGroundFar");
+  { float off = 0.0f; // grass-ground tint off until a game/foliage enables it
+    SetShaderValue(g_r.lit, g_r.locGrassGroundStrength, &off, SHADER_UNIFORM_FLOAT); }
   g_r.locLayerHeightOn = GetShaderLocation(g_r.lit, "uLayerHeightOn");
   g_r.locLayerHeightStart = GetShaderLocation(g_r.lit, "uLayerHeightStart");
   g_r.locLayerHeightFull = GetShaderLocation(g_r.lit, "uLayerHeightFull");
@@ -185,9 +192,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locLightVP[0] = GetShaderLocation(g_r.lit, "lightVP0");
   g_r.locLightVP[1] = GetShaderLocation(g_r.lit, "lightVP1");
   g_r.locLightVP[2] = GetShaderLocation(g_r.lit, "lightVP2");
-  g_r.locShadowMap[0] = GetShaderLocation(g_r.lit, "shadowMap0");
-  g_r.locShadowMap[1] = GetShaderLocation(g_r.lit, "shadowMap1");
-  g_r.locShadowMap[2] = GetShaderLocation(g_r.lit, "shadowMap2");
+  g_r.locShadowAtlas = GetShaderLocation(g_r.lit, "shadowAtlas");
   g_r.locCascadeFar = GetShaderLocation(g_r.lit, "uCascadeFar");
   g_r.locShadowEnabled = GetShaderLocation(g_r.lit, "uShadowEnabled");
   g_r.locShadowSoftness = GetShaderLocation(g_r.lit, "uShadowSoftness");
@@ -268,6 +273,19 @@ void BrushRenderApplyTimeOfDay(const struct BrushTimeOfDay *tod) {
 }
 
 Vector3 BrushGetSunDir(void) { return g_r.sunDir; }
+
+void BrushRenderSetGrassGround(Vector3 color, float strength, int growLayer,
+                              float far) {
+  if (g_r.lit.id == 0) return;
+  if (strength < 0.0f) strength = 0.0f;
+  if (strength > 1.0f) strength = 1.0f;
+  if (far < 1.0f) far = 1.0f;
+  float col[3] = {color.x, color.y, color.z};
+  SetShaderValue(g_r.lit, g_r.locGrassGroundColor, col, SHADER_UNIFORM_VEC3);
+  SetShaderValue(g_r.lit, g_r.locGrassGroundStrength, &strength, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locGrassGrowLayer, &growLayer, SHADER_UNIFORM_INT);
+  SetShaderValue(g_r.lit, g_r.locGrassGroundFar, &far, SHADER_UNIFORM_FLOAT);
+}
 
 void BrushSetSkyEnabled(bool enabled) { g_r.skyEnabled = enabled; }
 
@@ -477,7 +495,18 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   float size = sp->size;
   float res = (float)sp->res;
   float tiles[4], swiz[4];
-  float hasNrm = (sp->layers[0].normal.id != 0) ? 1.0f : 0.0f;
+  // Normal mapping is on if ANY painted layer carries a normal (was gated on
+  // layer 0 only — a textured layer 1..3 would never light). Intensity comes
+  // from the first layer that has one (default 1.0); without this the terrain
+  // used a STALE uNormalDepth from the previous draw and often read flat.
+  float hasNrm = 0.0f, terrNormalDepth = 1.0f;
+  for (int i = 0; i < sp->layerCount && i < 4; i++) {
+    if (sp->layers[i].normal.id != 0) {
+      if (hasNrm < 0.5f && sp->layers[i].normalDepth > 0.0f)
+        terrNormalDepth = sp->layers[i].normalDepth;
+      hasNrm = 1.0f;
+    }
+  }
   for (int i = 0; i < 4; i++) {
     tiles[i] = (i < sp->layerCount && sp->layers[i].tile > 0.01f)
                    ? sp->layers[i].tile : 1.0f;
@@ -507,6 +536,7 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNrm, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locNormalDepth, &terrNormalDepth, SHADER_UNIFORM_FLOAT);
   // The bound height (unit 9) belongs to specialLayer; its tile drives both POM
   // and the height-blend sampling.
   float pomTile = specialLayer >= 0 ? tiles[specialLayer] : 1.0f;
@@ -648,13 +678,10 @@ void BrushRenderExecute(Camera3D camera) {
     float shOn = 1.0f;
     SetShaderValue(g_r.lit, g_r.locShadowEnabled, &shOn,
                    SHADER_UNIFORM_FLOAT);
-    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++) {
-      SetShaderValueMatrix(g_r.lit, g_r.locLightVP[c],
-                           g_r.shadow.lightVP[c]);
-      int slot = g_r.shadow.slot + c;
-      SetShaderValue(g_r.lit, g_r.locShadowMap[c], &slot,
-                     SHADER_UNIFORM_INT);
-    }
+    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++)
+      SetShaderValueMatrix(g_r.lit, g_r.locLightVP[c], g_r.shadow.lightVP[c]);
+    int shadowSlot = g_r.shadow.slot;
+    SetShaderValue(g_r.lit, g_r.locShadowAtlas, &shadowSlot, SHADER_UNIFORM_INT);
     SetShaderValue(g_r.lit, g_r.locCascadeFar, g_r.shadow.splitFar,
                    SHADER_UNIFORM_VEC3);
     SetShaderValue(g_r.lit, g_r.locShadowSoftness, &g_r.shadow.softness,
@@ -729,11 +756,12 @@ void BrushRenderExecute(Camera3D camera) {
     g_r.post.sunDir = g_r.sunDir;
     g_r.post.sunColor = g_r.sunColor;
     g_r.post.ambientColor = g_r.ambient;
-    // God rays march up to ~100 m — the FAR cascade covers that range.
+    // God rays march up to ~100 m — the FAR cascade covers that range. The
+    // cascades now share one 2x2 depth atlas; god rays sample the far cascade's
+    // tile (post remaps [0,1] UV into it — see BrushShadowCascadeTile).
     g_r.post.lightVP = g_r.shadow.lightVP[BRUSH_SHADOW_CASCADES - 1];
-    g_r.post.shadowMap =
-        shadowsOn ? g_r.shadow.map[BRUSH_SHADOW_CASCADES - 1].depth
-                  : (Texture2D){0};
+    g_r.post.shadowMap = shadowsOn ? g_r.shadow.atlas.depth : (Texture2D){0};
+    g_r.post.shadowTile = BrushShadowCascadeTile(BRUSH_SHADOW_CASCADES - 1);
     if (g_r.editorMode) {
       BrushPostRunNoPresent(&g_r.post, (float)GetTime());
     } else {
@@ -814,12 +842,10 @@ void BrushRenderApplySceneLighting(Shader s) {
   SetShaderValue(s, GetShaderLocation(s, "uShadowEnabled"), &shEnabled, SHADER_UNIFORM_FLOAT);
   if (g_r.curShadowsOn) {
     const char *vpNames[3] = {"lightVP0", "lightVP1", "lightVP2"};
-    const char *smNames[3] = {"shadowMap0", "shadowMap1", "shadowMap2"};
-    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++) {
+    for (int c = 0; c < BRUSH_SHADOW_CASCADES; c++)
       SetShaderValueMatrix(s, GetShaderLocation(s, vpNames[c]), g_r.shadow.lightVP[c]);
-      int slot = g_r.shadow.slot + c;
-      SetShaderValue(s, GetShaderLocation(s, smNames[c]), &slot, SHADER_UNIFORM_INT);
-    }
+    int shadowSlot = g_r.shadow.slot; // all cascades share the one atlas unit
+    SetShaderValue(s, GetShaderLocation(s, "shadowAtlas"), &shadowSlot, SHADER_UNIFORM_INT);
     SetShaderValue(s, GetShaderLocation(s, "uCascadeFar"), g_r.shadow.splitFar, SHADER_UNIFORM_VEC3);
     SetShaderValue(s, GetShaderLocation(s, "uShadowStrength"), &g_r.curShadowStrength, SHADER_UNIFORM_FLOAT);
   }

@@ -579,6 +579,9 @@ void BrushPostRunNoPresent(BrushPost *pp, float time) {
     BeginShaderMode(pp->godrays);
     SetShaderValueTexture(pp->godrays, pp->locGRDepth, pp->scene.depth);
     SetShaderValueTexture(pp->godrays, pp->locGRShadowMap, pp->shadowMap);
+    // The shadow map is now a 2x2 atlas; sample the far cascade's tile.
+    SetShaderValue(pp->godrays, GetShaderLocation(pp->godrays, "uShadowTile"),
+                   &pp->shadowTile, SHADER_UNIFORM_VEC2);
     SetShaderValueMatrix(pp->godrays, pp->locGRInvVP, invViewProj);
     SetShaderValueMatrix(pp->godrays, pp->locGRMatLight, pp->lightVP);
     SetShaderValue(pp->godrays, pp->locGRCamPos, camPos, SHADER_UNIFORM_VEC3);

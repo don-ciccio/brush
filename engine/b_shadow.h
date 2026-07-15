@@ -28,17 +28,30 @@ extern "C" {
 
 #define BRUSH_SHADOW_CASCADES 3
 
+// The three cascades share ONE depth texture — a 2x2 square atlas (the 4th tile
+// is unused) — so the lit/foliage shaders spend a SINGLE texture unit on shadows
+// instead of three (freeing units under the hard 16-unit fragment limit). Each
+// cascade renders into its tile via a viewport; the shader remaps [0,1] cascade
+// UV into the tile (see BrushShadowCascadeTile / the shaders). A square atlas
+// keeps BeginMode3D's aspect at 1.0, so the ortho boxes stay square with no
+// manual projection maths.
 typedef struct BrushShadow {
-  RenderTexture2D map[BRUSH_SHADOW_CASCADES]; // depth-only render targets
+  RenderTexture2D atlas; // one depth-only target, 2*resolution square
   Camera3D lightCam;   // orthographic camera reused per cascade pass
   Matrix lightVP[BRUSH_SHADOW_CASCADES]; // captured during each depth pass
   float splitFar[BRUSH_SHADOW_CASCADES]; // cascade far distances from the
                                          // view camera (m); ascending
-  int resolution;      // per-cascade shadow map size (square)
-  int slot;            // first texture unit; cascade i binds slot + i
+  int resolution;      // per-cascade tile size (square); atlas is 2x this
+  int slot;            // the single texture unit the atlas binds to
   float softness;      // PCSS light size (texels); higher = softer penumbra
   bool ready;
 } BrushShadow;
+
+// Atlas tile origin (bottom-left, in [0,1] atlas UV) for cascade i, 2x2 layout.
+// Shared by the C bind path and mirrored in the shaders.
+static inline Vector2 BrushShadowCascadeTile(int i) {
+  return (Vector2){(float)(i & 1) * 0.5f, (float)(i >> 1) * 0.5f};
+}
 
 void BrushShadowInit(BrushShadow *sh, int resolution);
 void BrushShadowUnload(BrushShadow *sh);

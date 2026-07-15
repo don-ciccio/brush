@@ -174,6 +174,12 @@ typedef struct BrushFoliageLayerConfig {
   float farKeepRatio;   // far-LOD decimation (1 = no far LOD, share near mesh)
   Vector3 tint;         // albedo tint ((0,0,0) -> white)
   Vector3 macroLow, macroHigh; // low-frequency macro-color ramp endpoints
+  // F3 grass-ground tint: greens the TERRAIN where this layer grows so the
+  // ground reads as a grass field between/beyond the 3D blades (fills the bare
+  // horizon; no ring). Drives the terrain shader (BrushRenderSetGrassGround)
+  // via growLayer + drawDistance. groundStrength 0 -> off.
+  Vector3 groundColor;   // grass-ground tint colour (sRGB)
+  float   groundStrength;// 0..1 tint amount (0 = feature off)
   // Model palette: up to N mesh variants mixed per instance ({0} mesh ->
   // procedural tuft; id-0 albedo -> the model's own texture, else the gradient).
   Mesh meshes[BRUSH_FOLIAGE_MODELS_PER_LAYER];

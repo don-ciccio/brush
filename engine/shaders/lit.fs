@@ -67,6 +67,15 @@ uniform float uSplatRes;   // splat texture resolution per side
 uniform vec4 uLayerTiles;  // metres per repeat, per layer
 uniform vec4 uLayerSwizzled; // DXT5nm flag per layer
 uniform int uLayerCount;
+// Grass-ground tint (foliage F3): the ground reads as a grass field where the
+// foliage grow-layer sits, so the terrain doesn't end in bare dirt past the 3D
+// blades. Pure uniform + reuses the splat weights (no sampler). strength 0 = off;
+// growLayer -1 = everywhere; the tint ramps up to full by `far` metres so near
+// ground keeps some of its own detail under the dense near grass.
+uniform vec3  uGrassGroundColor;
+uniform float uGrassGroundStrength;
+uniform int   uGrassGrowLayer;
+uniform float uGrassGroundFar;
 // Road surface: an INDEPENDENT material composited over the finished terrain
 // blend by a coverage mask, so it never enters the 4-layer mix or its auto-rules.
 uniform float uRoadEnabled;
@@ -119,18 +128,23 @@ uniform float uLinearize;
 // distance picks the cascade. Same PCSS everywhere: one cascade is sampled
 // per fragment, so the cost matches the old single-map path.
 uniform mat4 lightVP0, lightVP1, lightVP2;
-uniform sampler2D shadowMap0;
-uniform sampler2D shadowMap1;
-uniform sampler2D shadowMap2;
+uniform sampler2D shadowAtlas; // all 3 cascades in one 2x2 depth atlas (1 unit)
 uniform vec3 uCascadeFar;      // cascade far distances from the camera (m)
 uniform float uShadowEnabled;
 uniform float uShadowSoftness; // light size in shadow texels
 uniform float uShadowTexel;    // 1.0 / shadow map resolution
 uniform float uShadowStrength; // horizon fade: 1 = full shadows, 0 = none
 
-// PCSS test against one cascade. Returns 0 = fully lit, 1 = fully shadowed.
-float ShadowSample(sampler2D shadowMap, mat4 lightVP, vec3 fragPos,
-                   float ndotl) {
+// Sample the shadow atlas for cascade `tile` at cascade-space UV `uv`, clamped
+// to the tile so PCF taps near a cascade edge don't bleed into a neighbour tile.
+// An atlas texel is half a cascade texel (the tile spans half the 2x atlas).
+float ShadowAtlasTap(vec2 tile, vec2 uv) {
+    float at = uShadowTexel * 0.5;
+    return texture(shadowAtlas, clamp(uv * 0.5 + tile, tile + at, tile + 0.5 - at)).r;
+}
+
+// PCSS test against one cascade (its `tile` origin in the atlas). 0 = lit, 1 = shadowed.
+float ShadowSample(vec2 tile, mat4 lightVP, vec3 fragPos, float ndotl) {
     vec4 p = lightVP * vec4(fragPos, 1.0);
     vec3 proj = p.xyz / p.w;
     proj = proj * 0.5 + 0.5;
@@ -147,8 +161,7 @@ float ShadowSample(sampler2D shadowMap, mat4 lightVP, vec3 fragPos,
     float blockerSum = 0.0, blockerCount = 0.0;
     for (int x = 0; x < 4; x++)
       for (int y = 0; y < 4; y++) {
-        float d = texture(shadowMap,
-                          proj.xy + (vec2(x, y) - 1.5) * searchStep).r;
+        float d = ShadowAtlasTap(tile, proj.xy + (vec2(x, y) - 1.5) * searchStep);
         if (d < receiver) { blockerSum += d; blockerCount += 1.0; }
       }
     if (blockerCount < 0.5) return 0.0;
@@ -161,22 +174,22 @@ float ShadowSample(sampler2D shadowMap, mat4 lightVP, vec3 fragPos,
     float sh = 0.0;
     for (int x = 0; x < 4; x++)
       for (int y = 0; y < 4; y++)
-        if (receiver >
-            texture(shadowMap, proj.xy + (vec2(x, y) - 1.5) * radius).r)
+        if (receiver > ShadowAtlasTap(tile, proj.xy + (vec2(x, y) - 1.5) * radius))
             sh += 1.0;
     return (sh / 16.0) * uShadowStrength;
 }
 
 // Cascade pick by radial camera distance (matches the sphere-fitted boxes).
+// Tiles follow the 2x2 atlas layout (BrushShadowCascadeTile in b_shadow.h).
 float ShadowFactor(vec3 fragPos, float ndotl) {
     if (uShadowEnabled < 0.5) return 0.0;
     float d = length(fragPos - viewPos);
     if (d < uCascadeFar.x)
-        return ShadowSample(shadowMap0, lightVP0, fragPos, ndotl);
+        return ShadowSample(vec2(0.0, 0.0), lightVP0, fragPos, ndotl);
     if (d < uCascadeFar.y)
-        return ShadowSample(shadowMap1, lightVP1, fragPos, ndotl);
+        return ShadowSample(vec2(0.5, 0.0), lightVP1, fragPos, ndotl);
     if (d < uCascadeFar.z)
-        return ShadowSample(shadowMap2, lightVP2, fragPos, ndotl);
+        return ShadowSample(vec2(0.0, 0.5), lightVP2, fragPos, ndotl);
     return 0.0; // beyond the last cascade: unshadowed
 }
 
@@ -293,6 +306,116 @@ float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale) {
         if (sD < rayD) occ = max(occ, (rayD - sD) * (1.0 - float(i) / float(N)));
     }
     return 1.0 - clamp(occ * 4.0, 0.0, 1.0);
+}
+
+// ─── Procedural meadow ground colour (grass-ground tint) ────────────────────
+// Ported from the donor's terrain.fs: a real grassland reads as a patchwork of
+// greens/yellows at several spatial frequencies (biome regions, species
+// clusters, fine tussocks), not a flat tint. Stacking rotated-noise layers
+// makes the tinted terrain read as a grass field between/beyond the 3D blades —
+// which also kills the 8-bit banding and resists the concentric-ring artefact
+// (dense multi-scale detail has no smooth radial band to form a ring).
+//
+// Improvements over the donor: the whole palette is DERIVED from the layer's one
+// groundColor (tunable, any grass — not racer's hard-coded meadow constants);
+// the fine octave is fwidth-AA'd AND distance-gated so far pixels stay cheap.
+float GG_Hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float GG_Noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(GG_Hash(i), GG_Hash(i + vec2(1, 0)), u.x),
+               mix(GG_Hash(i + vec2(0, 1)), GG_Hash(i + vec2(1, 1)), u.x), u.y);
+}
+// Rotated sample (~37°) so the octaves don't align to the world grid and band.
+float GG_Rot(vec2 p, float freq, float seed) {
+    vec2 r = vec2(p.x * 0.7986 - p.y * 0.6019, p.x * 0.6019 + p.y * 0.7986);
+    return GG_Noise(r * freq + seed);
+}
+float GG_Biome(vec2 p)   { return GG_Rot(p, 0.035, 0.0) * 0.65 + GG_Rot(p, 0.09, 7.3) * 0.35; }
+float GG_Species(vec2 p) { return GG_Rot(p, 0.18, 13.7) * 0.5 + GG_Rot(p, 0.55, 29.1) * 0.3 + GG_Rot(p, 1.40, 43.9) * 0.2; }
+float GG_Clump(vec2 p)   { return GG_Rot(p, 2.8, 61.0) * 0.55 + GG_Rot(p, 7.5, 87.3) * 0.45; }
+float GG_Drought(vec2 p) { return GG_Rot(vec2(p.x * 0.6, p.y), 0.12, 103.0); }
+
+// `base` = layer groundColor (sRGB, pre-linearise, like the surrounding albedo).
+// `gaze` = grazing-gap-hide factor (0 top-down .. hides bare soil at eye level).
+// `grassFar` = the 3D-grass draw distance (speckles fade in past it).
+vec3 GG_MeadowColor(vec3 base, vec2 wxz, float dist, float gaze, float grassFar) {
+    // Palette derived from the one base tone. Kept SUBTLE and mostly in
+    // BRIGHTNESS (same hue) — hue-shifted patches read as unnatural "spots".
+    // straw/yellow are gentle warm accents, used sparingly.
+    vec3 dark   = base * 0.82;
+    vec3 light  = base * 1.16;
+    vec3 lush   = base * 0.92;
+    vec3 straw  = clamp(base * vec3(1.18, 1.12, 0.82), 0.0, 1.0);
+    vec3 yellow = clamp(base * vec3(1.55, 1.40, 0.70), 0.0, 1.0);
+
+    // Layer 1 — biome (large regional tone, 40-80 m): a GENTLE light/dark tonal
+    // drift, with a rare, soft drier region. This is atmosphere, not patches.
+    float biome = GG_Biome(wxz);
+    vec3 col = mix(dark, light, smoothstep(0.15, 0.65, biome));
+    col = mix(col, straw, smoothstep(0.58, 0.86, biome) * 0.25);
+
+    // Layer 2 — species patches (5-15 m): the blotch risk. Keep the colour swing
+    // small and the blend weight low so clusters read as faint tonal, not spots.
+    float species = GG_Species(wxz);
+    vec3 sp = mix(lush, light, smoothstep(0.28, 0.58, species));
+    sp = mix(sp, yellow, smoothstep(0.82, 0.97, species) * 0.18); // sparse, soft
+    col = mix(col, sp, 0.28);
+
+    // Layer 3 — drought stress: minimal (elongated dry streaks read as stains).
+    col = mix(col, straw, smoothstep(0.52, 0.82, GG_Drought(wxz)) * 0.12);
+
+    // Layer 4 — fine clump (0.5-2 m tussocks): THIS is the grassy texture — the
+    // realistic read is fine blade-scale detail, not mid-scale colour. fwidth-
+    // AA'd + distance-gated so far pixels skip it (no shimmer, no cost).
+    float footprint = max(fwidth(wxz.x), fwidth(wxz.y));
+    float aaBase = 1.0 - smoothstep(0.45, 1.1, footprint * 2.8);
+    if (aaBase > 0.0) {
+        float clump = GG_Clump(wxz);
+        float aaClump = 1.0 - smoothstep(0.15, 0.50, footprint * 7.5);
+        vec3 clumpCol = mix(col * 0.84, col * 1.13, smoothstep(0.32, 0.64, clump));
+        clumpCol = mix(clumpCol, yellow, smoothstep(0.86, 0.97, clump) * aaClump * 0.16);
+        // Grazing gap-hide: a few dark inter-clump gaps top-down, closed at eye
+        // level so the ground reads as solid grass cover.
+        clumpCol = mix(clumpCol, dark, (1.0 - smoothstep(0.08, 0.20, clump)) * aaClump * gaze * 0.40);
+        col = mix(col, clumpCol, aaBase * 0.70);
+    }
+
+    // Dry-grass tip SPECKLES (donor's "dry accent dots", retuned for our range):
+    // sparse warm points, clustered in colonies, implying distant grass tips
+    // catching the sun WHERE THE 3D BLADES HAVE THINNED OUT — so the far field
+    // still reads as living grass, not flat colour. Faded in past the grass
+    // horizon and out far away; softened by footprint so they sparkle, not alias.
+    // Speckles ramp SLOWLY and PEAK WELL PAST the grass edge (~gf), so at the
+    // far-LOD hand-off they're only partway up (matching the last thin grass)
+    // and keep thickening into the distance — no bright pop where the grass ends.
+    float gf = max(grassFar, 20.0);
+    float accFade = smoothstep(gf * 0.15, gf * 1.2, dist) *
+                    (1.0 - smoothstep(gf * 3.0, gf * 5.0, dist));
+    if (accFade > 0.001) {
+        float colony = smoothstep(0.15, 0.46, GG_Rot(wxz, 0.6, 57.1)); // clusters
+        float spk = GG_Rot(wxz, 3.0, 83.1) * 0.6 + GG_Rot(wxz, 6.0, 94.7) * 0.4;
+        float aaw = clamp(footprint * 3.0, 0.02, 0.18); // widen threshold with distance
+        float dots = smoothstep(0.56 - aaw, 0.56 + aaw, spk) * colony * accFade;
+        // Dark rim around each dot = fake occlusion, so they read as pointy volume.
+        float rim = smoothstep(0.46, 0.54, spk) * (1.0 - smoothstep(0.54, 0.58, spk)) *
+                    colony * accFade;
+        // Tip highlight DERIVED FROM the local ground colour, brightened toward a
+        // sunlit tip but keeping the HUE of whatever grass this project uses
+        // (a near-uniform boost, only a hair warm — NOT a hard yellow shift that
+        // would force gold over a green field). Lit by the current sun afterwards.
+        vec3 tip = clamp(col * vec3(1.55, 1.62, 1.30), 0.0, 1.0);
+        col = mix(col, tip, dots * 0.62);
+        col = mix(col, col * 0.35, rim * 0.50);
+    }
+
+    // Distant grass fades a touch warmer (sun-bleached) — subtle.
+    col = mix(col, yellow * 0.82, smoothstep(90.0, 220.0, dist) * 0.28);
+    return col;
 }
 
 void main()
@@ -484,6 +607,20 @@ void main()
         if (uLayerCount > 3) a += SampleLayer(uLayerAlbedo3, uLayerTiles.w, WP(3), triW, steep) * sw.a;
         albedo = a; // vertex colour/tint intentionally excluded
 
+        // Grass-ground tint: blend the terrain toward the grass colour where the
+        // foliage grows, ramping to full by uGrassGroundFar so near ground keeps
+        // detail. Done BEFORE the road composite so roads still paint over it.
+        if (uGrassGroundStrength > 0.001) {
+            float gmask = (uGrassGrowLayer < 0) ? 1.0 : clamp(sw[uGrassGrowLayer], 0.0, 1.0);
+            float gdist = length(viewPos - fragPosition);
+            float gramp = mix(0.6, 1.0, smoothstep(0.0, max(uGrassGroundFar, 1.0) * 0.9, gdist));
+            vec3 gcol = GG_MeadowColor(uGrassGroundColor, fragPosition.xz, gdist,
+                                   max(normalize(viewPos - fragPosition).y, 0.0) * 0.8,
+                                   uGrassGroundFar);
+            a = mix(a, gcol, uGrassGroundStrength * gmask * gramp);
+            albedo = a;
+        }
+
         if (uHasNormalMap > 0.5) {
             splatBump = SampleLayerBump(texture2, uLayerTiles.x, WP(0), triW, uLayerSwizzled.x, steep) * sw.r;
             if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, WP(1), triW, uLayerSwizzled.y, steep) * sw.g;
@@ -536,11 +673,26 @@ void main()
             }
         }
     }
+    // Zero-asset terrain (no splat layers): tint the plain/checker ground too,
+    // so a meadow still reads as a grass field. (The splat path tints inside the
+    // block above, grow-layer-masked and before the road composite.)
+    if (uSplatEnabled <= 0.5 && uGrassGroundStrength > 0.001) {
+        float gdist = length(viewPos - fragPosition);
+        float gramp = mix(0.6, 1.0, smoothstep(0.0, max(uGrassGroundFar, 1.0) * 0.9, gdist));
+        vec3 gcol = GG_MeadowColor(uGrassGroundColor, fragPosition.xz, gdist,
+                                   max(normalize(viewPos - fragPosition).y, 0.0) * 0.8,
+                                   uGrassGroundFar);
+        albedo = mix(albedo, gcol, uGrassGroundStrength * gramp);
+    }
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 
     vec3 N = geoN;
     if (uSplatEnabled > 0.5) {
-        N = normalize(geoN + splatBump * uNormalDepth);
+        // Fade the normal bump toward the flat geometric normal with distance:
+        // a minified tiling normal map aliases into banding at range/grazing
+        // angle, so past ~40 m the terrain lights off its geo normal only.
+        float nfade = 1.0 - smoothstep(18.0, 45.0, length(viewPos - fragPosition));
+        N = normalize(geoN + splatBump * (uNormalDepth * nfade));
     } else if (uHasNormalMap > 0.5) {
         if (uTriplanar > 0.5) {
             // UDN blend in local space

@@ -12,7 +12,8 @@ out vec4 finalColor;
 
 uniform sampler2D texture0;   // HDR scene (drives fragTexCoord only)
 uniform sampler2D uDepth;     // scene depth
-uniform sampler2D uShadowMap; // directional sun shadow map
+uniform sampler2D uShadowMap; // sun shadow depth ATLAS (2x2 cascades)
+uniform vec2 uShadowTile;     // far-cascade tile origin in the atlas ([0,1] UV)
 
 uniform mat4 uInvViewProj;
 uniform mat4 uMatLight;
@@ -80,7 +81,8 @@ void main() {
         if (projCoords.x >= 0.0 && projCoords.x <= 1.0 &&
             projCoords.y >= 0.0 && projCoords.y <= 1.0 &&
             projCoords.z >= 0.0 && projCoords.z <= 1.0) {
-            float closestDepth = texture(uShadowMap, projCoords.xy).r;
+            // Remap the cascade's [0,1] UV into its tile of the 2x2 atlas.
+            float closestDepth = texture(uShadowMap, projCoords.xy * 0.5 + uShadowTile).r;
             if (projCoords.z - 0.001 <= closestDepth) {
                 opticalDepth += 1.0; // this sample sees the sun
             }

@@ -147,8 +147,9 @@ typedef struct BrushPost {
   Vector3 sunDir;      // current light direction (sun or moon)
   Vector3 sunColor;
   Vector3 ambientColor; // sky/fill colour (fog body tint)
-  Matrix lightVP;       // shadow-pass light matrix
-  Texture2D shadowMap;  // shadow depth map; id 0 = no shadow pass this frame
+  Matrix lightVP;       // shadow-pass light matrix (far cascade)
+  Texture2D shadowMap;  // shadow depth ATLAS; id 0 = no shadow pass this frame
+  Vector2 shadowTile;   // far-cascade tile origin in the 2x2 atlas ([0,1] UV)
 
   bool ready; // false if the HDR framebuffer failed (post silently disabled)
 } BrushPost;

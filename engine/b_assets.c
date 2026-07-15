@@ -824,6 +824,57 @@ bool BrushAssetsIsSwizzledNormal(Texture2D tex) {
   return false;
 }
 
+// Generate a tangent-space normal map from an albedo texture's luminance:
+// brightness is treated as height, and a wrap-around Sobel gradient becomes the
+// normal (OpenGL convention, +Y up). A convenience for terrain/material textures
+// uploaded WITHOUT a normal — approximate (colour isn't true depth) but reads
+// well for organic surfaces (dirt/gravel/grass/rock). `strength` scales relief.
+// Returns a NEW texture the CALLER owns (UnloadTexture) — NOT the asset cache.
+Texture2D BrushGenNormalFromAlbedo(Texture2D albedo, float strength) {
+  if (albedo.id == 0 || albedo.width <= 1 || albedo.height <= 1)
+    return (Texture2D){0};
+  if (strength <= 0.0f) strength = 1.0f;
+  Image src = LoadImageFromTexture(albedo); // GPU -> CPU readback (one-time)
+  if (src.data == NULL) return (Texture2D){0};
+  int w = src.width, h = src.height;
+  Color *px = LoadImageColors(src);
+  float *hgt = (float *)MemAlloc(sizeof(float) * w * h);
+  for (int i = 0; i < w * h; i++)
+    hgt[i] = (0.299f * px[i].r + 0.587f * px[i].g + 0.114f * px[i].b) / 255.0f;
+
+  Color *out = (Color *)MemAlloc(sizeof(Color) * w * h);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      // 2-pixel baseline (not 1): captures lower-frequency relief so the normal
+      // doesn't alias into banding when the texture minifies at distance. Wrap
+      // so tiling stays seamless. Halve to keep the slope magnitude comparable.
+      int xl = (x - 2 + w) % w, xr = (x + 2) % w;
+      int yd = (y - 2 + h) % h, yu = (y + 2) % h;
+      float dx = (hgt[y * w + xl] - hgt[y * w + xr]) * strength * 0.5f;
+      float dy = (hgt[yd * w + x] - hgt[yu * w + x]) * strength * 0.5f;
+      float nx = dx, ny = dy, nz = 1.0f;
+      float len = sqrtf(nx * nx + ny * ny + nz * nz);
+      nx /= len; ny /= len; nz /= len;
+      out[y * w + x] = (Color){(unsigned char)((nx * 0.5f + 0.5f) * 255.0f),
+                               (unsigned char)((ny * 0.5f + 0.5f) * 255.0f),
+                               (unsigned char)((nz * 0.5f + 0.5f) * 255.0f), 255};
+    }
+  }
+  Image nrm = {.data = out, .width = w, .height = h, .mipmaps = 1,
+               .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+  Texture2D tex = LoadTextureFromImage(nrm); // copies to GPU
+  if (tex.id != 0) {
+    GenTextureMipmaps(&tex);
+    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
+  }
+  MemFree(out); // `nrm.data`; don't UnloadImage (would double-free)
+  MemFree(hgt);
+  UnloadImageColors(px);
+  UnloadImage(src);
+  return tex;
+}
+
 // --- Model registry --------------------------------------------------------------
 
 #define BRUSH_ASSETS_MAX_MODELS 64

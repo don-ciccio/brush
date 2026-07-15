@@ -377,8 +377,8 @@ static void SandboxInit(void *user) {
     memset(fl, 0, sizeof(*fl));
     snprintf(fl->name, sizeof(fl->name), "grass");
     fl->density = 0.5f; // patches/m^2 (each is a ~120-blade clump)
-    fl->drawDistance = 68.0f;
-    fl->lodDistance = 26.0f;
+    fl->drawDistance = 110.0f; // grass geometry to here; terrain green carries
+    fl->lodDistance = 34.0f;   // the horizon beyond (pushing further rings/heats)
     fl->scale = 1.0f;
     fl->scaleJitter = 0.35f;
     fl->heightOffset = -0.04f;

@@ -91,6 +91,13 @@ bool BrushAssetsSetImportParams(const char *path,
 // (consumers must tell the lit shader to reconstruct Z from alpha/green).
 bool BrushAssetsIsSwizzledNormal(Texture2D tex);
 
+// Generate a tangent-space normal map from an albedo's luminance (height =
+// brightness, Sobel gradient -> normal). For terrain/material textures uploaded
+// without a normal. Returns a NEW texture the CALLER owns (UnloadTexture), not
+// the asset cache. `strength` scales relief; approximate but good for organic
+// surfaces. {0} on failure (albedo id 0 / <=1px / readback failed).
+Texture2D BrushGenNormalFromAlbedo(Texture2D albedo, float strength);
+
 // --- Models -------------------------------------------------------------------
 // Ref-counted like textures, keyed by project-relative path. The registry
 // binds the engine lit shader to every material on load (raylib prepends

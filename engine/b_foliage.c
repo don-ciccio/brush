@@ -215,6 +215,25 @@ static inline float BrushFoliageFarTransition(float drawDistance) {
   return (drawDistance * 0.1f < 10.0f) ? (drawDistance * 0.1f) : 10.0f;
 }
 
+// Density taper for the OUTER (billboard) tier: past `start`, keep a
+// distance-falling fraction of instances so the field thins into the terrain
+// instead of ending at full density on a hard line. The keep test is a stable
+// hash of the instance's world XZ (0.25 m grid) — the SAME instances drop every
+// frame, so the thinning never flickers. Keeps ~THIN_FLOOR at the cull edge.
+#define BRUSH_FOLIAGE_THIN_FLOOR 0.18f
+static inline bool BrushFoliageThinKeep(float x, float z, float dist,
+                                        float start, float drawDistance) {
+  if (dist <= start || drawDistance <= start) return true;
+  float t = (dist - start) / (drawDistance - start);
+  if (t > 1.0f) t = 1.0f;
+  t = t * t * (3.0f - 2.0f * t);
+  float keepProb = 1.0f - t * (1.0f - BRUSH_FOLIAGE_THIN_FLOOR);
+  int xi = (int)floorf(x * 4.0f), zi = (int)floorf(z * 4.0f);
+  unsigned int h = (unsigned)xi * 73856093u ^ (unsigned)zi * 19349663u;
+  h ^= h >> 13; h *= 0x5bd1e995u; h ^= h >> 15;
+  return (float)(h & 0xffffff) / 16777216.0f < keepProb;
+}
+
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
                       float billboardDistance, BrushFoliageDrawBatch *nearB,
@@ -260,8 +279,12 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
 
       if (fullyInCone && (fullyNear || fullyFar || fullyBB)) {
         BrushFoliageDrawBatch *dst = fullyNear ? nearB : (fullyFar ? farB : bbB);
+        bool thin = (dst == bbB); // outer tier tapers density into the terrain
         for (int k = 0; k < cell->count; k++) {
           int i = set->gridIndices[cell->offset + k];
+          if (thin && !BrushFoliageThinKeep(set->positions[i].x, set->positions[i].z,
+                                            cDist, billboardDistance, drawDistance))
+            continue;
           unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
           BatchAppend(dst, mi, set->transforms[i]);
         }
@@ -281,7 +304,9 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
           if (dist >= lodDistance - tNear && (!useBB || dist < billboardDistance)) {
             BatchAppend(farB, mi, set->transforms[i]);
           }
-          if (useBB && dist >= billboardDistance - tFar) {
+          if (useBB && dist >= billboardDistance - tFar &&
+              BrushFoliageThinKeep(set->positions[i].x, set->positions[i].z,
+                                   dist, billboardDistance, drawDistance)) {
             BatchAppend(bbB, mi, set->transforms[i]);
           }
         }
@@ -807,6 +832,14 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     L->cfg.macroHigh = (Vector3){1.05f, 1.05f, 0.78f};
   if (L->cfg.tint.x == 0 && L->cfg.tint.y == 0 && L->cfg.tint.z == 0)
     L->cfg.tint = (Vector3){1, 1, 1};
+  // F3 (prototype default): zero-asset/procedural grass greens the terrain so a
+  // meadow reads as a continuous field past the 3D blades; imported models
+  // (meshCount > 0 — rocks, trees) don't tint the ground. Explicit groundStrength
+  // wins. TODO: promote to an authored per-layer field (scene + editor UI).
+  if (L->cfg.groundStrength <= 0.0f && cfg->meshCount <= 0) {
+    L->cfg.groundColor = (Vector3){0.28f, 0.36f, 0.16f};
+    L->cfg.groundStrength = 0.65f;
+  }
 
   // Model palette: build near + far LOD mesh and a material per variant. An
   // empty palette (or a variant with no mesh) falls back to the procedural tuft;
@@ -868,10 +901,12 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     // re-pushed every frame in the draw, so scribbling on it here is fine.
     if (f->impostor) BrushFoliageBakeImpostor(f, L, m, albedo);
   }
-  // Billboard band covers the outer half of the far range (mesh near, impostor
-  // far); 0 disables it. Kept short of drawDistance's fade so the swap hides.
+  // Billboard band covers the outer ~60% of the far range (mesh near, impostor
+  // far); 0 disables it. A wider band means the impostors dissolve (height-fade)
+  // over a LONGER distance, melting into the ground/speckles instead of a hard
+  // bright edge. Kept short of drawDistance's fade so the swap hides.
   L->billboardDistance = (f->impostor)
-      ? L->cfg.lodDistance + (L->cfg.drawDistance - L->cfg.lodDistance) * 0.5f
+      ? L->cfg.lodDistance + (L->cfg.drawDistance - L->cfg.lodDistance) * 0.4f
       : 0.0f;
 
   // Per-model visible buffers, each sized to the layer's worst-case (one variant
@@ -889,6 +924,12 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     L->farB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
     if (f->impostor) L->bbB.buf[m] = MemAlloc(sizeof(Matrix) * (int)cap);
   }
+  // F3: green the terrain where this layer grows so the ground reads as a grass
+  // field past the 3D blades (fills the bare horizon). Last tinted layer wins —
+  // author the dominant grass layer last if several are tinted.
+  if (L->cfg.groundStrength > 0.0f)
+    BrushRenderSetGrassGround(L->cfg.groundColor, L->cfg.groundStrength,
+                              L->cfg.growLayer, L->cfg.drawDistance);
   return f->layerCount++;
 }
 
@@ -918,6 +959,9 @@ void BrushFoliageClearLayers(BrushFoliage *f) {
     *L = (BrushFoliageLayer){0};
   }
   f->layerCount = 0;
+  // Drop the grass-ground tint; a following re-add re-applies it (editor
+  // re-scatter clears then re-adds). Off = no terrain tint.
+  BrushRenderSetGrassGround((Vector3){0, 0, 0}, 0.0f, -1, 1.0f);
 }
 
 void BrushFoliageSetWind(BrushFoliage *f, Vector2 dir, float strength) {
@@ -1201,12 +1245,15 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       }
     }
 
-    // Billboard band: fade IN over [bbDist - tFar, bbDist] (matches the far
-    // band's fade-out), fade OUT over [draw - tFar, draw]. Pre-lit atlas.
+    // Billboard band: fade IN over [bbDist - tFar, bbDist], then DISSOLVE across
+    // the WHOLE outer band [bbDist, draw] — flat impostor cards light up bright
+    // and uniform at a grazing sun, so a long height fade-out (not just the last
+    // tFar) is what makes the far tier melt into the ground instead of snapping
+    // off as a bright band. Peaks at bbDist, gone by draw.
     if (bc > 0) {
       float one = 1.0f;
       SetShaderValue(f->shader, f->locImpostor, &one, SHADER_UNIFORM_FLOAT);
-      BRUSH_FOLIAGE_SET_FADE(bbDist - tFar, bbDist, draw - tFar, draw);
+      BRUSH_FOLIAGE_SET_FADE(bbDist - tFar, bbDist, bbDist, draw);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->bbB.count[m] > 0 && L->hasImpostor[m])
           DrawMeshInstanced(L->billboardMesh[m], L->billboardMat[m],

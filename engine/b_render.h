@@ -96,6 +96,15 @@ Shader BrushGetLitShader(void);
 void BrushSetSun(Vector3 dir, Vector3 color, Vector3 ambient);
 Vector3 BrushGetSunDir(void);
 
+// Grass-ground tint (foliage F3): make the terrain read as a grass field where
+// foliage grows, so the ground doesn't end in bare dirt past the 3D blades.
+// Tints the splat terrain toward `color` (sRGB) by `strength` (0..1; 0 = off)
+// where `growLayer` dominates (-1 = everywhere), ramping to full by `far` metres.
+// Persistent shader state — set once (or when the foliage layers change). Only
+// affects splat terrain draws; other lit geometry is unaffected.
+void BrushRenderSetGrassGround(Vector3 color, float strength, int growLayer,
+                              float far);
+
 // --- Point lights (DYNAMIC, never baked — see docs/roadmap.md) -------------
 // Submit per frame, like draws: the list clears after every execute, so
 // moving lights (a carried torch) are free. Colors are LINEAR and may exceed
@@ -166,6 +175,7 @@ typedef struct BrushTerrainLayer {
   Texture2D displacement; // id 0 = none (only used if parallax)
   float tile;          // world metres per texture repeat
   float heightScale;   // parallax displacement scale
+  float normalDepth;   // normal-map intensity (0 -> engine default 1.0)
   bool normalSwizzled; // DXT5nm-cooked normal map
   bool parallax;       // ray-march this layer's displacement (POM) on flat ground
   bool heightBlend;    // height-based edge blend vs the neighbouring layers

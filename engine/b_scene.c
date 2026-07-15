@@ -435,11 +435,17 @@ void BrushSceneUnloadMaterials(BrushScene *s) {
   }
   for (int i = 0; i < s->materialCount; i++) {
     BrushAssetsReleaseTexture(s->materials[i].albedoTex);
-    BrushAssetsReleaseTexture(s->materials[i].normalTex);
+    // A generated normal is owned by the material (not the cache) — unload it
+    // directly; an authored/cached one goes back through the cache refcount.
+    if (s->materials[i].normalGenerated)
+      UnloadTexture(s->materials[i].normalTex);
+    else
+      BrushAssetsReleaseTexture(s->materials[i].normalTex);
     BrushAssetsReleaseTexture(s->materials[i].displacementTex);
     BrushAssetsReleaseTexture(s->materials[i].aoTex);
     s->materials[i].albedoTex = (Texture2D){0};
     s->materials[i].normalTex = (Texture2D){0};
+    s->materials[i].normalGenerated = false;
     s->materials[i].displacementTex = (Texture2D){0};
     s->materials[i].aoTex = (Texture2D){0};
   }
@@ -476,6 +482,16 @@ void BrushSceneResolveMaterials(BrushScene *s) {
     m->normalTex = BrushAssetsTexture(m->normal);
     m->displacementTex = BrushAssetsTexture(m->displacement);
     m->aoTex = BrushAssetsTexture(m->ao);
+    // No authored normal but there's an albedo: derive one from its luminance
+    // so terrain/materials get relief for free (industry-standard convenience;
+    // BRUSH_NO_GEN_NORMALS=1 to force flat). The shader's normalDepth still
+    // scales the visible strength; the user can drop in a real normal to override.
+    m->normalGenerated = false;
+    if (m->normalTex.id == 0 && m->albedoTex.id != 0 &&
+        getenv("BRUSH_NO_GEN_NORMALS") == NULL) {
+      m->normalTex = BrushGenNormalFromAlbedo(m->albedoTex, 2.0f);
+      m->normalGenerated = (m->normalTex.id != 0);
+    }
     if (m->tile <= 0.01f) m->tile = 1.0f;
   }
   for (int i = 0; i < s->modelCount; i++) {
@@ -537,6 +553,7 @@ bool BrushSceneMaterialLayer(const BrushScene *s, const char *name,
   out->displacement = m->displacementTex;
   out->tile = (m->tile > 0.01f) ? m->tile : 1.0f;
   out->heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
+  out->normalDepth = (m->normalDepth > 0.0f) ? m->normalDepth : 1.0f;
   out->normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
   out->parallax = m->parallax;
   out->heightBlend = m->heightBlend;

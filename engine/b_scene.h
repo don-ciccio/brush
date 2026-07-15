@@ -72,6 +72,7 @@ typedef struct BrushSceneMaterial {
   bool heightBlend;  // height-based edge blend vs neighbouring terrain layers
   float blendSharp;  // height-blend transition band (smaller = crisper, ~0.2)
   Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
+  bool normalGenerated; // normalTex was derived from albedo (owned, not cached)
 } BrushSceneMaterial;
 
 // A placed 3D model (static prop). The resolved Model comes from the

@@ -30,28 +30,29 @@ uniform float uImpostorBake; // bake pass: 1 = emit albedo, 2 = emit encoded nor
 // Sun shadow (CSM) — mirrors lit.fs's cascade selection, single tap. Gated off
 // by default (uShadowEnabled 0) so a shader with no shadow maps bound still runs.
 uniform mat4 lightVP0, lightVP1, lightVP2;
-uniform sampler2D shadowMap0, shadowMap1, shadowMap2;
+uniform sampler2D shadowAtlas; // all 3 cascades in one 2x2 depth atlas (1 unit)
 uniform vec3 uCascadeFar;      // cascade far distances (m)
 uniform float uShadowEnabled;  // 1 = sample shadows
 uniform float uShadowStrength; // horizon fade (1 = full, 0 = none)
 
 out vec4 finalColor;
 
-// One hard tap with slope-scaled bias. 1 = shadowed, 0 = lit.
-float ShadowTap(sampler2D sm, mat4 lightVP, vec3 fragPos, float ndotl) {
+// One hard tap with slope-scaled bias, against cascade `tile` in the 2x2 atlas.
+// 1 = shadowed, 0 = lit.
+float ShadowTap(vec2 tile, mat4 lightVP, vec3 fragPos, float ndotl) {
     vec4 p = lightVP * vec4(fragPos, 1.0);
     vec3 proj = p.xyz / p.w;
     proj = proj * 0.5 + 0.5;
     if (proj.z > 1.0) return 0.0;
     if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0) return 0.0;
     float bias = max(0.002 * (1.0 - ndotl), 0.0005);
-    return (proj.z - bias > texture(sm, proj.xy).r) ? 1.0 : 0.0;
+    return (proj.z - bias > texture(shadowAtlas, proj.xy * 0.5 + tile).r) ? 1.0 : 0.0;
 }
 
 float ShadowFactor(vec3 fragPos, float ndotl) {
-    if (fragDist < uCascadeFar.x) return ShadowTap(shadowMap0, lightVP0, fragPos, ndotl);
-    if (fragDist < uCascadeFar.y) return ShadowTap(shadowMap1, lightVP1, fragPos, ndotl);
-    if (fragDist < uCascadeFar.z) return ShadowTap(shadowMap2, lightVP2, fragPos, ndotl);
+    if (fragDist < uCascadeFar.x) return ShadowTap(vec2(0.0, 0.0), lightVP0, fragPos, ndotl);
+    if (fragDist < uCascadeFar.y) return ShadowTap(vec2(0.5, 0.0), lightVP1, fragPos, ndotl);
+    if (fragDist < uCascadeFar.z) return ShadowTap(vec2(0.0, 0.5), lightVP2, fragPos, ndotl);
     return 0.0;
 }
 
@@ -73,6 +74,10 @@ void main() {
                                : normalize(fragNormal);
     vec3 albedo = tex.rgb * colDiffuse.rgb * fragColor.rgb * uGrassTint;
     albedo *= fragMacroColor; // low-frequency patch variation
+    // Impostor cards don't self-shadow like the near 3D blades, so at a grazing
+    // sun they read too hot — knock them down to fake the missing inter-blade
+    // occlusion so the far tier melts into the ground instead of glowing.
+    if (uImpostor > 0.5) albedo *= 0.75;
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 
     // Half-Lambert (Valve wrap): grass cards are thin and two-sided, so shade

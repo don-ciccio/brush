@@ -81,8 +81,10 @@ void main() {
     }
     float heightScale = grassFade * nearFade;
 
-    // Shrink distant instances to cut overdraw (100% -> 35% between 100..250 m).
-    float sizeScale = mix(1.0, 0.35, clamp((instDist - 100.0) / 150.0, 0.0, 1.0));
+    // Shrink distant instances to cut overdraw — but gently and late, so the
+    // far field stays visible now that the density taper (CPU) already thins it
+    // and the terrain green carries the horizon (100% -> 60% over 150..320 m).
+    float sizeScale = mix(1.0, 0.6, clamp((instDist - 150.0) / 170.0, 0.0, 1.0));
     // Fade/shrink by HEIGHT only: scaling all axes would slide the base verts
     // toward the model origin as the camera distance changes, making the grass
     // look like it drifts. Shrinking Y keeps the base footprint planted.

@@ -66,22 +66,19 @@ void BrushShadowInit(BrushShadow *sh, int resolution) {
   }
 
   sh->ready = true;
-  for (int i = 0; i < BRUSH_SHADOW_CASCADES; i++) {
-    sh->map[i] = LoadShadowmapRenderTexture(resolution, resolution);
-    sh->lightVP[i] = MatrixIdentity();
-    if (sh->map[i].id == 0 || sh->map[i].depth.id == 0) sh->ready = false;
-  }
+  // One 2x2 square depth atlas holds all cascades (see b_shadow.h).
+  sh->atlas = LoadShadowmapRenderTexture(2 * resolution, 2 * resolution);
+  if (sh->atlas.id == 0 || sh->atlas.depth.id == 0) sh->ready = false;
+  for (int i = 0; i < BRUSH_SHADOW_CASCADES; i++) sh->lightVP[i] = MatrixIdentity();
 
   sh->lightCam.up = (Vector3){0.0f, 1.0f, 0.0f};
   sh->lightCam.projection = CAMERA_ORTHOGRAPHIC;
 }
 
 void BrushShadowUnload(BrushShadow *sh) {
-  for (int i = 0; i < BRUSH_SHADOW_CASCADES; i++) {
-    if (sh->map[i].id > 0) {
-      rlUnloadFramebuffer(sh->map[i].id);
-      if (sh->map[i].depth.id > 0) rlUnloadTexture(sh->map[i].depth.id);
-    }
+  if (sh->atlas.id > 0) {
+    rlUnloadFramebuffer(sh->atlas.id);
+    if (sh->atlas.depth.id > 0) rlUnloadTexture(sh->atlas.depth.id);
   }
   *sh = (BrushShadow){0};
 }
@@ -151,10 +148,15 @@ void BrushShadowBeginCascade(BrushShadow *sh, int i, Vector3 sunDir,
   sh->lightCam.up = up;
   sh->lightCam.fovy = orthoSize; // ortho: fovy is the world-space box size
 
-  BeginTextureMode(sh->map[i]);
-  ClearBackground(WHITE); // clears depth to far
-  // The map must not be bound as a sampler while we render into it.
-  rlActiveTextureSlot(sh->slot + i);
+  BeginTextureMode(sh->atlas);
+  if (i == 0) ClearBackground(WHITE); // clear the WHOLE atlas once, to far
+  // Render this cascade into its tile of the 2x2 atlas. The atlas is square so
+  // BeginMode3D's aspect stays 1.0 (square ortho box); the viewport restricts
+  // rasterisation to the tile. Set AFTER BeginTextureMode (which resets it).
+  int res = sh->resolution;
+  rlViewport((i & 1) * res, (i >> 1) * res, res, res);
+  // The atlas must not be bound as a sampler while we render into it.
+  rlActiveTextureSlot(sh->slot);
   rlDisableTexture();
   BeginMode3D(sh->lightCam);
   // Capture the exact matrices raylib uses so the shader test matches.
@@ -170,9 +172,7 @@ void BrushShadowEnd(BrushShadow *sh) {
 }
 
 void BrushShadowBindMaps(BrushShadow *sh) {
-  for (int i = 0; i < BRUSH_SHADOW_CASCADES; i++) {
-    rlActiveTextureSlot(sh->slot + i);
-    rlEnableTexture(sh->map[i].depth.id);
-  }
+  rlActiveTextureSlot(sh->slot);
+  rlEnableTexture(sh->atlas.depth.id);
   rlActiveTextureSlot(0);
 }

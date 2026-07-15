@@ -2161,7 +2161,10 @@ int main(int argc, char **argv) {
                                g_scene.materials[selMat].name) == 0)
                         g_scene.blocks[i].material[0] = '\0';
                 BrushAssetsReleaseTexture(g_scene.materials[selMat].albedoTex);
-                BrushAssetsReleaseTexture(g_scene.materials[selMat].normalTex);
+                if (g_scene.materials[selMat].normalGenerated)
+                    UnloadTexture(g_scene.materials[selMat].normalTex); // owned, not cached
+                else
+                    BrushAssetsReleaseTexture(g_scene.materials[selMat].normalTex);
                 BrushAssetsReleaseTexture(g_scene.materials[selMat].displacementTex);
                 BrushAssetsReleaseTexture(g_scene.materials[selMat].aoTex);
                 for (int i = selMat; i < g_scene.materialCount - 1; i++)
@@ -2191,6 +2194,10 @@ int main(int argc, char **argv) {
                                           sizeof(m->albedo));
                 reresolve |= TexPathCombo("Normal", m->normal,
                                           sizeof(m->normal));
+                if (m->normalGenerated)
+                    ImGui::TextDisabled(
+                        "  \xE2\x86\xB3 normal generated from albedo "
+                        "(set one to override; tune with Normal Depth)");
                 reresolve |= TexPathCombo("Displacement", m->displacement,
                                           sizeof(m->displacement));
                 reresolve |= TexPathCombo("AO", m->ao,
@@ -2215,8 +2222,10 @@ int main(int argc, char **argv) {
                                  ImVec2(thumb, thumb));
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip(
-                            "%s (%dx%d)%s", m->normal, m->normalTex.width,
-                            m->normalTex.height,
+                            "%s (%dx%d)%s",
+                            m->normalGenerated ? "(generated from albedo)"
+                                               : m->normal,
+                            m->normalTex.width, m->normalTex.height,
                             BrushAssetsIsSwizzledNormal(m->normalTex)
                                 ? "\nDXT5nm (preview looks yellow — normal)"
                                 : "");
