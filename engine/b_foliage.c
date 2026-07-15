@@ -274,7 +274,7 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
       float farEdge = useBB ? billboardDistance : drawDistance;
       bool fullyNear = (maxDist < lodDistance - tNear);
       bool fullyFar = (minDist >= lodDistance && maxDist < farEdge - tFar);
-      bool fullyBB = (useBB && minDist >= billboardDistance && maxDist < drawDistance - tFar);
+      bool fullyBB = (useBB && minDist >= billboardDistance && maxDist < drawDistance);
       bool fullyInCone = (cDist < 6.0f) || (projC > 0.0f && projC * projC > 0.36f * (dx * dx + dz * dz));
 
       if (fullyInCone && (fullyNear || fullyFar || fullyBB)) {
@@ -1166,11 +1166,12 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       if (dx * dx + dz * dz > draw * draw) continue;
 
       // Frustum culling: chunk AABB with foliage height padding
+      // Pad X/Z to prevent large models/trees from popping when their root chunk is off-screen.
       float pad = L->cfg.scale * 10.0f;
       if (pad < 5.0f) pad = 5.0f;
       BoundingBox chunkBox = {
-        .min = { minX, -50.0f, minZ },
-        .max = { maxX, views[ci].maxY + pad, maxZ }
+        .min = { minX - pad, -50.0f, minZ - pad },
+        .max = { maxX + pad, views[ci].maxY + pad, maxZ + pad }
       };
       if (!BrushFrustumContainsBox(&frustum, chunkBox)) continue;
 

@@ -21,8 +21,7 @@ in vec3 localNormal;
 
 uniform sampler2D texture0; // MATERIAL_MAP_DIFFUSE (albedo)
 uniform sampler2D texture2; // MATERIAL_MAP_NORMAL (raylib binds normals here)
-uniform sampler2D texture4; // MATERIAL_MAP_OCCLUSION (ao)
-uniform sampler2D texture6; // MATERIAL_MAP_HEIGHT (displacement)
+uniform sampler2D texture4; // Surface Map (R=AO, G=Roughness, B=Height)
 uniform vec4 colDiffuse;
 
 // --- Per-draw material (set by the renderer from BrushMaterialProps) ---
@@ -37,11 +36,11 @@ uniform float uNormalDepth; // normal map intensity (1 = authored)
 // 1 = the normal map is DXT5nm-swizzled (BC3: X in alpha, Y in green) —
 // reconstruct Z instead of reading xyz directly.
 uniform float uNormalSwizzled;
-uniform float uHasHeightMap;
+uniform float uHasSurfaceMap;
 uniform float uHeightScale;
 uniform float uParallax;      // 0 = flat (normal map only), 1 = parallax occlusion
 uniform float uParallaxShadow; // 1 = soft self-shadow the height field toward the sun
-uniform float uHasAoMap;
+uniform float uRoughnessDefault;
 uniform float uAoStrength;
 
 // --- Terrain splat (docs/terrain-painting-plan.md) ---
@@ -76,6 +75,7 @@ uniform vec3  uGrassGroundColor;
 uniform float uGrassGroundStrength;
 uniform int   uGrassGrowLayer;
 uniform float uGrassGroundFar;
+uniform float uTerrainFarNormal; // 1 = Phase B (keep+amplify normal far), 0 = fade flat
 // Road surface: an INDEPENDENT material composited over the finished terrain
 // blend by a coverage mask, so it never enters the 4-layer mix or its auto-rules.
 uniform float uRoadEnabled;
@@ -211,21 +211,53 @@ vec3 DecodeNormal(vec4 s, float swizzled) {
     return s.xyz * 2.0 - 1.0;
 }
 
-// One splat layer's albedo: planar-XZ on flat ground, full triplanar on
-// steep surfaces (sculpted cliffs would smear a top-projected texture).
+// World-space value-noise primitives. Shared by the terrain UV domain-warp
+// (right below) and the procedural meadow colour further down.
+float GG_Hash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float GG_Noise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(GG_Hash(i), GG_Hash(i + vec2(1, 0)), u.x),
+               mix(GG_Hash(i + vec2(0, 1)), GG_Hash(i + vec2(1, 1)), u.x), u.y);
+}
+// Rotated sample (~37°) so the octaves don't align to the world grid and band.
+float GG_Rot(vec2 p, float freq, float seed) {
+    vec2 r = vec2(p.x * 0.7986 - p.y * 0.6019, p.x * 0.6019 + p.y * 0.7986);
+    return GG_Noise(r * freq + seed);
+}
+
+// Low-frequency DOMAIN WARP: offset the sample position by a smooth noise so a
+// tiled texture's regular grid never lines up into visible repeat bands at
+// distance/grazing angle. RAMPED IN with distance so the near ground stays crisp
+// (tiling only bands far away — like the donor, near sampling is left unwarped).
+vec2 GG_WarpXZ(vec2 xz, float tile) {
+    float ramp = smoothstep(15.0, 60.0, length(viewPos.xz - xz));
+    if (ramp <= 0.0) return vec2(0.0);
+    vec2 w = vec2(GG_Rot(xz, 0.08, 12.3), GG_Rot(xz, 0.08, 45.6)) - 0.5;
+    return w * (tile * 0.3 * ramp);
+}
+
+// One splat layer's albedo: planar-XZ on flat ground (domain-warped to break the
+// tile grid), full triplanar on steep surfaces (cliffs would smear a top proj).
 vec3 SampleLayer(sampler2D tex, float tile, vec3 wp, vec3 triW, bool steep) {
-    if (!steep) return texture(tex, wp.xz / tile).rgb;
+    if (!steep) return texture(tex, (wp.xz + GG_WarpXZ(wp.xz, tile)) / tile).rgb;
     return texture(tex, wp.zy / tile).rgb * triW.x +
            texture(tex, wp.xz / tile).rgb * triW.y +
            texture(tex, wp.xy / tile).rgb * triW.z;
 }
 
 // One splat layer's tangent-space bump lifted to world axes (UDN swizzle),
-// planar or triplanar to match SampleLayer.
+// planar (domain-warped + distance mip-BIASed so the minified normal doesn't
+// alias into bands) or triplanar to match SampleLayer.
 vec3 SampleLayerBump(sampler2D tex, float tile, vec3 wp, vec3 triW,
-                     float sw, bool steep) {
+                     float sw, bool steep, float bias) {
     if (!steep) {
-        vec3 tn = DecodeNormal(texture(tex, wp.xz / tile), sw);
+        vec2 uv = (wp.xz + GG_WarpXZ(wp.xz, tile)) / tile;
+        vec3 tn = DecodeNormal(texture(tex, uv, bias), sw);
         return vec3(tn.x, 0.0, tn.y);
     }
     vec3 tnX = DecodeNormal(texture(tex, wp.zy / tile), sw);
@@ -251,7 +283,7 @@ vec3 SampleNormalMap(vec2 uv) {
 // height map stores 1 = crest, so we walk depth 0->1. Offset-limited by the
 // grazing angle; step count scales with the angle; textureGrad keeps the mip
 // stable as the UV marches. `viewTS` points from the surface toward the eye.
-vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
+vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale, bool readB) {
     float nSteps = mix(8.0, 32.0, clamp(1.0 - abs(viewTS.z), 0.0, 1.0));
     float layerD = 1.0 / nSteps;
     vec2 P = (viewTS.xy / max(abs(viewTS.z), 0.1)) * scale; // total sweep
@@ -260,12 +292,12 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
     // Linear search: step along the ray until it passes under the height field.
     float curD = 0.0;
     vec2  cur = uv;
-    float hCur = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
+    float hCur = 1.0 - (readB ? textureGrad(heightTex, cur, ddx, ddy).b : textureGrad(heightTex, cur, ddx, ddy).r);
     for (int i = 0; i < 32; i++) {
         if (float(i) >= nSteps || curD >= hCur) break;
         cur  -= dUV;
         curD += layerD;
-        hCur  = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
+        hCur  = 1.0 - (readB ? textureGrad(heightTex, cur, ddx, ddy).b : textureGrad(heightTex, cur, ddx, ddy).r);
     }
     // Relief-mapping refinement: the intersection lies in the last [prev, cur]
     // interval (prev above the surface, cur below). Bisect it a few times for a
@@ -275,7 +307,7 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
     for (int i = 0; i < 5; i++) {
         vec2  midUV = 0.5 * (cur + prev);
         float midD  = 0.5 * (curD + prevD);
-        float hMid  = 1.0 - textureGrad(heightTex, midUV, ddx, ddy).r;
+        float hMid  = 1.0 - (readB ? textureGrad(heightTex, midUV, ddx, ddy).b : textureGrad(heightTex, midUV, ddx, ddy).r);
         if (midD >= hMid) { cur = midUV;  curD = midD; }  // still under: tighten near side
         else              { prev = midUV; prevD = midD; } // above: tighten far side
     }
@@ -286,7 +318,7 @@ vec2 ParallaxUV(sampler2D heightTex, vec2 uv, vec3 viewTS, float scale) {
 // toward the light (tangent space) and accumulate how far the field pokes above
 // the ray. 1 = lit, 0 = fully occluded (dark grout between raised stones). L
 // points toward the light; scale matches ParallaxUV's depth.
-float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale) {
+float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale, bool readB) {
     if (L.z <= 0.05) return 1.0;
     vec2 ddx = dFdx(uv), ddy = dFdy(uv);
     // Work in the same depth space as the march (0 = crest, 1 = valley). The
@@ -302,7 +334,7 @@ float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale) {
         cur  += dUV;
         rayD -= dD;
         if (rayD <= 0.0) break;                          // above the tallest crest
-        float sD = 1.0 - textureGrad(heightTex, cur, ddx, ddy).r;
+        float sD = 1.0 - (readB ? textureGrad(heightTex, cur, ddx, ddy).b : textureGrad(heightTex, cur, ddx, ddy).r);
         if (sD < rayD) occ = max(occ, (rayD - sD) * (1.0 - float(i) / float(N)));
     }
     return 1.0 - clamp(occ * 4.0, 0.0, 1.0);
@@ -319,22 +351,7 @@ float ParallaxShadow(sampler2D heightTex, vec2 uv, vec3 L, float scale) {
 // Improvements over the donor: the whole palette is DERIVED from the layer's one
 // groundColor (tunable, any grass — not racer's hard-coded meadow constants);
 // the fine octave is fwidth-AA'd AND distance-gated so far pixels stay cheap.
-float GG_Hash(vec2 p) {
-    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract((p3.x + p3.y) * p3.z);
-}
-float GG_Noise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(GG_Hash(i), GG_Hash(i + vec2(1, 0)), u.x),
-               mix(GG_Hash(i + vec2(0, 1)), GG_Hash(i + vec2(1, 1)), u.x), u.y);
-}
-// Rotated sample (~37°) so the octaves don't align to the world grid and band.
-float GG_Rot(vec2 p, float freq, float seed) {
-    vec2 r = vec2(p.x * 0.7986 - p.y * 0.6019, p.x * 0.6019 + p.y * 0.7986);
-    return GG_Noise(r * freq + seed);
-}
+// (GG_Hash/GG_Noise/GG_Rot are defined up by SampleLayer — shared with the warp.)
 float GG_Biome(vec2 p)   { return GG_Rot(p, 0.035, 0.0) * 0.65 + GG_Rot(p, 0.09, 7.3) * 0.35; }
 float GG_Species(vec2 p) { return GG_Rot(p, 0.18, 13.7) * 0.5 + GG_Rot(p, 0.55, 29.1) * 0.3 + GG_Rot(p, 1.40, 43.9) * 0.2; }
 float GG_Clump(vec2 p)   { return GG_Rot(p, 2.8, 61.0) * 0.55 + GG_Rot(p, 7.5, 87.3) * 0.45; }
@@ -342,8 +359,7 @@ float GG_Drought(vec2 p) { return GG_Rot(vec2(p.x * 0.6, p.y), 0.12, 103.0); }
 
 // `base` = layer groundColor (sRGB, pre-linearise, like the surrounding albedo).
 // `gaze` = grazing-gap-hide factor (0 top-down .. hides bare soil at eye level).
-// `grassFar` = the 3D-grass draw distance (speckles fade in past it).
-vec3 GG_MeadowColor(vec3 base, vec2 wxz, float dist, float gaze, float grassFar) {
+vec3 GG_MeadowColor(vec3 base, vec2 wxz, float dist, float gaze) {
     // Palette derived from the one base tone. Kept SUBTLE and mostly in
     // BRIGHTNESS (same hue) — hue-shifted patches read as unnatural "spots".
     // straw/yellow are gentle warm accents, used sparingly.
@@ -385,33 +401,9 @@ vec3 GG_MeadowColor(vec3 base, vec2 wxz, float dist, float gaze, float grassFar)
         col = mix(col, clumpCol, aaBase * 0.70);
     }
 
-    // Dry-grass tip SPECKLES (donor's "dry accent dots", retuned for our range):
-    // sparse warm points, clustered in colonies, implying distant grass tips
-    // catching the sun WHERE THE 3D BLADES HAVE THINNED OUT — so the far field
-    // still reads as living grass, not flat colour. Faded in past the grass
-    // horizon and out far away; softened by footprint so they sparkle, not alias.
-    // Speckles ramp SLOWLY and PEAK WELL PAST the grass edge (~gf), so at the
-    // far-LOD hand-off they're only partway up (matching the last thin grass)
-    // and keep thickening into the distance — no bright pop where the grass ends.
-    float gf = max(grassFar, 20.0);
-    float accFade = smoothstep(gf * 0.15, gf * 1.2, dist) *
-                    (1.0 - smoothstep(gf * 3.0, gf * 5.0, dist));
-    if (accFade > 0.001) {
-        float colony = smoothstep(0.15, 0.46, GG_Rot(wxz, 0.6, 57.1)); // clusters
-        float spk = GG_Rot(wxz, 3.0, 83.1) * 0.6 + GG_Rot(wxz, 6.0, 94.7) * 0.4;
-        float aaw = clamp(footprint * 3.0, 0.02, 0.18); // widen threshold with distance
-        float dots = smoothstep(0.56 - aaw, 0.56 + aaw, spk) * colony * accFade;
-        // Dark rim around each dot = fake occlusion, so they read as pointy volume.
-        float rim = smoothstep(0.46, 0.54, spk) * (1.0 - smoothstep(0.54, 0.58, spk)) *
-                    colony * accFade;
-        // Tip highlight DERIVED FROM the local ground colour, brightened toward a
-        // sunlit tip but keeping the HUE of whatever grass this project uses
-        // (a near-uniform boost, only a hair warm — NOT a hard yellow shift that
-        // would force gold over a green field). Lit by the current sun afterwards.
-        vec3 tip = clamp(col * vec3(1.55, 1.62, 1.30), 0.0, 1.0);
-        col = mix(col, tip, dots * 0.62);
-        col = mix(col, col * 0.35, rim * 0.50);
-    }
+    // (The far field's "living grass" read now comes from Phase B's normal-lit
+    // shading + a tight grass SPECULAR sparkle in main() — light-driven, so it
+    // blends and tracks the sun — instead of the old painted speckle dots.)
 
     // Distant grass fades a touch warmer (sun-bleached) — subtle.
     col = mix(col, yellow * 0.82, smoothstep(90.0, 220.0, dist) * 0.28);
@@ -422,6 +414,7 @@ void main()
 {
     vec3 geoN = normalize(fragNormal);
     float pomShadow = 1.0; // POM self-shadow, applied to the sun term below
+    float gGrassMask = 0.0; // grass-ground coverage (set in the tint blocks) -> grass specular
     vec3 triW = TriplanarWeights(geoN);
     float ts = max(uTexScale, 0.001);
 
@@ -454,7 +447,7 @@ void main()
         // Triplanar parallax: POM the DOMINANT axis only (1x, not 3x), faded
         // with distance. The other two axes are low-weight; leaving them
         // unoffset is invisible in the blend.
-        if (uHasHeightMap > 0.5 && uParallax > 0.5) {
+        if (uHasSurfaceMap > 0.5 && uParallax > 0.5) {
             float pomFade = 1.0 - smoothstep(12.0, 24.0, length(viewPos - fragPosition));
             if (pomFade > 0.0) {
                 vec3 V_local = vec3(dot(V, worldAxisX),
@@ -463,21 +456,21 @@ void main()
                 float pScale = uHeightScale / ts; // world height -> projected-UV units
                 if (triW.x >= triW.y && triW.x >= triW.z) {
                     vec3 vts = vec3(V_local.z, V_local.y, V_local.x); // uvX = zy, depth X
-                    uvX = mix(uvX, ParallaxUV(texture6, uvX, vts, pScale), pomFade);
+                    uvX = mix(uvX, ParallaxUV(texture4, uvX, vts, pScale, true), pomFade);
                 } else if (triW.y >= triW.z) {
                     vec3 vts = (vSwapUV > 0.5) ? vec3(V_local.z, V_local.x, V_local.y)
                                                : vec3(V_local.x, V_local.z, V_local.y);
-                    uvY = mix(uvY, ParallaxUV(texture6, uvY, vts, pScale), pomFade);
+                    uvY = mix(uvY, ParallaxUV(texture4, uvY, vts, pScale, true), pomFade);
                 } else {
                     vec3 vts = vec3(V_local.x, V_local.y, V_local.z); // uvZ = xy, depth Z
-                    uvZ = mix(uvZ, ParallaxUV(texture6, uvZ, vts, pScale), pomFade);
+                    uvZ = mix(uvZ, ParallaxUV(texture4, uvZ, vts, pScale, true), pomFade);
                 }
             }
         }
     } else {
         // Tangent-space parallax (mesh-UV materials / models). POM ray-march,
         // faded out with distance so far pixels pay nothing and don't shimmer.
-        if (uHasHeightMap > 0.5 && uParallax > 0.5) {
+        if (uHasSurfaceMap > 0.5 && uParallax > 0.5) {
             float pomFade = 1.0 - smoothstep(12.0, 24.0, length(viewPos - fragPosition));
             float tangentLen = length(fragTangent.xyz);
             if (pomFade > 0.0 && tangentLen > 0.1) {
@@ -485,12 +478,12 @@ void main()
                 T = normalize(T - dot(T, geoN) * geoN);
                 vec3 B = cross(geoN, T) * fragTangent.w;
                 vec3 viewDirTS = vec3(dot(T, V), dot(B, V), dot(geoN, V));
-                vec2 pomUV = ParallaxUV(texture6, fragTexCoord, viewDirTS, uHeightScale);
+                vec2 pomUV = ParallaxUV(texture4, fragTexCoord, viewDirTS, uHeightScale, true);
                 uvMesh = mix(fragTexCoord, pomUV, pomFade);
                 if (uParallaxShadow > 0.5) {
                     vec3 L = normalize(uSunDir);
                     vec3 lTS = vec3(dot(T, L), dot(B, L), dot(geoN, L));
-                    pomShadow = mix(1.0, ParallaxShadow(texture6, pomUV, lTS, uHeightScale), pomFade);
+                    pomShadow = mix(1.0, ParallaxShadow(texture4, pomUV, lTS, uHeightScale, true), pomFade);
                 }
             }
         }
@@ -589,12 +582,12 @@ void main()
             if (pomFade > 0.0) {
                 vec2 uv = wp.xz / uPomTile;                 // planar-XZ tile UV
                 vec3 vts = vec3(V.x, V.z, V.y);             // world XZ tangent frame
-                vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uPomScale);
+                vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uPomScale, false);
                 wpPom.xz = wp.xz + (pomUV - uv) * uPomTile * pomFade;
                 if (uParallaxShadow > 0.5) {
                     vec3 L = normalize(uSunDir);
                     vec3 lTS = vec3(L.x, L.z, L.y);
-                    float sh = ParallaxShadow(uLayerHeight, pomUV, lTS, uPomScale);
+                    float sh = ParallaxShadow(uLayerHeight, pomUV, lTS, uPomScale, false);
                     float pomW = sw[uPomLayer]; // shadow only where the paving is
                     pomShadow = mix(1.0, sh, pomW * pomFade);
                 }
@@ -615,16 +608,19 @@ void main()
             float gdist = length(viewPos - fragPosition);
             float gramp = mix(0.6, 1.0, smoothstep(0.0, max(uGrassGroundFar, 1.0) * 0.9, gdist));
             vec3 gcol = GG_MeadowColor(uGrassGroundColor, fragPosition.xz, gdist,
-                                   max(normalize(viewPos - fragPosition).y, 0.0) * 0.8,
-                                   uGrassGroundFar);
+                                   max(normalize(viewPos - fragPosition).y, 0.0) * 0.8);
             a = mix(a, gcol, uGrassGroundStrength * gmask * gramp);
+            gGrassMask = gmask; // grass coverage for the sparkle (before the road composite)
             albedo = a;
         }
 
         if (uHasNormalMap > 0.5) {
-            splatBump = SampleLayerBump(texture2, uLayerTiles.x, WP(0), triW, uLayerSwizzled.x, steep) * sw.r;
-            if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, WP(1), triW, uLayerSwizzled.y, steep) * sw.g;
-            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, WP(2), triW, uLayerSwizzled.z, steep) * sw.b;        }
+            // Push the normal to coarser mips with distance so the minified tile
+            // stops aliasing (the ground for extending the normal further out).
+            float nbias = clamp((length(viewPos - fragPosition) - 12.0) * 0.05, 0.0, 2.5);
+            splatBump = SampleLayerBump(texture2, uLayerTiles.x, WP(0), triW, uLayerSwizzled.x, steep, nbias) * sw.r;
+            if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, WP(1), triW, uLayerSwizzled.y, steep, nbias) * sw.g;
+            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, WP(2), triW, uLayerSwizzled.z, steep, nbias) * sw.b;        }
         #undef WP
 
         // Road surface: composite its OWN material over the finished terrain
@@ -640,7 +636,7 @@ void main()
                 if (pomFade > 0.0) {
                     vec2 uv = wp.xz / uRoadTile;
                     vec3 vts = vec3(V.x, V.z, V.y);
-                    vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uRoadPomScale);
+                    vec2 pomUV = ParallaxUV(uLayerHeight, uv, vts, uRoadPomScale, false);
                     wpRoad.xz = wp.xz + (pomUV - uv) * uRoadTile * pomFade;
                 }
             }
@@ -654,6 +650,7 @@ void main()
             if (rm > 0.001) {
                 a = mix(a, SampleLayer(uRoadAlbedo, uRoadTile, wpRoad, triW, steep), rm);
                 albedo = a;
+                gGrassMask *= (1.0 - rm); // roads paved over grass -> no grass sparkle
                 // Surface normal: DERIVE it from the road's own displacement
                 // (central-difference gradient of uLayerHeight) so the relief
                 // catches the sun — highlights on the crowns, shade in the joints
@@ -680,19 +677,35 @@ void main()
         float gdist = length(viewPos - fragPosition);
         float gramp = mix(0.6, 1.0, smoothstep(0.0, max(uGrassGroundFar, 1.0) * 0.9, gdist));
         vec3 gcol = GG_MeadowColor(uGrassGroundColor, fragPosition.xz, gdist,
-                                   max(normalize(viewPos - fragPosition).y, 0.0) * 0.8,
-                                   uGrassGroundFar);
+                                   max(normalize(viewPos - fragPosition).y, 0.0) * 0.8);
         albedo = mix(albedo, gcol, uGrassGroundStrength * gramp);
+        gGrassMask = 1.0; // zero-asset ground is all grass -> sparkle everywhere
     }
     if (uLinearize > 0.5) albedo = pow(albedo, vec3(2.2));
 
     vec3 N = geoN;
     if (uSplatEnabled > 0.5) {
-        // Fade the normal bump toward the flat geometric normal with distance:
-        // a minified tiling normal map aliases into banding at range/grazing
-        // angle, so past ~40 m the terrain lights off its geo normal only.
-        float nfade = 1.0 - smoothstep(18.0, 45.0, length(viewPos - fragPosition));
-        N = normalize(geoN + splatBump * (uNormalDepth * nfade));
+        float ndist = length(viewPos - fragPosition);
+        float nscale;
+        if (uTerrainFarNormal > 0.5) {
+            // PHASE B: keep the normal at distance (the mip-bias makes it
+            // alias-safe) and AMPLIFY it WHERE GRASS GROWS, so the far ground
+            // shades like a grass field catching the sun — stronger far, and at
+            // grazing angles to counteract perspective flattening. Non-grass
+            // terrain (rock/dirt) keeps its authored normal. Faded only at the
+            // extreme horizon (fixed distance — independent of the grass range).
+            float grazing = 1.0 - max(normalize(viewPos - fragPosition).y, 0.0);
+            float amp = mix(1.0, 3.2, smoothstep(20.0, 110.0, ndist)) *
+                        mix(1.0, 1.5, grazing);
+            amp = mix(1.0, amp, gGrassMask); // grass only; rock/dirt stay at 1.0
+            float farKeep = 1.0 - smoothstep(400.0, 700.0, ndist);
+            nscale = uNormalDepth * amp * farKeep;
+        } else {
+            // A: fade the bump to the flat geo normal by ~45 m (the pre-Phase-B
+            // behaviour — far terrain lights flat, speckles carry the field).
+            nscale = uNormalDepth * (1.0 - smoothstep(18.0, 45.0, ndist));
+        }
+        N = normalize(geoN + splatBump * nscale);
     } else if (uHasNormalMap > 0.5) {
         if (uTriplanar > 0.5) {
             // UDN blend in local space
@@ -725,17 +738,57 @@ void main()
         }
     }
     vec3 L = normalize(uSunDir);
-    float diff = max(dot(N, L), 0.0);
+    
+    float isMatte = clamp(uSplatEnabled + uTriplanar, 0.0, 1.0);
+    
+    // Packed ORH fetching for Surface Maps
+    float ao = 1.0;
+    float roughness = uRoughnessDefault;
+    if (uHasSurfaceMap > 0.5) {
+        if (uTriplanar > 0.5) {
+            vec4 surfX = texture(texture4, uvX);
+            vec4 surfY = texture(texture4, uvY);
+            vec4 surfZ = texture(texture4, uvZ);
+            vec4 surf = surfX * triW.x + surfY * triW.y + surfZ * triW.z;
+            ao = surf.r;
+            roughness = surf.g;
+        } else {
+            vec4 surf = texture(texture4, uvMesh);
+            ao = surf.r;
+            roughness = surf.g;
+        }
+        ao = 1.0 - (1.0 - ao) * uAoStrength;
+    }
+    
+    // For terrain splat, we default to matte (since we haven't implemented per-layer roughness yet)
+    if (uSplatEnabled > 0.5) {
+        roughness = 0.95; 
+    }
+    float NdotL = max(dot(N, L), 0.0);
+    float NdotV = max(dot(N, V), 0.0);
+    
+    // Fast Oren-Nayar Diffuse
+    float r2 = roughness * roughness;
+    float A = 1.0 - 0.5 * (r2 / (r2 + 0.33));
+    float B = 0.45 * (r2 / (r2 + 0.09));
+    float LdotV = dot(L, V);
+    float s = LdotV - NdotL * NdotV;
+    float t = mix(1.0, max(NdotL, NdotV), step(0.0, s)) + 1e-6;
+    float diff = NdotL * (A + B * s / t);
 
     // Sun visibility from the shadow map scales both direct terms. Fragments
     // facing away from the sun get no direct light at all — skip the 32-tap
     // PCSS entirely there (roughly half the pixels in a typical view).
-    float sunVis = (diff > 0.0) ? 1.0 - ShadowFactor(fragPosition, diff) : 0.0;
+    float sunVis = (NdotL > 0.0) ? 1.0 - ShadowFactor(fragPosition, NdotL) : 0.0;
     diff *= sunVis * pomShadow; // POM self-shadow darkens the sun term in the grout
 
     vec3 H = normalize(L + V);
-    float spec = (diff > 0.0)
-        ? pow(max(dot(N, H), 0.0), 48.0) * uSpecStrength * sunVis
+    // Contextual Specular: Matte surfaces get a very weak, broad highlight. Models stay somewhat shiny.
+    float specPower = mix(48.0, 4.0, isMatte);
+    float specStr = uSpecStrength * mix(1.0, 0.05, isMatte);
+    
+    float spec = (NdotL > 0.0)
+        ? pow(max(dot(N, H), 0.0), specPower) * specStr * sunVis
         : 0.0;
 
     // Point lights: inverse-square falloff with a smooth cutoff at the
@@ -760,22 +813,33 @@ void main()
         }
     }
 
-    // Ambient Occlusion
-    float ao = 1.0;
-    if (uHasAoMap > 0.5) {
-        if (uTriplanar > 0.5) {
-            float aoX = texture(texture4, uvX).r;
-            float aoY = texture(texture4, uvY).r;
-            float aoZ = texture(texture4, uvZ).r;
-            ao = aoX * triW.x + aoY * triW.y + aoZ * triW.z;
-        } else {
-            ao = texture(texture4, uvMesh).r;
-        }
-        ao = 1.0 - (1.0 - ao) * uAoStrength;
-    }
 
-    vec3 color = albedo * (uAmbient * ao + uSunColor * diff + pointDiff) +
-                 uSunColor * spec + pointSpec;
+
+    // Grass sparkle: a TIGHT pinpoint specular off the (Phase-B amplified) grass
+    // normal, so the field shimmers where blades catch the sun — continuous and
+    // light-driven (warm at sunset, bright at noon), replacing the painted
+    // speckle dots. High power = glints, not sheen; gated to the grass area and
+    // sun visibility so shadowed grass stays matte. `spec` above stays near-matte.
+    // Gated OFF near (3D grass covers it there, and the full-detail near normal
+    // throws a broad washout at the sun reflection) — fades in with distance as a
+    // far-field shimmer. Tight (high power) + low intensity = pinpoint glints.
+    float sparkFade = smoothstep(uGrassGroundFar * 0.30, uGrassGroundFar * 0.75,
+                                 length(viewPos - fragPosition));
+    float grassSpec = (diff > 0.0 && gGrassMask > 0.0)
+        ? pow(max(dot(N, H), 0.0), 220.0) * gGrassMask * uGrassGroundStrength * sunVis * sparkFade * 0.3
+        : 0.0;
+
+    // Hemispheric ambient: flat ambient light makes unlit sides look 2D and dimensionless.
+    // The industry standard for a cheap volume fill is Hemispheric Lighting, blending
+    // between a sky color (top) and a darker ground bounce color (bottom) based on the normal.
+    // Here we derive the ground bounce color directly from the sky ambient color.
+    // We use geoN.y instead of N.y so the ambient fill doesn't catch micro-facets from the
+    // normal map, which causes high-frequency flickering during movement/animation.
+    vec3 ambientGround = uAmbient * vec3(0.35, 0.38, 0.35); // darker, earthy tint
+    vec3 hemiAmbient = mix(ambientGround, uAmbient, geoN.y * 0.5 + 0.5);
+
+    vec3 color = albedo * (hemiAmbient * ao + uSunColor * diff + pointDiff) +
+                 uSunColor * (spec + grassSpec) + pointSpec;
 
     if (uLayerView == 1)      color = albedo;
     else if (uLayerView == 2) color = vec3(diff);

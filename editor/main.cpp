@@ -2165,8 +2165,8 @@ int main(int argc, char **argv) {
                     UnloadTexture(g_scene.materials[selMat].normalTex); // owned, not cached
                 else
                     BrushAssetsReleaseTexture(g_scene.materials[selMat].normalTex);
-                BrushAssetsReleaseTexture(g_scene.materials[selMat].displacementTex);
-                BrushAssetsReleaseTexture(g_scene.materials[selMat].aoTex);
+                if (g_scene.materials[selMat].surfaceTex.id != 0)
+                    UnloadTexture(g_scene.materials[selMat].surfaceTex);
                 for (int i = selMat; i < g_scene.materialCount - 1; i++)
                     g_scene.materials[i] = g_scene.materials[i + 1];
                 g_scene.materialCount--;
@@ -2202,6 +2202,8 @@ int main(int argc, char **argv) {
                                           sizeof(m->displacement));
                 reresolve |= TexPathCombo("AO", m->ao,
                                           sizeof(m->ao));
+                reresolve |= TexPathCombo("Roughness", m->roughness,
+                                          sizeof(m->roughness));
                 // Thumbnails: proof the textures actually loaded. A path
                 // with no image = red MISSING (typo / file moved).
                 float thumb = 72.0f;
@@ -2233,29 +2235,21 @@ int main(int argc, char **argv) {
                     ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
                                        "normal MISSING: %s", m->normal);
                 }
-                if (m->displacementTex.id != 0) {
+                if (m->surfaceTex.id != 0) {
                     ImGui::SameLine();
-                    ImGui::Image((ImTextureID)(intptr_t)m->displacementTex.id,
+                    ImGui::Image((ImTextureID)(intptr_t)m->surfaceTex.id,
                                  ImVec2(thumb, thumb));
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s (%dx%d)", m->displacement,
-                                          m->displacementTex.width,
-                                          m->displacementTex.height);
-                } else if (m->displacement[0] != '\0') {
-                    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
-                                       "displacement MISSING: %s", m->displacement);
-                }
-                if (m->aoTex.id != 0) {
-                    ImGui::SameLine();
-                    ImGui::Image((ImTextureID)(intptr_t)m->aoTex.id,
-                                 ImVec2(thumb, thumb));
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("%s (%dx%d)", m->ao,
-                                          m->aoTex.width,
-                                          m->aoTex.height);
-                } else if (m->ao[0] != '\0') {
-                    ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1),
-                                       "ao MISSING: %s", m->ao);
+                        ImGui::SetTooltip("Packed Surface ORH (%dx%d)",
+                                          m->surfaceTex.width,
+                                          m->surfaceTex.height);
+                } else {
+                    if (m->displacement[0] != '\0')
+                        ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "displacement MISSING: %s", m->displacement);
+                    if (m->ao[0] != '\0')
+                        ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "ao MISSING: %s", m->ao);
+                    if (m->roughness[0] != '\0')
+                        ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "roughness MISSING: %s", m->roughness);
                 }
                 bool matEdited = false;
                 if (ImGui::DragFloat("Tile", &m->tile, 0.05f, 0.25f, 32.0f,
@@ -2277,7 +2271,7 @@ int main(int argc, char **argv) {
                     ImGui::SetTooltip("Ray-march the displacement map for real depth "
                                       "(cobbles/brick/rock up close). Needs a Displacement "
                                       "map; fades to flat with distance.");
-                if (m->parallax && m->displacementTex.id == 0)
+                if (m->parallax && m->surfaceTex.id == 0)
                     ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
                                        "  needs a Displacement map to show");
                 if (ImGui::Checkbox("Height Blend", &m->heightBlend)) matEdited = true;
@@ -2290,10 +2284,12 @@ int main(int argc, char **argv) {
                     if (m->blendSharp <= 0.0f) m->blendSharp = 0.2f;
                     if (ImGui::SliderFloat("Blend Sharpness", &m->blendSharp, 0.02f, 0.6f,
                                            "%.2f")) matEdited = true;
-                    if (m->displacementTex.id == 0)
+                    if (m->surfaceTex.id == 0)
                         ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
                                            "  needs a Displacement map to show");
                 }
+                if (ImGui::SliderFloat("Roughness Default", &m->roughnessDefault, 0.0f,
+                                       1.0f)) matEdited = true;
                 if (ImGui::SliderFloat("AO Strength", &m->aoStrength, 0.0f,
                                        1.0f)) matEdited = true;
                 if (reresolve) BrushSceneResolveMaterials(&g_scene);

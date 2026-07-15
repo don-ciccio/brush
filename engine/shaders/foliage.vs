@@ -77,7 +77,8 @@ void main() {
     float grassFade = smoothstep(1.0, 0.0, fadeNorm);
     float nearFade = 1.0;
     if (uFadeNearEnd > 0.0) {
-        nearFade = clamp((instDist - uFadeNearStart) / max(uFadeNearEnd - uFadeNearStart, 0.001), 0.0, 1.0);
+        float nearFadeNorm = clamp((instDist - uFadeNearStart) / max(uFadeNearEnd - uFadeNearStart, 0.001), 0.0, 1.0);
+        nearFade = smoothstep(0.0, 1.0, nearFadeNorm);
     }
     float heightScale = grassFade * nearFade;
 

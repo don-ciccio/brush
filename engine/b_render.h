@@ -143,19 +143,19 @@ void BrushRenderSubmit(BrushLayer layer, Model *model, Matrix transform,
 // metres per repeat, no tangents needed. Models with real UVs skip triplanar
 // and get tangent-space normal mapping when `normal` is set.
 typedef struct BrushMaterialProps {
-  Texture2D albedo;   // id 0 = keep the model's own diffuse map
-  Texture2D normal;   // id 0 = no normal mapping
-  Texture2D displacement; // id 0 = no displacement mapping
-  Texture2D ao;           // id 0 = no ambient occlusion map
-  bool triplanar;     // world-space projection instead of mesh UVs
-  bool normalSwizzled; // normal map is DXT5nm (X in alpha, Y in green);
-                       // ask BrushAssetsIsSwizzledNormal for cached textures
-  float texScale;     // world metres per texture repeat (triplanar)
-  float specStrength; // <0 = engine default
-  float normalDepth;  // normal map intensity (1 = authored)
-  float heightScale;  // displacement scale strength (default 0.05)
-  float aoStrength;   // ambient occlusion strength (default 1.0)
-  bool parallax;      // ray-march the height map (POM) — needs displacement
+  Texture2D albedo;       // id 0 = keep the model's own diffuse map
+  Texture2D normal;       // id 0 = no normal mapping
+  Texture2D surfaceMap;   // Packed ORH (R=AO, G=Roughness, B=Height). id 0 = none
+  bool triplanar;         // world-space projection instead of mesh UVs
+  bool normalSwizzled;    // normal map is DXT5nm (X in alpha, Y in green);
+                          // ask BrushAssetsIsSwizzledNormal for cached textures
+  float texScale;         // world metres per texture repeat (triplanar)
+  float specStrength;     // <0 = engine default
+  float normalDepth;      // normal map intensity (1 = authored)
+  float heightScale;      // displacement scale strength (default 0.05)
+  float aoStrength;       // ambient occlusion strength (default 1.0)
+  float roughnessDefault; // fallback roughness when surfaceMap is not bound
+  bool parallax;          // ray-march the height map (POM) — needs surfaceMap
 } BrushMaterialProps;
 
 // BrushRenderSubmit with material overrides applied for exactly this draw.
@@ -176,6 +176,7 @@ typedef struct BrushTerrainLayer {
   float tile;          // world metres per texture repeat
   float heightScale;   // parallax displacement scale
   float normalDepth;   // normal-map intensity (0 -> engine default 1.0)
+  float roughness;     // per-layer roughness (0 = smooth, 1 = matte)
   bool normalSwizzled; // DXT5nm-cooked normal map
   bool parallax;       // ray-march this layer's displacement (POM) on flat ground
   bool heightBlend;    // height-based edge blend vs the neighbouring layers

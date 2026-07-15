@@ -435,19 +435,18 @@ void BrushSceneUnloadMaterials(BrushScene *s) {
   }
   for (int i = 0; i < s->materialCount; i++) {
     BrushAssetsReleaseTexture(s->materials[i].albedoTex);
-    // A generated normal is owned by the material (not the cache) — unload it
-    // directly; an authored/cached one goes back through the cache refcount.
-    if (s->materials[i].normalGenerated)
+    if (s->materials[i].normalGenerated) {
       UnloadTexture(s->materials[i].normalTex);
-    else
+    } else {
       BrushAssetsReleaseTexture(s->materials[i].normalTex);
-    BrushAssetsReleaseTexture(s->materials[i].displacementTex);
-    BrushAssetsReleaseTexture(s->materials[i].aoTex);
+    }
+    if (s->materials[i].surfaceTex.id != 0) {
+      UnloadTexture(s->materials[i].surfaceTex);
+    }
     s->materials[i].albedoTex = (Texture2D){0};
     s->materials[i].normalTex = (Texture2D){0};
+    s->materials[i].surfaceTex = (Texture2D){0};
     s->materials[i].normalGenerated = false;
-    s->materials[i].displacementTex = (Texture2D){0};
-    s->materials[i].aoTex = (Texture2D){0};
   }
   if (s->modelCount < 0 || s->modelCount > BRUSH_SCENE_MAX_MODELS) {
     s->modelCount = 0;
@@ -480,8 +479,7 @@ void BrushSceneResolveMaterials(BrushScene *s) {
     BrushSceneMaterial *m = &s->materials[i];
     m->albedoTex = BrushAssetsTexture(m->albedo);
     m->normalTex = BrushAssetsTexture(m->normal);
-    m->displacementTex = BrushAssetsTexture(m->displacement);
-    m->aoTex = BrushAssetsTexture(m->ao);
+    m->surfaceTex = BrushAssetsSurfaceMap(m->ao, m->roughness, m->displacement);
     // No authored normal but there's an albedo: derive one from its luminance
     // so terrain/materials get relief for free (industry-standard convenience;
     // BRUSH_NO_GEN_NORMALS=1 to force flat). The shader's normalDepth still
@@ -516,12 +514,12 @@ static bool MaterialProps(const BrushScene *s, const char *name,
   int mi = BrushSceneFindMaterial(s, name);
   if (mi < 0) return false;
   const BrushSceneMaterial *m = &s->materials[mi];
-  if (m->albedoTex.id == 0 && m->normalTex.id == 0 && m->displacementTex.id == 0 && m->aoTex.id == 0) return false;
+  if (m->albedoTex.id == 0 && m->normalTex.id == 0 && m->surfaceTex.id == 0) return false;
   *out = (BrushMaterialProps){
       .albedo = m->albedoTex,
       .normal = m->normalTex,
-      .displacement = m->displacementTex,
-      .ao = m->aoTex,
+      .surfaceMap = m->surfaceTex,
+      .roughnessDefault = m->roughnessDefault,
       .triplanar = !m->uvProjection,
       .normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex),
       .texScale = m->tile,
@@ -550,7 +548,7 @@ bool BrushSceneMaterialLayer(const BrushScene *s, const char *name,
   if (m->albedoTex.id == 0) return false;
   out->albedo = m->albedoTex;
   out->normal = m->normalTex;
-  out->displacement = m->displacementTex;
+  out->displacement = m->surfaceTex;
   out->tile = (m->tile > 0.01f) ? m->tile : 1.0f;
   out->heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
   out->normalDepth = (m->normalDepth > 0.0f) ? m->normalDepth : 1.0f;

@@ -58,6 +58,10 @@ Texture2D BrushAssetsTexture(const char *path);
 // unconditionally.
 void BrushAssetsReleaseTexture(Texture2D tex);
 
+// Loads separate AO, Roughness, and Height maps and packs them into a single
+// ORH (R=AO, G=Roughness, B=Height) Texture2D caching it automatically.
+Texture2D BrushAssetsSurfaceMap(const char *ao, const char *rough, const char *height);
+
 // Per frame: watch loaded sources for edits (30-frame stat cadence), hand
 // changed ones to the cook worker, and swap finished re-imports in on this
 // (main) thread. Returns true when any texture was replaced — holders of

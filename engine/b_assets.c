@@ -1427,3 +1427,51 @@ void BrushAssetsShutdown(void) {
     g_pakCount = 0;
   }
 }
+
+// Loads separate AO, Roughness, and Height maps and packs them into a single
+// ORH (R=AO, G=Roughness, B=Height) Texture2D caching it automatically.
+Texture2D BrushAssetsSurfaceMap(const char *ao, const char *rough, const char *height) {
+  if ((ao == NULL || ao[0] == '\0') && (rough == NULL || rough[0] == '\0') && (height == NULL || height[0] == '\0'))
+    return (Texture2D){0};
+
+  Image imgAo = {0}, imgRough = {0}, imgHeight = {0};
+  if (ao && ao[0] != '\0') imgAo = LoadImage(BrushEnginePath(ao));
+  if (rough && rough[0] != '\0') imgRough = LoadImage(BrushEnginePath(rough));
+  if (height && height[0] != '\0') imgHeight = LoadImage(BrushEnginePath(height));
+
+  int w = 1, h = 1;
+  if (imgAo.data) { w = imgAo.width; h = imgAo.height; }
+  else if (imgRough.data) { w = imgRough.width; h = imgRough.height; }
+  else if (imgHeight.data) { w = imgHeight.width; h = imgHeight.height; }
+  else return (Texture2D){0}; // all failed to load
+
+  if (imgAo.data && (imgAo.width != w || imgAo.height != h)) ImageResize(&imgAo, w, h);
+  if (imgRough.data && (imgRough.width != w || imgRough.height != h)) ImageResize(&imgRough, w, h);
+  if (imgHeight.data && (imgHeight.width != w || imgHeight.height != h)) ImageResize(&imgHeight, w, h);
+
+  Image surface = GenImageColor(w, h, WHITE);
+  Color *px = (Color *)surface.data;
+  
+  Color *c_ao = imgAo.data ? LoadImageColors(imgAo) : NULL;
+  Color *c_ro = imgRough.data ? LoadImageColors(imgRough) : NULL;
+  Color *c_he = imgHeight.data ? LoadImageColors(imgHeight) : NULL;
+
+  for (int i = 0; i < w * h; i++) {
+    unsigned char r = c_ao ? c_ao[i].r : 255;
+    unsigned char g = c_ro ? c_ro[i].r : 128; 
+    unsigned char b = c_he ? c_he[i].r : 0;
+    px[i] = (Color){r, g, b, 255};
+  }
+
+  if (c_ao) UnloadImageColors(c_ao);
+  if (c_ro) UnloadImageColors(c_ro);
+  if (c_he) UnloadImageColors(c_he);
+
+  if (imgAo.data) UnloadImage(imgAo);
+  if (imgRough.data) UnloadImage(imgRough);
+  if (imgHeight.data) UnloadImage(imgHeight);
+
+  Texture2D tex = LoadTextureFromImage(surface);
+  UnloadImage(surface);
+  return tex;
+}

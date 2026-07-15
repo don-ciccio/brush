@@ -43,9 +43,9 @@ typedef struct BrushRenderState {
   int locLinearize;
   int locTriplanar, locTexScale, locHasNormalMap, locNormalDepth;
   int locNormalSwizzled;
-  int locHasHeightMap, locHeightScale, locParallax, locParallaxShadow;
+  int locHasSurfaceMap, locRoughnessDefault, locAoStrength;
+  int locHeightScale, locParallax, locParallaxShadow;
   int pomQuality; // 0 = off, 1 = POM, 2 = POM + self-shadow (BRUSH_POM)
-  int locHasAoMap, locAoStrength;
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
   int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
   int locGrassGroundColor, locGrassGroundStrength, locGrassGrowLayer, locGrassGroundFar;
@@ -126,15 +126,17 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.lit.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(g_r.lit, "texture2");
   g_r.lit.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(g_r.lit, "texture4");
   g_r.lit.locs[SHADER_LOC_MAP_HEIGHT] = GetShaderLocation(g_r.lit, "texture6");
-  g_r.locHasHeightMap = GetShaderLocation(g_r.lit, "uHasHeightMap");
+  g_r.locHasSurfaceMap = GetShaderLocation(g_r.lit, "uHasSurfaceMap");
+  g_r.locRoughnessDefault = GetShaderLocation(g_r.lit, "uRoughnessDefault");
+  g_r.locAoStrength = GetShaderLocation(g_r.lit, "uAoStrength");
   g_r.locHeightScale = GetShaderLocation(g_r.lit, "uHeightScale");
   g_r.locParallax = GetShaderLocation(g_r.lit, "uParallax");
+  g_r.locParallaxShadow = GetShaderLocation(g_r.lit, "uParallaxShadow");
   g_r.locParallaxShadow = GetShaderLocation(g_r.lit, "uParallaxShadow");
   {
     const char *pq = getenv("BRUSH_POM"); // 0 off / 1 on / 2 on+self-shadow
     g_r.pomQuality = pq ? atoi(pq) : 2;
   }
-  g_r.locHasAoMap = GetShaderLocation(g_r.lit, "uHasAoMap");
   g_r.locAoStrength = GetShaderLocation(g_r.lit, "uAoStrength");
   g_r.locSplatEnabled = GetShaderLocation(g_r.lit, "uSplatEnabled");
   g_r.locSplatOrigin = GetShaderLocation(g_r.lit, "uSplatOrigin");
@@ -150,6 +152,13 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locGrassGroundFar = GetShaderLocation(g_r.lit, "uGrassGroundFar");
   { float off = 0.0f; // grass-ground tint off until a game/foliage enables it
     SetShaderValue(g_r.lit, g_r.locGrassGroundStrength, &off, SHADER_UNIFORM_FLOAT); }
+  // Phase B A/B: far terrain lit like grass (keep+amplify the normal at
+  // distance) vs the fade-to-flat + speckles look. On by default; set
+  // BRUSH_TERRAIN_FAR_NORMAL=0 to compare. Static shader state, set once.
+  { const char *fn = getenv("BRUSH_TERRAIN_FAR_NORMAL");
+    float on = (fn && fn[0] == '0') ? 0.0f : 1.0f;
+    SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uTerrainFarNormal"), &on,
+                   SHADER_UNIFORM_FLOAT); }
   g_r.locLayerHeightOn = GetShaderLocation(g_r.lit, "uLayerHeightOn");
   g_r.locLayerHeightStart = GetShaderLocation(g_r.lit, "uLayerHeightStart");
   g_r.locLayerHeightFull = GetShaderLocation(g_r.lit, "uLayerHeightFull");
@@ -395,27 +404,24 @@ static void ApplyMaterialProps(const BrushDrawCmd *cmd) {
   float normalSwizzled = (p && p->normalSwizzled) ? 1.0f : 0.0f;
   float spec = (p && p->specStrength >= 0.0f) ? p->specStrength
                                               : g_r.specDefault;
-  float hasHeight = (p && p->displacement.id != 0) ? 1.0f : 0.0f;
+  float hasSurfaceMap = (p && p->surfaceMap.id != 0) ? 1.0f : 0.0f;
+  float roughnessDefault = p ? p->roughnessDefault : 0.4f;
   float heightScale = p ? p->heightScale : 0.05f;
   float parallax = (p && p->parallax && g_r.pomQuality > 0) ? 1.0f : 0.0f;
   float pomShadow = (g_r.pomQuality >= 2) ? 1.0f : 0.0f;
-  float hasAo = (p && p->ao.id != 0) ? 1.0f : 0.0f;
   float aoStrength = p ? p->aoStrength : 1.0f;
 
   SetShaderValue(g_r.lit, g_r.locTriplanar, &triplanar, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locTexScale, &texScale, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNormal,
-                 SHADER_UNIFORM_FLOAT);
-  SetShaderValue(g_r.lit, g_r.locNormalDepth, &normalDepth,
-                 SHADER_UNIFORM_FLOAT);
-  SetShaderValue(g_r.lit, g_r.locNormalSwizzled, &normalSwizzled,
-                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHasNormalMap, &hasNormal, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locNormalDepth, &normalDepth, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locNormalSwizzled, &normalSwizzled, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSpecStrength, &spec, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(g_r.lit, g_r.locHasHeightMap, &hasHeight, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locHasSurfaceMap, &hasSurfaceMap, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locRoughnessDefault, &roughnessDefault, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locHeightScale, &heightScale, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locParallax, &parallax, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locParallaxShadow, &pomShadow, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(g_r.lit, g_r.locHasAoMap, &hasAo, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locAoStrength, &aoStrength, SHADER_UNIFORM_FLOAT);
 }
 
@@ -604,8 +610,7 @@ static void DrawCmd(const BrushDrawCmd *cmd) {
       if (cmd->props.albedo.id != 0)
         mat->maps[MATERIAL_MAP_DIFFUSE].texture = cmd->props.albedo;
       mat->maps[MATERIAL_MAP_NORMAL].texture = cmd->props.normal;
-      mat->maps[MATERIAL_MAP_OCCLUSION].texture = cmd->props.ao;
-      mat->maps[MATERIAL_MAP_HEIGHT].texture = cmd->props.displacement;
+      mat->maps[MATERIAL_MAP_OCCLUSION].texture = cmd->props.surfaceMap;
     }
   }
   Matrix saved = cmd->model->transform;

@@ -61,6 +61,7 @@ typedef struct BrushSceneMaterial {
   char normal[128];
   char displacement[128];
   char ao[128];
+  char roughness[128];
   float tile;        // world metres per texture repeat
   float spec;        // specular strength (engine default 0.35)
   float normalDepth; // normal map intensity (1 = authored)
@@ -71,7 +72,8 @@ typedef struct BrushSceneMaterial {
   bool parallax;     // ray-march the displacement map (POM) — needs a height map
   bool heightBlend;  // height-based edge blend vs neighbouring terrain layers
   float blendSharp;  // height-blend transition band (smaller = crisper, ~0.2)
-  Texture2D albedoTex, normalTex, displacementTex, aoTex; // resolved, not saved
+  float roughnessDefault;
+  Texture2D albedoTex, normalTex, surfaceTex; // resolved, not saved
   bool normalGenerated; // normalTex was derived from albedo (owned, not cached)
 } BrushSceneMaterial;
 
