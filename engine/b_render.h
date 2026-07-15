@@ -54,6 +54,7 @@ typedef enum {
   BRUSH_VIEW_SPECULAR,
   BRUSH_VIEW_NORMALS,
   BRUSH_VIEW_SHADOW, // sun visibility term (white = lit, black = shadowed)
+  BRUSH_VIEW_BIOME,  // per-chunk biome map, false-coloured by id
   BRUSH_VIEW_COUNT
 } BrushLayerView;
 
@@ -205,6 +206,7 @@ typedef struct BrushSplatDraw {
   Texture2D roadMask;
   BrushTerrainLayer roadLayer;
   bool hasRoad;
+  Texture2D biome; // per-chunk biome map (F2 BIOME view; Phase 2 palette blend)
 } BrushSplatDraw;
 
 // BrushRenderSubmitMesh with splat blending for exactly this draw.

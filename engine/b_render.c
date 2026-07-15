@@ -188,6 +188,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
     // on the high units (13..15) past the shadow cascades (10..12).
     u = 13; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uRoadMask"), &u, SHADER_UNIFORM_INT);
     u = 14; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uRoadAlbedo"), &u, SHADER_UNIFORM_INT);
+    u = 15; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uBiomeMap"), &u, SHADER_UNIFORM_INT);
   }
   g_r.locRoadEnabled = GetShaderLocation(g_r.lit, "uRoadEnabled");
   g_r.locRoadTile = GetShaderLocation(g_r.lit, "uRoadTile");
@@ -492,6 +493,7 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
     rlActiveTextureSlot(13); rlEnableTexture(sp->roadMask.id);
     rlActiveTextureSlot(14); rlEnableTexture(sp->roadLayer.albedo.id);
   }
+  if (sp->biome.id != 0) { rlActiveTextureSlot(15); rlEnableTexture(sp->biome.id); }
   rlActiveTextureSlot(0);
   int pomLayer = (specialLayer >= 0 && g_r.pomQuality > 0 &&
                   sp->layers[specialLayer].parallax) ? specialLayer : -1;
@@ -958,6 +960,7 @@ const char *BrushRenderLayerViewName(void) {
   case BRUSH_VIEW_SPECULAR: return "specular";
   case BRUSH_VIEW_NORMALS: return "normals";
   case BRUSH_VIEW_SHADOW: return "sun shadow";
+  case BRUSH_VIEW_BIOME: return "biome";
   default: return "?";
   }
 }

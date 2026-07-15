@@ -28,6 +28,13 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   temp.autoSlopeStart = 25.0f;
   temp.autoSlopeEnd = 45.0f;
   // (layerHeight* default to 0/off via the {0} init.)
+  // Biome climate defaults (used if `biome` lines exist but no biome_climate).
+  temp.climate.seed = 1337u;
+  temp.climate.tempScale = 300.0f;
+  temp.climate.moistScale = 260.0f;
+  temp.climate.lapse = 0.005f;
+  temp.climate.warp = 60.0f;
+  temp.climate.blendRadius = 10.0f;
   strncpy(temp.path, path, BRUSH_SCENE_PATH_MAX - 1);
   temp.path[BRUSH_SCENE_PATH_MAX - 1] = '\0';
 
@@ -51,13 +58,14 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     int version;
     float x, y, z, h, a, rx, ry, rz, sx, sy, sz, r, g, b, radius;
     int ir, ig, ib, flicker, n;
+    int bpal[4] = {-1, -1, -1, -1}; // biome palette slots (Phase 2)
     char w1[256], w2[256], w3[256], w4[256], w5[256];
 
     if (sscanf(p, "version %d", &version) == 1) {
       temp.version = version;
-      if (version < 1 || version > 3)
+      if (version < 1 || version > 4)
         TraceLog(LOG_WARNING,
-                 "BRUSH scene: %s is version %d (engine reads 1-3)", path,
+                 "BRUSH scene: %s is version %d (engine reads 1-4)", path,
                  version);
     } else if (sscanf(p, "spawn %f %f %f", &x, &y, &z) == 3) {
       temp.spawn = (Vector3){x, y, z};
@@ -113,6 +121,41 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
       if (flicker >= 0 && flicker < BRUSH_TERRAIN_LAYERS)
         CopyField(temp.terrainLayers[flicker],
                   sizeof(temp.terrainLayers[0]), w1);
+    } else if (strncmp(p, "biome_whittaker", 15) == 0) {
+      // Checked BEFORE `biome ` — else sscanf("biome %31s") would read the
+      // literal "biome" prefix + "_whittaker" as a biome name and eat this line.
+      const char *q = p + 15;
+      for (int i = 0; i < BRUSH_BIOME_WHITTAKER * BRUSH_BIOME_WHITTAKER; i++) {
+        char *end; long v = strtol(q, &end, 10);
+        if (end == q) break;
+        temp.climate.whittaker[i] = (unsigned char)v;
+        q = end;
+      }
+    } else if (sscanf(p, "biome_climate %f %f %f %f %f %f %d",
+                      &temp.climate.tempScale, &temp.climate.moistScale,
+                      &temp.climate.lapse, &temp.climate.seaLevel,
+                      &temp.climate.warp, &temp.climate.blendRadius,
+                      &flicker) >= 6) {
+      if (sscanf(p, "biome_climate %*f %*f %*f %*f %*f %*f %d", &flicker) == 1)
+        temp.climate.seed = (unsigned int)flicker;
+    } else if (strncmp(p, "biome ", 6) == 0 &&
+               (n = sscanf(p, "biome %31s %d %d %d %d %f %d %d %d %d", w1,
+                           &flicker, &ir, &ig, &ib, &a, &bpal[0], &bpal[1],
+                           &bpal[2], &bpal[3])) >= 5) {
+      // biome <name> <id> <r> <g> <b> [priority] [p0 p1 p2 p3]. The `biome `
+      // guard (trailing space) keeps this off biome_climate / biome_whittaker.
+      if (temp.biomeCount < BRUSH_MAX_BIOMES && flicker >= 0 &&
+          flicker < BRUSH_MAX_BIOMES) {
+        BrushSceneBiome *bm = &temp.biomes[temp.biomeCount++];
+        memset(bm, 0, sizeof(*bm));
+        CopyField(bm->name, sizeof(bm->name), w1);
+        bm->id = flicker;
+        bm->grassColor = (Color){(unsigned char)ir, (unsigned char)ig,
+                                 (unsigned char)ib, 255};
+        bm->priority = (n >= 6) ? a : 0.0f;
+        for (int pi = 0; pi < BRUSH_TERRAIN_LAYERS; pi++)
+          bm->palette[pi] = bpal[pi];
+      }
     } else if (sscanf(p, "post %23s %f", w1, &x) == 2) {
       if (temp.postCount < BRUSH_SCENE_MAX_POST) {
         BrushScenePostSetting *ps = &temp.post[temp.postCount++];
@@ -281,7 +324,7 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     return false;
   }
   fprintf(f, "# brush world definition (see engine/b_scene.h)\n");
-  fprintf(f, "version 3\n\n");
+  fprintf(f, "version %d\n\n", s->biomeCount > 0 ? 4 : 3);
   fprintf(f, "spawn %g %g %g\n", s->spawn.x, s->spawn.y, s->spawn.z);
   if (s->timeHours >= 0.0f) fprintf(f, "time %g\n", s->timeHours);
   if (s->materialCount > 0)
@@ -370,11 +413,36 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
                 fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f);
   }
 
+  if (s->biomeCount > 0) {
+    fprintf(f, "\n# biome  name id  r g b  [priority] [p0 p1 p2 p3]\n");
+    for (int i = 0; i < s->biomeCount; i++) {
+      const BrushSceneBiome *bm = &s->biomes[i];
+      fprintf(f, "biome %s %d %d %d %d %g %d %d %d %d\n",
+              bm->name[0] ? bm->name : "-", bm->id, bm->grassColor.r,
+              bm->grassColor.g, bm->grassColor.b, bm->priority, bm->palette[0],
+              bm->palette[1], bm->palette[2], bm->palette[3]);
+    }
+    fprintf(f, "biome_climate %g %g %g %g %g %g %u\n", s->climate.tempScale,
+            s->climate.moistScale, s->climate.lapse, s->climate.seaLevel,
+            s->climate.warp, s->climate.blendRadius, s->climate.seed);
+    fprintf(f, "biome_whittaker");
+    for (int i = 0; i < BRUSH_BIOME_WHITTAKER * BRUSH_BIOME_WHITTAKER; i++)
+      fprintf(f, " %d", s->climate.whittaker[i]);
+    fprintf(f, "\n");
+  }
+
   fclose(f);
   strncpy(s->path, path, BRUSH_SCENE_PATH_MAX - 1);
   s->modTime = GetFileModTime(path);
   TraceLog(LOG_INFO, "BRUSH scene: saved %s (%d blocks, %d lights)", path,
            s->blockCount, s->lightCount);
+  return true;
+}
+
+bool BrushSceneBiomeClimate(const BrushScene *s, BrushBiomeClimate *out) {
+  if (!s || !out || s->biomeCount <= 0) return false;
+  *out = s->climate;
+  out->biomeCount = s->biomeCount; // activates biomes in the world
   return true;
 }
 

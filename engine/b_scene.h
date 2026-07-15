@@ -37,6 +37,7 @@
 extern "C" {
 #endif
 
+#include "b_biome.h"  // BrushBiomeClimate, BRUSH_MAX_BIOMES
 #include "b_render.h" // BrushPointLight
 
 #include <raylib.h>
@@ -143,6 +144,18 @@ typedef struct BrushSceneFoliageLayer {
   Texture2D albedoTex; // resolved (not saved)
 } BrushSceneFoliageLayer;
 
+// A biome definition: identity + look. `palette` maps the 4 terrain splat slots
+// to texture-array indices (Phase 2; -1 = unset). `grassColor` drives the F3
+// grass-ground tint per biome. The biome FIELD (which regions get which biome)
+// is the scene's BrushBiomeClimate, not here.
+typedef struct BrushSceneBiome {
+  char  name[BRUSH_SCENE_NAME_MAX];
+  int   id;            // 0..BRUSH_MAX_BIOMES-1
+  Color grassColor;
+  float priority;
+  int   palette[BRUSH_TERRAIN_LAYERS];
+} BrushSceneBiome;
+
 typedef struct BrushScene {
   int version; // scene-file format version read on load (0 = none/fresh). v3+
                // is foliage-aware, so a v3 scene with 0 layers means the author
@@ -176,10 +189,22 @@ typedef struct BrushScene {
   float layerHeightStart[BRUSH_TERRAIN_LAYERS];
   float layerHeightFull[BRUSH_TERRAIN_LAYERS];
 
+  // Biomes (docs/biome-system-plan.md). `biomes` are the definitions (name,
+  // colour, palette); `climate` is the field that places them. biomeCount 0 =
+  // no biomes (a v<=3 scene). Palette indices are Phase 2; Phase 0 reads only
+  // the climate + count.
+  BrushSceneBiome biomes[BRUSH_MAX_BIOMES];
+  int biomeCount;
+  BrushBiomeClimate climate;
+
   // Hot-reload bookkeeping (managed by Load/HotReload).
   char path[BRUSH_SCENE_PATH_MAX];
   long modTime;
 } BrushScene;
+
+// Build the world's biome climate from a loaded scene. Returns false (leaving
+// `out` untouched) when the scene defines no biomes. Fills out->biomeCount.
+bool BrushSceneBiomeClimate(const BrushScene *s, BrushBiomeClimate *out);
 
 // Load `path` into `s` (replacing its contents). False if the file is
 // missing/unreadable — `s` is left zeroed so a bootstrap can fill and Save it.

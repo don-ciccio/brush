@@ -82,6 +82,7 @@ uniform float uTerrainFarNormal; // 1 = Phase B (keep+amplify normal far), 0 = f
 uniform float uRoadEnabled;
 uniform sampler2D uRoadMask;   // R = road coverage 0..1
 uniform sampler2D uRoadAlbedo;
+uniform sampler2D uBiomeMap;   // R=id0 G=id1 B=blend (F2 BIOME debug view; unit 15)
 uniform float uRoadTile;
 // Road POM + height-blend reuse the terrain height sampler (uLayerHeight, unit
 // 9): when the road material has a displacement map, its height is bound there
@@ -409,6 +410,19 @@ vec3 GG_MeadowColor(vec3 base, vec2 wxz, float dist, float gaze) {
     // Distant grass fades a touch warmer (sun-bleached) — subtle.
     col = mix(col, yellow * 0.82, smoothstep(90.0, 220.0, dist) * 0.28);
     return col;
+}
+
+// False colour for the F2 BIOME debug view: a fixed 16-entry palette keyed by
+// biome id (distinct hues so adjacent regions read apart). Debug only.
+vec3 BiomeDebugColor(int id) {
+    vec3 lut[16] = vec3[16](
+        vec3(0.30,0.65,0.25), vec3(0.85,0.75,0.35), vec3(0.55,0.40,0.25),
+        vec3(0.20,0.55,0.70), vec3(0.80,0.45,0.30), vec3(0.60,0.70,0.85),
+        vec3(0.75,0.30,0.55), vec3(0.40,0.75,0.55), vec3(0.90,0.85,0.55),
+        vec3(0.35,0.35,0.65), vec3(0.65,0.55,0.30), vec3(0.50,0.80,0.80),
+        vec3(0.85,0.60,0.65), vec3(0.45,0.60,0.35), vec3(0.70,0.70,0.70),
+        vec3(0.95,0.50,0.45));
+    return lut[id & 15];
 }
 
 void main()
@@ -865,6 +879,16 @@ void main()
     else if (uLayerView == 3) color = vec3(spec);
     else if (uLayerView == 4) color = N * 0.5 + 0.5;
     else if (uLayerView == 5) color = vec3(sunVis);
+    else if (uLayerView == 6 && uSplatEnabled > 0.5) {
+        // BIOME: false-colour the terrain map (NEAREST ids, blend the two debug
+        // hues). Gated to terrain (uSplatEnabled) so props/player — which carry
+        // no biome map — keep their normal shading instead of sampling garbage.
+        vec2 buv = ((fragPosition.xz - uSplatOrigin) / uSplatSize
+                        * (uSplatRes - 1.0) + 0.5) / uSplatRes;
+        vec3 b = texture(uBiomeMap, buv).rgb;
+        color = mix(BiomeDebugColor(int(b.r * 255.0 + 0.5)),
+                    BiomeDebugColor(int(b.g * 255.0 + 0.5)), b.b);
+    }
 
     finalColor = vec4(color, tex.a * colDiffuse.a * fragColor.a);
 }

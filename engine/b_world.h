@@ -39,6 +39,7 @@
 extern "C" {
 #endif
 
+#include "b_biome.h"   // BrushBiomeSample, BrushBiomeClimate
 #include "b_physics.h"
 #include "b_render.h" // BrushTerrainLayer
 
@@ -60,6 +61,7 @@ typedef struct BrushChunkSamplers {
   float (*densityAt)(void *ctx, float wx, float wz, int foliageLayer); // paint multiplier (0..MAX_BOOST; 1 = base)
   void  (*splatAt)(void *ctx, float wx, float wz, float outWeights[4]); // terrain layer weights 0..1
   float (*roadAt)(void *ctx, float wx, float wz);         // road surface coverage 0..1 (for foliage exclusion)
+  void  (*biomeAt)(void *ctx, float wx, float wz, BrushBiomeSample *out); // dominant 2 biomes + blend
   void *ctx;
 } BrushChunkSamplers;
 
@@ -251,6 +253,12 @@ void BrushWorldPaint(BrushWorld *w, Vector3 center, float radius,
                      float strength, int layer);
 void BrushWorldPaintC(BrushWorld *w, Vector3 center, float radius,
                       float strength, int layer, const BrushConstraints *c);
+
+// --- Biomes (docs/biome-system-plan.md) --------------------------------------
+// Set the climate field that generates the biome map. Copied in; marks every
+// resident chunk dirty so they re-bake with the new field. climate->biomeCount
+// 0 (or a NULL climate) disables biomes: one implicit biome, biomeAt -> {0,0,0}.
+void BrushWorldSetBiomeClimate(BrushWorld *w, const BrushBiomeClimate *climate);
 
 // Auto-slope mask: terrain steeper than `startDeg` blends toward `layer`
 // (fully by `endDeg`) BENEATH the painted weights — pure shader, no data.

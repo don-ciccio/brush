@@ -452,6 +452,35 @@ static void SandboxInit(void *user) {
   s->world = BrushWorldCreate(wcfg, (Vector3){spx, 0, spz});
   BrushFoliageAttach(s->foliage, s->world);
 
+  // Biome field: prefer the scene's climate (v4 `biome`/`biome_climate` lines);
+  // otherwise fall back to a built-in TEST climate so the sandbox always has
+  // something to show in F2 -> BIOME (a scene-less gym / a v<=3 project).
+  {
+    BrushBiomeClimate cl;
+    if (!BrushSceneBiomeClimate(&s->scene, &cl)) {
+      memset(&cl, 0, sizeof(cl));
+      cl.biomeCount = 5;
+      cl.seed = 1337;
+      // Small scales so several biomes + blend bands sit right around spawn
+      // (real worlds want ~300 m+; that comes from the scene).
+      cl.tempScale = 120.0f;
+      cl.moistScale = 100.0f;
+      cl.lapse = 0.006f;
+      cl.seaLevel = 0.0f;
+      cl.warp = 40.0f;
+      cl.blendRadius = 8.0f;
+      for (int ti = 0; ti < BRUSH_BIOME_WHITTAKER; ti++)
+        for (int mi = 0; mi < BRUSH_BIOME_WHITTAKER; mi++) {
+          unsigned char id;
+          if (ti < 2) id = 3;                                     // cold -> highland
+          else if (ti < 6) id = (mi < 3) ? 1 : (mi < 6 ? 0 : 4); // temperate bands
+          else id = (mi < 4) ? 2 : 0;                            // hot: desert / meadow
+          cl.whittaker[ti * BRUSH_BIOME_WHITTAKER + mi] = id;
+        }
+    }
+    BrushWorldSetBiomeClimate(s->world, &cl);
+  }
+
   // Harness: paint a 'path' (terrain layer 1) strip across spawn; the grass
   // layer (avoidLayer=1) should leave it bare — surface-layer auto-exclusion.
   if (getenv("BRUSH_TEST_FOLIAGE_AVOID") != NULL) {

@@ -81,6 +81,12 @@ typedef struct WorldChunk {
   unsigned char *maskPixels; // hmRes^2 * 4 foliage density (composed under lock,
                              // then read lock-free by the scatter samplers)
   bool maskValid;
+  // Biome field (docs/biome-system-plan.md): hmRes^2 RGBA8, R=id0 G=id1
+  // B=blend*255. Composed on the worker like splat; read by the biomeAt sampler
+  // (CPU) and bound to lit.fs (F2 debug view now, palette blend in Phase 2).
+  unsigned char *biomePixels;
+  bool biomeValid;
+  Texture2D biomeTex; // GPU copy, NEAREST-filtered (IDs must not interpolate)
 
   // Per-chunk subsystem handle (instanced foliage). `pendingHandle` is baked on
   // the worker and swapped into `handle` at finalize, exactly like pendingMesh
@@ -166,6 +172,8 @@ struct BrushWorld {
   float roadAABB[BRUSH_WORLD_MAX_ROADS][4]; // minX, minZ, maxX, maxZ (+ edge)
   BrushTerrainLayer roadLayer; // the road SURFACE material (own texture/tile)
   bool hasRoadLayer;           // a road material is set -> composite it
+
+  BrushBiomeClimate biomeClimate; // biome field config (biomeCount 0 = off)
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -518,6 +526,149 @@ static float ChunkRoadAt(void *ctx, float wx, float wz) {
   return (float)h->c->roadPixels[i] / 255.0f;
 }
 
+// --- Biome field (docs/biome-implementation-plan.md Phase 0) -----------------
+// Deterministic, world-continuous value noise for the climate fields (the
+// terrain heightFn is game-supplied; biomes carry their own coarse noise so a
+// biome-less game still gets a field). Pure — safe to call from the worker.
+static float BiomeHash2(int x, int z, unsigned int seed) {
+  unsigned int h = (unsigned int)x * 374761393u + (unsigned int)z * 668265263u +
+                   seed * 362437u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  h ^= h >> 16;
+  return (float)(h & 0xffffffu) / (float)0xffffffu; // 0..1
+}
+static float BiomeValueNoise(float x, float z, unsigned int seed) {
+  float fxi = floorf(x), fzi = floorf(z);
+  int xi = (int)fxi, zi = (int)fzi;
+  float fx = x - fxi, fz = z - fzi;
+  float u = fx * fx * (3.0f - 2.0f * fx), v = fz * fz * (3.0f - 2.0f * fz);
+  float a = BiomeHash2(xi, zi, seed), b = BiomeHash2(xi + 1, zi, seed);
+  float c = BiomeHash2(xi, zi + 1, seed), d = BiomeHash2(xi + 1, zi + 1, seed);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v; // 0..1
+}
+static float BiomeFbm(float x, float z, unsigned int seed) {
+  float f = 0.0f, amp = 0.5f, sum = 0.0f;
+  for (int o = 0; o < 3; o++) {
+    f += amp * BiomeValueNoise(x, z, seed + (unsigned int)o * 1013u);
+    sum += amp; x *= 2.0f; z *= 2.0f; amp *= 0.5f;
+  }
+  return f / sum; // 0..1
+}
+
+// Temperature/moisture at a world point: warped fbm, temperature cooled by
+// altitude (base heightFn — NOT sculpt/roads: pure, deadlock-free, and hand
+// sculpting shouldn't repaint biomes). Both clamped to 0..1.
+static void BiomeRaw(const BrushWorld *w, float wx, float wz, float *temp,
+                     float *moist) {
+  const BrushBiomeClimate *c = &w->biomeClimate;
+  float ts = (c->tempScale > 1.0f) ? c->tempScale : 512.0f;
+  float ms = (c->moistScale > 1.0f) ? c->moistScale : 512.0f;
+  float warp = c->warp;
+  float wxw = wx + warp * (BiomeFbm(wx / ts * 0.5f, wz / ts * 0.5f, c->seed + 7u) - 0.5f) * 2.0f;
+  float wzw = wz + warp * (BiomeFbm(wx / ms * 0.5f, wz / ms * 0.5f, c->seed + 9u) - 0.5f) * 2.0f;
+  float t = BiomeFbm(wxw / ts, wzw / ts, c->seed + 1u);
+  float m = BiomeFbm(wxw / ms, wzw / ms, c->seed + 2u);
+  // Value-noise fbm clusters around 0.5; expand the contrast so temperature and
+  // moisture actually span the Whittaker table (else the world reads as 1-2
+  // biomes instead of a varied patchwork).
+  t = 0.5f + (t - 0.5f) * 2.2f;
+  m = 0.5f + (m - 0.5f) * 2.2f;
+  float h = Height(w, wx, wz);
+  t -= c->lapse * fmaxf(0.0f, h - c->seaLevel);
+  *temp = Clamp(t, 0.0f, 1.0f);
+  *moist = Clamp(m, 0.0f, 1.0f);
+}
+
+// Whittaker lookup: (temperature, moisture) -> biome id (0..biomeCount-1).
+static unsigned char BiomeIdAt(const BrushWorld *w, float wx, float wz) {
+  float t, m; BiomeRaw(w, wx, wz, &t, &m);
+  int N = BRUSH_BIOME_WHITTAKER;
+  int ti = (int)(t * (float)N); if (ti >= N) ti = N - 1; if (ti < 0) ti = 0;
+  int mi = (int)(m * (float)N); if (mi >= N) mi = N - 1; if (mi < 0) mi = 0;
+  unsigned char id = w->biomeClimate.whittaker[ti * N + mi];
+  return (id < BRUSH_MAX_BIOMES) ? id : 0;
+}
+
+// Compose the per-chunk biome map. Fast path: precompute the raw id over an
+// apron (blend reach) and, if the whole chunk+apron is one biome, fill {id,id,0}
+// and skip the blend. Otherwise soften the id membership over the apron into
+// top-2 weights (a per-texel weighted neighbourhood — at hmRes/1 m the field is
+// already fine-grained, so this reads as a smooth border, no grid squareness).
+static void ComposeBiomeMap(BrushWorld *w, WorldChunk *chunk) {
+  const BrushBiomeClimate *cl = &w->biomeClimate;
+  int sr = w->cfg.hmRes;
+  Vector3 o = ChunkOrigin(w, chunk->coord);
+  float step = w->cfg.chunkSize / (float)(sr - 1);
+  int M = (cl->blendRadius > 0.0f) ? (int)ceilf(cl->blendRadius / step) : 0;
+  if (M > 6) M = 6;
+  int ar = sr + 2 * M;
+  if (chunk->biomePixels == NULL)
+    chunk->biomePixels = (unsigned char *)MemAlloc((unsigned int)(sr * sr * 4));
+  unsigned char *raw = (unsigned char *)MemAlloc((unsigned int)(ar * ar));
+  unsigned char first = 0; bool uniform = true;
+  for (int z = 0; z < ar; z++)
+    for (int x = 0; x < ar; x++) {
+      float wx = o.x + (float)(x - M) * step;
+      float wz = o.z + (float)(z - M) * step;
+      unsigned char id = BiomeIdAt(w, wx, wz);
+      raw[z * ar + x] = id;
+      if (x == 0 && z == 0) first = id; else if (id != first) uniform = false;
+    }
+  if (uniform || M == 0) { // single biome (or blending off) -> hard fill
+    for (int z = 0; z < sr; z++)
+      for (int x = 0; x < sr; x++) {
+        unsigned char id = raw[(z + M) * ar + (x + M)];
+        unsigned char *px = &chunk->biomePixels[(z * sr + x) * 4];
+        px[0] = id; px[1] = id; px[2] = 0; px[3] = 255;
+      }
+  } else {
+    float R = cl->blendRadius, R2 = R * R;
+    for (int z = 0; z < sr; z++)
+      for (int x = 0; x < sr; x++) {
+        float acc[BRUSH_MAX_BIOMES] = {0};
+        // A radial (R^2 - d^2)^2 weighting of the world-positioned raw ids in the
+        // neighbourhood. NO jitter: the raw ids are a function of world position
+        // (continuous across chunks), so the blend is too — a jitter keyed on
+        // chunk-LOCAL indices would differ for the same world texel on adjacent
+        // chunk edges and stitch a seam down every chunk boundary.
+        for (int dz = -M; dz <= M; dz++)
+          for (int dx = -M; dx <= M; dx++) {
+            float ox = (float)dx * step, oz = (float)dz * step;
+            float d2 = ox * ox + oz * oz;
+            if (d2 >= R2) continue;
+            float wgt = R2 - d2; wgt *= wgt;
+            acc[raw[(z + M + dz) * ar + (x + M + dx)]] += wgt;
+          }
+        int b0 = 0, b1 = -1; float w0 = -1.0f, w1 = -1.0f;
+        for (int b = 0; b < BRUSH_MAX_BIOMES; b++) {
+          if (acc[b] > w0) { w1 = w0; b1 = b0; w0 = acc[b]; b0 = b; }
+          else if (acc[b] > w1) { w1 = acc[b]; b1 = b; }
+        }
+        float blend = (b1 >= 0 && (w0 + w1) > 0.0f) ? w1 / (w0 + w1) : 0.0f;
+        unsigned char *px = &chunk->biomePixels[(z * sr + x) * 4];
+        px[0] = (unsigned char)b0;
+        px[1] = (unsigned char)(b1 >= 0 ? b1 : b0);
+        px[2] = (unsigned char)(blend * 255.0f + 0.5f);
+        px[3] = 255;
+      }
+  }
+  MemFree(raw);
+  chunk->biomeValid = true;
+}
+
+// Sampler: the two dominant biomes + blend at a world point (nearest texel).
+// Phase 1 refines to bilinear-on-blend when foliage consumes it.
+static void ChunkBiomeAt(void *ctx, float wx, float wz, BrushBiomeSample *out) {
+  ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
+  if (!h->c->biomeValid || h->c->biomePixels == NULL) {
+    out->id0 = 0; out->id1 = 0; out->blend = 0.0f; // single implicit biome
+    return;
+  }
+  int i = ChunkGridIndex(h->w, h->c, wx, wz);
+  const unsigned char *px = &h->c->biomePixels[i * 4];
+  out->id0 = px[0]; out->id1 = px[1]; out->blend = (float)px[2] / 255.0f;
+}
+
 // Vertex colour by slope: green lowland fading to grey rock on steep faces.
 // Zero-asset default shading (the lit shader multiplies albedo by this).
 static void SlopeColor(float ny, unsigned char *out) {
@@ -714,6 +865,11 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     }
   }
 
+  // Biome field: pure function of the base heightFn + climate noise, so compose
+  // it OUTSIDE the sculpt lock (no shared mutable state, no lock contention).
+  chunk->biomeValid = false;
+  if (w->biomeClimate.biomeCount > 0) ComposeBiomeMap(w, chunk);
+
   // Compose the sculpt overlay: final = heightFn + delta. Sampled on the
   // same grid the heightmap uses, so the mesh bake, collider, and gameplay
   // queries all pick it up from this one place.
@@ -817,7 +973,7 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     if (chunk->pendingHandle && w->cfg.chunkFree)
       w->cfg.chunkFree(w->cfg.chunkUser, chunk->pendingHandle);
     ChunkHeightCtx hc = {w, chunk};
-    BrushChunkSamplers samplers = {ChunkHeightAt, ChunkDensityAt, ChunkSplatAt, ChunkRoadAt, &hc};
+    BrushChunkSamplers samplers = {ChunkHeightAt, ChunkDensityAt, ChunkSplatAt, ChunkRoadAt, ChunkBiomeAt, &hc};
     chunk->pendingHandle = w->cfg.chunkBake(w->cfg.chunkUser, chunk->coord, o,
                                             w->cfg.chunkSize, &samplers);
   }
@@ -901,6 +1057,8 @@ static WorldChunk *AcquireSlot(BrushWorld *w, BrushChunkCoord c) {
       Texture2D st = k->splatTex;
       unsigned char *rp = k->roadPixels;
       Texture2D rtx = k->roadTex;
+      unsigned char *bp = k->biomePixels;
+      Texture2D btx = k->biomeTex;
       memset(k, 0, sizeof(*k));
       k->coord = c;
       k->heightmap = hm;
@@ -910,6 +1068,8 @@ static WorldChunk *AcquireSlot(BrushWorld *w, BrushChunkCoord c) {
       k->splatTex = st;
       k->roadPixels = rp;
       k->roadTex = rtx;
+      k->biomePixels = bp;
+      k->biomeTex = btx;
       k->terrainBody = BRUSH_BODY_INVALID;
       return k;
     }
@@ -982,6 +1142,23 @@ static bool FinalizeChunk(BrushWorld *w, WorldChunk *chunk) {
       SetTextureWrap(chunk->roadTex, TEXTURE_WRAP_CLAMP);
     } else {
       UpdateTexture(chunk->roadTex, chunk->roadPixels);
+    }
+  }
+  // Biome map -> GPU. NEAREST: R=id0/G=id1 must never interpolate (lerping two
+  // IDs is meaningless); the shader/sampler bilinear-blend only the B channel.
+  if (IsWindowReady() && chunk->biomeValid && chunk->biomePixels != NULL) {
+    int sr = w->cfg.hmRes;
+    if (chunk->biomeTex.id == 0) {
+      Image img = {.data = chunk->biomePixels,
+                   .width = sr,
+                   .height = sr,
+                   .mipmaps = 1,
+                   .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+      chunk->biomeTex = LoadTextureFromImage(img); // copies the pixels
+      SetTextureFilter(chunk->biomeTex, TEXTURE_FILTER_POINT);
+      SetTextureWrap(chunk->biomeTex, TEXTURE_WRAP_CLAMP);
+    } else {
+      UpdateTexture(chunk->biomeTex, chunk->biomePixels);
     }
   }
 
@@ -1074,6 +1251,14 @@ static void DestroyChunkBuffers(WorldChunk *chunk) {
   if (chunk->maskPixels) {
     MemFree(chunk->maskPixels);
     chunk->maskPixels = NULL;
+  }
+  if (chunk->biomeTex.id != 0) {
+    UnloadTexture(chunk->biomeTex);
+    chunk->biomeTex = (Texture2D){0};
+  }
+  if (chunk->biomePixels) {
+    MemFree(chunk->biomePixels);
+    chunk->biomePixels = NULL;
   }
   if (chunk->meshUploaded) {
     UnloadMesh(chunk->mesh);
@@ -1337,6 +1522,7 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
         sd.roadLayer = w->roadLayer;
         sd.hasRoad = true;
       }
+      sd.biome = chunk->biomeTex; // 0 when biomes off -> unbound (F2 BIOME view)
       BrushRenderSubmitMeshSplat(BRUSH_LAYER_OPAQUE, chunk->mesh, &w->material,
                                  xf, &sd);
     } else {
@@ -1563,6 +1749,13 @@ void BrushWorldSetLayers(BrushWorld *w,
 
 void BrushWorldRebakeAll(BrushWorld *w) {
   SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
+}
+
+void BrushWorldSetBiomeClimate(BrushWorld *w, const BrushBiomeClimate *climate) {
+  if (!w) return;
+  if (climate) w->biomeClimate = *climate;
+  else memset(&w->biomeClimate, 0, sizeof(w->biomeClimate)); // NULL -> biomes off
+  BrushWorldRebakeAll(w); // re-compose every chunk's biome map
 }
 
 void BrushWorldPaintFoliage(BrushWorld *w, Vector3 center, float radius,
