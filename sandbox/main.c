@@ -427,21 +427,29 @@ static void SandboxInit(void *user) {
         .avoidThreshold = fl->avoidThreshold,
         .avoidRoad = fl->avoidRoad,
         .biomeId = fl->biomeId};
-    // Model palette: mesh + texture per resolved variant ({0} -> procedural).
+    // Model palette: meshes + textures per resolved variant ({0} ->
+    // procedural). ALL submeshes are carried (up to the cap), each with its
+    // own material's albedo — a tree GLB keeps bark AND leaves.
     int mc = 0;
     for (int m = 0; m < fl->modelCount; m++) {
       const Model *mdl = &fl->modelRes[m];
       if (mdl->meshCount <= 0) continue;
-      c.meshes[mc] = mdl->meshes[0];
-      int mat = (mdl->meshMaterial && mdl->meshMaterial[0] >= 0 &&
-                 mdl->meshMaterial[0] < mdl->materialCount) ? mdl->meshMaterial[0] : 0;
-      Texture2D t = (mdl->materialCount > 0)
-          ? mdl->materials[mat].maps[MATERIAL_MAP_DIFFUSE].texture
-          : (Texture2D){0};
-      // raylib's 1x1 default (white) texture means "no real texture" -> fall
-      // back to the layer Albedo / procedural gradient instead of flat white.
-      bool realTex = (t.id != 0 && (t.width > 1 || t.height > 1));
-      c.albedos[mc] = realTex ? t : fl->albedoTex;
+      int sc = 0;
+      for (int sm = 0; sm < mdl->meshCount && sc < BRUSH_FOLIAGE_SUBMESHES; sm++) {
+        c.meshes[mc][sc] = mdl->meshes[sm];
+        int mat = (mdl->meshMaterial && mdl->meshMaterial[sm] >= 0 &&
+                   mdl->meshMaterial[sm] < mdl->materialCount)
+                      ? mdl->meshMaterial[sm] : 0;
+        Texture2D t = (mdl->materialCount > 0)
+            ? mdl->materials[mat].maps[MATERIAL_MAP_DIFFUSE].texture
+            : (Texture2D){0};
+        // raylib's 1x1 default (white) texture means "no real texture" -> fall
+        // back to the layer Albedo / procedural gradient instead of flat white.
+        bool realTex = (t.id != 0 && (t.width > 1 || t.height > 1));
+        c.albedos[mc][sc] = realTex ? t : fl->albedoTex;
+        sc++;
+      }
+      c.subCount[mc] = sc;
       c.meshScale[mc] = fl->modelScale[m] > 0.0f ? fl->modelScale[m] : 1.0f;
       mc++;
     }

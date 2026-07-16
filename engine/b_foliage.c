@@ -367,9 +367,7 @@ Mesh BrushFoliageBuildLODMeshTarget(Mesh source, float targetRatio, int maxTris)
 }
 
 Mesh BrushFoliageBuildBillboardMesh(Mesh source) {
-  Mesh billboard = {0};
-
-  // Bounding box of the source mesh.
+  // Bounding box of the source mesh -> card size.
   float minX = 1e9f, maxX = -1e9f;
   float minY = 1e9f, maxY = -1e9f;
   float minZ = 1e9f, maxZ = -1e9f;
@@ -381,11 +379,17 @@ Mesh BrushFoliageBuildBillboardMesh(Mesh source) {
     if (y < minY) minY = y; if (y > maxY) maxY = y;
     if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
   }
-
   // Half-width from the wider horizontal spread; scale to 85% to compensate for
   // billboards lacking perspective foreshortening vs. the real 3D mesh.
   float w = fmaxf(maxX - minX, maxZ - minZ) * 0.5f * 0.85f;
   float h = (maxY - minY) * 0.85f;
+  return BrushFoliageBuildBillboardMeshWH(w, h);
+}
+
+// Same card from explicit half-width/height — used by the impostor bake, which
+// frames the UNION of a variant's submeshes (the atlas and the card must agree).
+Mesh BrushFoliageBuildBillboardMeshWH(float w, float h) {
+  Mesh billboard = {0};
   if (w <= 0.0f) w = 0.5f;
   if (h <= 0.0f) h = 1.0f;
 
@@ -639,10 +643,16 @@ Shader BrushFoliageLoadShader(void) {
 typedef struct BrushFoliageLayer {
   BrushFoliageLayerConfig cfg;
   int meshCount;   // model variants (>=1; a meadow mixes several meshes)
-  Mesh nearMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // wind-baked copy (models) or tuft
-  Mesh farMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];  // decimated LOD, owned
-  bool hasFar[BRUSH_FOLIAGE_MODELS_PER_LAYER];
-  Material material[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  // Per-variant SUBMESHES (a tree = bark + cutout leaves): they share the
+  // variant's instance-transform batch and draw as one instanced call each.
+  // Grass/tuft variants have subCount 1 — identical to the old single-mesh
+  // path. The billboard impostor stays PER VARIANT (all submeshes bake into
+  // one atlas pair).
+  int subCount[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  Mesh nearMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES]; // shared model mesh or tuft
+  Mesh farMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES];  // decimated LOD, owned
+  bool hasFar[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES];
+  Material material[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES];
   // Billboard impostor band (opt-in): a crossed-quad + a texture baked once from
   // the clump, drawn beyond billboardDistance in place of the far mesh.
   Mesh billboardMesh[BRUSH_FOLIAGE_MODELS_PER_LAYER];
@@ -724,7 +734,7 @@ BrushFoliage *BrushFoliageCreate(void) {
 // (1 = albedo, 2 = encoded normal) through a manual orthographic front view.
 // The manual rlOrtho matters: raylib's BeginMode3D derives aspect from the
 // SCREEN, not the bound render target, which would distort a non-square atlas.
-static void BrushFoliageBakePass(BrushFoliage *f, Mesh mesh, Texture2D albedo,
+static void BrushFoliageBakePass(BrushFoliage *f, BrushFoliageLayer *L, int m,
                                  RenderTexture2D rt, float bw, float bh, float D,
                                  float mode) {
   float zero = 0.0f, cutoff = 0.3f, vp[3] = {0, 0, D};
@@ -746,13 +756,18 @@ static void BrushFoliageBakePass(BrushFoliage *f, Mesh mesh, Texture2D albedo,
   SetShaderValue(f->shader, f->locAlphaCutoff, &cutoff, SHADER_UNIFORM_FLOAT);
   SetShaderValue(f->shader, f->shader.locs[SHADER_LOC_VECTOR_VIEW], vp, SHADER_UNIFORM_VEC3);
 
+  // Every submesh of the variant renders into the same atlas, each with its
+  // own albedo (bark and leaves keep their textures in the impostor).
   Material bakeMat = LoadMaterialDefault();
   bakeMat.shader = f->shader;
-  bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
   bakeMat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
   Matrix idn = MatrixIdentity();
   rlDisableBackfaceCulling();
-  DrawMeshInstanced(mesh, bakeMat, &idn, 1);
+  for (int s = 0; s < L->subCount[m]; s++) {
+    bakeMat.maps[MATERIAL_MAP_DIFFUSE].texture =
+        L->material[m][s].maps[MATERIAL_MAP_DIFFUSE].texture;
+    DrawMeshInstanced(L->nearMesh[m][s], bakeMat, &idn, 1);
+  }
   rlDrawRenderBatchActive();
 
   rlMatrixMode(RL_PROJECTION);
@@ -775,18 +790,23 @@ static void BrushFoliageBakePass(BrushFoliage *f, Mesh mesh, Texture2D albedo,
 // octahedral angle atlas. Both channels are LIGHT-INDEPENDENT, so the billboard
 // is lit live at draw with the current sun (see foliage.fs) and tracks day/night
 // with no re-bake and no sudden colour shift. One-time cost.
-static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L, int m,
-                                     Texture2D albedo) {
-  Mesh mesh = L->nearMesh[m];
-  if (!mesh.vertices || mesh.vertexCount <= 0) return;
-
+static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L,
+                                     int m) {
+  // Frame the UNION of the variant's submeshes (bark + canopy together).
   float minX = 1e9f, maxX = -1e9f, minZ = 1e9f, maxZ = -1e9f, maxY = 0.0f;
-  for (int v = 0; v < mesh.vertexCount; v++) {
-    float x = mesh.vertices[v * 3], y = mesh.vertices[v * 3 + 1], z = mesh.vertices[v * 3 + 2];
-    if (x < minX) minX = x; if (x > maxX) maxX = x;
-    if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
-    if (y > maxY) maxY = y;
+  int verts = 0;
+  for (int s = 0; s < L->subCount[m]; s++) {
+    Mesh mesh = L->nearMesh[m][s];
+    if (!mesh.vertices || mesh.vertexCount <= 0) continue;
+    verts += mesh.vertexCount;
+    for (int v = 0; v < mesh.vertexCount; v++) {
+      float x = mesh.vertices[v * 3], y = mesh.vertices[v * 3 + 1], z = mesh.vertices[v * 3 + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      if (y > maxY) maxY = y;
+    }
   }
+  if (verts <= 0) return;
   // Match BuildBillboardMesh's framing (85% of the wider horizontal spread).
   float bw = fmaxf(maxX - minX, maxZ - minZ) * 0.5f * 0.85f;
   float bh = maxY * 0.85f;
@@ -801,14 +821,16 @@ static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L, int 
   if (albedoRT.id == 0 || nrmRT.id == 0) return;
 
   float D = bw + bh + 1.0f; // ortho eye distance (rotation-free front view)
-  BrushFoliageBakePass(f, mesh, albedo, albedoRT, bw, bh, D, 1.0f); // albedo
-  BrushFoliageBakePass(f, mesh, albedo, nrmRT, bw, bh, D, 2.0f);    // normal
+  BrushFoliageBakePass(f, L, m, albedoRT, bw, bh, D, 1.0f); // albedo
+  BrushFoliageBakePass(f, L, m, nrmRT, bw, bh, D, 2.0f);    // normal
   float zero = 0.0f;
   SetShaderValue(f->shader, f->locImpostorBake, &zero, SHADER_UNIFORM_FLOAT); // back to draw mode
 
   L->impostorRT[m] = albedoRT;
   L->impostorNrmRT[m] = nrmRT;
-  L->billboardMesh[m] = BrushFoliageBuildBillboardMesh(mesh);
+  // Cross-quad sized from the same union bounds the atlas was framed with
+  // (the [0,1] UVs must map the atlas 1:1).
+  L->billboardMesh[m] = BrushFoliageBuildBillboardMeshWH(bw, bh);
   L->billboardMat[m] = LoadMaterialDefault();
   L->billboardMat[m].shader = f->shader;
   L->billboardMat[m].maps[MATERIAL_MAP_DIFFUSE].texture = albedoRT.texture;
@@ -841,65 +863,84 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     L->cfg.groundStrength = 0.65f;
   }
 
-  // Model palette: build near + far LOD mesh and a material per variant. An
-  // empty palette (or a variant with no mesh) falls back to the procedural tuft;
-  // a variant with no albedo falls back to the gradient.
+  // Model palette: build near + far LOD meshes and a material per variant
+  // SUBMESH. An empty palette (or a variant with no mesh) falls back to the
+  // procedural tuft; a submesh with no albedo falls back to the gradient.
   int mc = cfg->meshCount;
   if (mc <= 0) mc = 1;
   if (mc > BRUSH_FOLIAGE_MODELS_PER_LAYER) mc = BRUSH_FOLIAGE_MODELS_PER_LAYER;
   L->meshCount = mc;
   for (int m = 0; m < mc; m++) {
-    // The wind bends by world height, so a model mesh works as-is (shared,
-    // not owned); an empty slot falls back to the procedural tuft.
-    Mesh src = (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0)
-                   ? cfg->meshes[m] : f->defaultTuft;
-    // Ground the provided model mesh: recentre it on XZ and drop its base to
-    // Y=0, then re-upload. Models are often pivoted at their centre (or an
-    // arbitrary point), which makes them float/sink or swing around the scatter
-    // point when rotated. Baking the transform into the geometry once — rather
-    // than offsetting per instance — means BOTH the near mesh and the LOD mesh
-    // built from it share the same grounded base, so grass never jumps at the
-    // LOD boundary. Idempotent: re-running on an already-grounded/shared mesh
-    // (e.g. the procedural tuft) subtracts ~0 and skips the GPU update.
-    if (cfg->meshCount > 0 && cfg->meshes[m].vertexCount > 0 && src.vertices) {
+    int sc = (cfg->meshCount > 0) ? cfg->subCount[m] : 0;
+    if (sc <= 0) sc = 1;
+    if (sc > BRUSH_FOLIAGE_SUBMESHES) sc = BRUSH_FOLIAGE_SUBMESHES;
+    bool fromModel =
+        (cfg->meshCount > 0 && cfg->meshes[m][0].vertexCount > 0);
+    L->subCount[m] = fromModel ? sc : 1;
+
+    // Ground the provided model: recentre on XZ and drop the base to Y=0,
+    // baking ONE offset from the UNION of the variant's submeshes into all of
+    // them (grounding each submesh separately would sink a trunk whose canopy
+    // submesh starts above the base, and split the tree apart). Baking once —
+    // rather than offsetting per instance — means the near mesh and the LOD
+    // built from it share the same grounded base, so nothing jumps at the LOD
+    // boundary. Idempotent: re-running subtracts ~0 and skips the GPU update.
+    if (fromModel) {
       float minX = 1e9f, maxX = -1e9f, minY = 1e9f, minZ = 1e9f, maxZ = -1e9f;
-      for (int v = 0; v < src.vertexCount; v++) {
-        float x = src.vertices[v * 3], y = src.vertices[v * 3 + 1], z = src.vertices[v * 3 + 2];
-        if (x < minX) minX = x; if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      for (int s = 0; s < L->subCount[m]; s++) {
+        Mesh sm = cfg->meshes[m][s];
+        if (!sm.vertices) continue;
+        for (int v = 0; v < sm.vertexCount; v++) {
+          float x = sm.vertices[v * 3], y = sm.vertices[v * 3 + 1], z = sm.vertices[v * 3 + 2];
+          if (x < minX) minX = x; if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+        }
       }
       float ox = (minX + maxX) * 0.5f, oy = minY, oz = (minZ + maxZ) * 0.5f;
       if (fabsf(ox) > 1e-4f || fabsf(oy) > 1e-4f || fabsf(oz) > 1e-4f) {
-        for (int v = 0; v < src.vertexCount; v++) {
-          src.vertices[v * 3] -= ox;
-          src.vertices[v * 3 + 1] -= oy;
-          src.vertices[v * 3 + 2] -= oz;
+        for (int s = 0; s < L->subCount[m]; s++) {
+          Mesh sm = cfg->meshes[m][s];
+          if (!sm.vertices) continue;
+          for (int v = 0; v < sm.vertexCount; v++) {
+            sm.vertices[v * 3] -= ox;
+            sm.vertices[v * 3 + 1] -= oy;
+            sm.vertices[v * 3 + 2] -= oz;
+          }
+          UpdateMeshBuffer(sm, 0, sm.vertices, sizeof(float) * sm.vertexCount * 3, 0);
         }
-        UpdateMeshBuffer(src, 0, src.vertices, sizeof(float) * src.vertexCount * 3, 0);
       }
     }
-    L->nearMesh[m] = src;
-    if (L->cfg.farKeepRatio < 0.999f) {
-      // Cap the far mesh to a fixed triangle budget so a heavy imported model
-      // gets decimated much harder than its authored (relative) ratio would —
-      // the procedural tuft, already under budget, keeps its ratio unchanged.
-      L->farMesh[m] = BrushFoliageBuildLODMeshTarget(
-          L->nearMesh[m], L->cfg.farKeepRatio, BRUSH_FOLIAGE_FAR_MAX_TRIS);
-      L->hasFar[m] = true;
-    } else {
-      L->hasFar[m] = false;
+
+    for (int s = 0; s < L->subCount[m]; s++) {
+      // Model meshes are shared (not owned); an empty slot falls back to the
+      // procedural tuft.
+      Mesh src = (fromModel && cfg->meshes[m][s].vertexCount > 0)
+                     ? cfg->meshes[m][s] : f->defaultTuft;
+      L->nearMesh[m][s] = src;
+      if (L->cfg.farKeepRatio < 0.999f) {
+        // Cap the far mesh to a fixed triangle budget so a heavy imported
+        // model gets decimated much harder than its authored ratio would —
+        // the budget is split across the variant's submeshes so the SUM stays
+        // capped (the tuft, already under budget, keeps its ratio unchanged).
+        L->farMesh[m][s] = BrushFoliageBuildLODMeshTarget(
+            L->nearMesh[m][s], L->cfg.farKeepRatio,
+            BRUSH_FOLIAGE_FAR_MAX_TRIS / L->subCount[m]);
+        L->hasFar[m][s] = true;
+      } else {
+        L->hasFar[m][s] = false;
+      }
+      L->material[m][s] = LoadMaterialDefault();
+      L->material[m][s].shader = f->shader;
+      Texture2D albedo = (fromModel && cfg->albedos[m][s].id != 0)
+                             ? cfg->albedos[m][s] : f->defaultGradient;
+      L->material[m][s].maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
+      L->material[m][s].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     }
-    L->material[m] = LoadMaterialDefault();
-    L->material[m].shader = f->shader;
-    Texture2D albedo =
-        (cfg->meshCount > 0 && cfg->albedos[m].id != 0) ? cfg->albedos[m]
-                                                        : f->defaultGradient;
-    L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture = albedo;
-    L->material[m].maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-    // Bake the billboard impostor once (opt-in) — the shader state it sets is
-    // re-pushed every frame in the draw, so scribbling on it here is fine.
-    if (f->impostor) BrushFoliageBakeImpostor(f, L, m, albedo);
+    // Bake the variant's billboard impostor once (opt-in): ALL submeshes
+    // render into one atlas pair. Materials are set above — the bake reads
+    // each submesh's albedo from them.
+    if (f->impostor) BrushFoliageBakeImpostor(f, L, m);
   }
   // Billboard band covers the outer ~60% of the far range (mesh near, impostor
   // far); 0 disables it. A wider band means the impostors dissolve (height-fade)
@@ -937,12 +978,14 @@ void BrushFoliageClearLayers(BrushFoliage *f) {
   for (int i = 0; i < f->layerCount; i++) {
     BrushFoliageLayer *L = &f->layers[i];
     for (int m = 0; m < L->meshCount; m++) {
-      if (L->hasFar[m]) UnloadMesh(L->farMesh[m]);
-      // nearMesh is a shared model/tuft mesh — not owned, not freed here.
-      // Shader + albedo are system/caller-owned; detach before UnloadMaterial.
-      L->material[m].shader = (Shader){0};
-      L->material[m].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
-      UnloadMaterial(L->material[m]);
+      for (int s = 0; s < L->subCount[m]; s++) {
+        if (L->hasFar[m][s]) UnloadMesh(L->farMesh[m][s]);
+        // nearMesh is a shared model/tuft mesh — not owned, not freed here.
+        // Shader + albedo are system/caller-owned; detach before UnloadMaterial.
+        L->material[m][s].shader = (Shader){0};
+        L->material[m][s].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){0};
+        UnloadMaterial(L->material[m][s]);
+      }
       if (L->hasImpostor[m]) {
         UnloadMesh(L->billboardMesh[m]);
         L->billboardMat[m].shader = (Shader){0};
@@ -1268,7 +1311,9 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       BRUSH_FOLIAGE_SET_FADE(0.0f, 0.0f, lod - tNear * 0.5f, lod);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->nearB.count[m] > 0)
-          DrawMeshInstanced(L->nearMesh[m], L->material[m], L->nearB.buf[m], L->nearB.count[m]);
+          for (int s = 0; s < L->subCount[m]; s++) // submeshes share the batch
+            DrawMeshInstanced(L->nearMesh[m][s], L->material[m][s],
+                              L->nearB.buf[m], L->nearB.count[m]);
       }
     }
 
@@ -1280,8 +1325,11 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       BRUSH_FOLIAGE_SET_FADE(lod - tNear, lod - tNear * 0.5f, bbEdge - tFar, bbEdge);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->farB.count[m] > 0)
-          DrawMeshInstanced(L->hasFar[m] ? L->farMesh[m] : L->nearMesh[m],
-                            L->material[m], L->farB.buf[m], L->farB.count[m]);
+          for (int s = 0; s < L->subCount[m]; s++)
+            DrawMeshInstanced(L->hasFar[m][s] ? L->farMesh[m][s]
+                                              : L->nearMesh[m][s],
+                              L->material[m][s], L->farB.buf[m],
+                              L->farB.count[m]);
       }
     }
 

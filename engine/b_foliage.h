@@ -36,6 +36,7 @@ extern "C" {
 // Up to this many model variants per foliage layer (a meadow mixes several
 // meshes for variety — each instance randomly picks one).
 #define BRUSH_FOLIAGE_MODELS_PER_LAYER 4
+#define BRUSH_FOLIAGE_SUBMESHES 3 // per-variant submeshes (bark + leaves + spare)
 
 // Hard triangle budget for the FAR LOD mesh. farKeepRatio is a *relative* ratio,
 // which leaves a heavy imported model (thousands of tris) still heavy at
@@ -134,6 +135,10 @@ Mesh BrushFoliageBuildLODMeshTarget(Mesh source, float targetRatio, int maxTris)
 // (0 base .. 1 tip). For the cheapest far band + a baked impostor texture.
 Mesh BrushFoliageBuildBillboardMesh(Mesh source);
 
+// Same card from an explicit half-width/height (the impostor bake frames the
+// UNION of a variant's submeshes; card and atlas must use the same bounds).
+Mesh BrushFoliageBuildBillboardMeshWH(float w, float h);
+
 // --- Zero-asset procedural defaults + the instanced shader (MAIN THREAD) -----
 // A realistic grass clump: `blades` thin, curved, tapered blades (5 verts /
 // 3 tris each, ~1 cm wide, radial, bending outward with gravity droop) filling
@@ -184,8 +189,12 @@ typedef struct BrushFoliageLayerConfig {
   float   groundStrength;// 0..1 tint amount (0 = feature off)
   // Model palette: up to N mesh variants mixed per instance ({0} mesh ->
   // procedural tuft; id-0 albedo -> the model's own texture, else the gradient).
-  Mesh meshes[BRUSH_FOLIAGE_MODELS_PER_LAYER];
-  Texture2D albedos[BRUSH_FOLIAGE_MODELS_PER_LAYER];
+  // Each variant may carry several SUBMESHES (a tree GLB = bark + cutout
+  // leaves, each with its own albedo); they share the variant's instance
+  // transforms and draw as one instanced call per submesh. subCount[m] 0 -> 1.
+  Mesh meshes[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES];
+  Texture2D albedos[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES];
+  int subCount[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   float meshScale[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // per-variant scale x layer scale (0 -> 1)
   int meshCount;        // 0 -> a single procedural tuft
   // Surface-layer auto-exclusion (reads the terrain splat weights).
