@@ -634,6 +634,28 @@ bool BrushSceneMaterialLayer(const BrushScene *s, const char *name,
   return true;
 }
 
+int BrushSceneTerrainLibrary(const BrushScene *s, BrushTerrainLayer *out,
+                             int maxN) {
+  int count = s->materialCount;
+  if (count > maxN) count = maxN;
+  for (int i = 0; i < count; i++) {
+    const BrushSceneMaterial *m = &s->materials[i];
+    out[i] = (BrushTerrainLayer){0};
+    out[i].albedo = m->albedoTex; // id 0 -> the array builder fills white
+    out[i].normal = m->normalTex;
+    out[i].displacement = m->surfaceTex;
+    out[i].tile = (m->tile > 0.01f) ? m->tile : 1.0f;
+    out[i].heightScale = (m->heightScale > 0.0f) ? m->heightScale : 0.05f;
+    out[i].normalDepth = (m->normalDepth > 0.0f) ? m->normalDepth : 1.0f;
+    out[i].roughness = m->roughnessDefault;
+    out[i].normalSwizzled = BrushAssetsIsSwizzledNormal(m->normalTex);
+    out[i].parallax = m->parallax;
+    out[i].heightBlend = m->heightBlend;
+    out[i].blendSharp = (m->blendSharp > 0.0f) ? m->blendSharp : 0.2f;
+  }
+  return count;
+}
+
 int BrushSceneTerrainLayers(const BrushScene *s,
                             BrushTerrainLayer out[BRUSH_TERRAIN_LAYERS]) {
   int count = 0;
@@ -741,6 +763,35 @@ void BrushSceneApplyRenderSettings(const BrushScene *s) {
       TraceLog(LOG_WARNING, "BRUSH scene: unknown post setting '%s'",
                ps->key);
   }
+}
+
+void BrushSceneApplyBiomePalette(const BrushScene *s) {
+  // Map each biome's 4 splat slots to a terrain-array slice (= a material-library
+  // index, since the array is built from materials[] in library order). The
+  // DEFAULT for an unset slot (< 0, or a biome with no definition) is the
+  // material index of the painted terrain layer for that slot — so a biome-less
+  // or palette-less scene renders exactly like the painted terrain layers.
+  int def[BRUSH_TERRAIN_LAYERS];
+  for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) {
+    int mi = s->terrainLayers[j][0] ? BrushSceneFindMaterial(s, s->terrainLayers[j]) : -1;
+    def[j] = (mi >= 0) ? mi : 0;
+  }
+  int pal[BRUSH_MAX_BIOMES * 4];
+  for (int i = 0; i < BRUSH_MAX_BIOMES; i++) {
+    for (int j = 0; j < 4; j++) {
+      int idx = (i < s->biomeCount) ? s->biomes[i].palette[j] : -1;
+      pal[i * 4 + j] = (idx >= 0) ? idx : def[j];
+    }
+  }
+  BrushRenderSetBiomePalette(pal);
+
+  // Per-biome grass-ground tint colours (2.4). Off when no biomes are defined.
+  Vector3 colors[BRUSH_MAX_BIOMES];
+  for (int i = 0; i < BRUSH_MAX_BIOMES; i++) {
+    Color c = (i < s->biomeCount) ? s->biomes[i].grassColor : (Color){0, 0, 0, 255};
+    colors[i] = (Vector3){c.r / 255.0f, c.g / 255.0f, c.b / 255.0f};
+  }
+  BrushRenderSetBiomeGrassColors(colors, s->biomeCount);
 }
 
 void BrushSceneCaptureRenderSettings(BrushScene *s) {

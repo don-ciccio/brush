@@ -13,6 +13,62 @@ Each phase compiles, runs, and is independently verifiable. Constants:
 > the pure base `heightFn` (deadlock-safe, verified); Phase 2 array assembly now
 > addresses the compressed-`.ctex` readback wall (GPU-blit assemble or cook
 > uncompressed) + layer dedupe + normalise normals at assemble time.
+>
+> **Rev 3 (Phase 2 in progress).** Confirmed the array must assemble from the
+> resolved layer **Texture2D handles**, not source paths — `BrushTerrainLayer`
+> carries only textures, so the CPU-from-paths idea is dropped in favour of the
+> §2.1 option-2 **GPU-blit assemble** (render each layer texture into an array
+> slice; decompresses BCn sources, resizes, normalises normals in one pass).
+> Sequencing: **do the array refactor with the CURRENT 4 layers first — terrain
+> must look IDENTICAL** — as an isolated de-risk of the sampler2DArray path
+> before the biome palette (§2.3) rides on top. Sub-split: albedo array, then
+> normal array.
+
+---
+
+## Progress (living log)
+
+- **Phase 0 — DONE, committed `35b39b5`.** As specced, with fixes found in build:
+  the `biome_whittaker`/`biome_climate` parse must come **before** `biome ` (the
+  `sscanf("biome %s")` prefix otherwise eats them — it corrupted a scene on save);
+  temp/moisture get a ×2.2 contrast expansion (value-noise fbm clusters at 0.5,
+  so without it the world reads as 1–2 biomes); no chunk-local jitter in the blend
+  (it stitched a seam down every chunk edge); F2 BIOME view gated to terrain so
+  props/player shade normally.
+- **Phase 1 — DONE, committed `f0d7571`.** `biomeId` on foliage layers end to end.
+  Extra fix: the **editor** never pushed the biome climate to its world, so
+  biome-gated foliage was invisible in the preview (worked in-game) — added to
+  `ApplyTerrainLayers`. Folded in an independent **foliage-LOD crossfade fix**
+  (offset the near↔far fade windows so grass doesn't flatten then stand up;
+  thin single-strand foliage sets `farKeepRatio=1` to avoid a crossfade double).
+- **Phase 2 — DONE (branch, committing now).**
+  - **2.1 array builder.** `BrushAssetsTextureArray(const Texture2D*, const bool
+    *swizzled, count, size, isNormal)` — GPU-blit from resolved textures via a
+    RenderTexture + readback + `glTexSubImage3D` (raw GL, macOS `<OpenGL/gl3.h>`).
+    Normals normalised DXT5nm→RGB in the blit. RT readback is fine (RGBA8); the
+    compressed-source wall is dodged (sample the source, don't read it back).
+    Release pak untested (loose sources work in dev).
+  - **2.2 albedo + normal arrays — VERIFIED identical.** Built in `BuildLayerArrays`
+    (b_world), passed via `BrushSplatDraw`, bound on units 3/6;
+    `SampleLayerArr`/`SampleLayerBumpArr` in lit.fs.
+  - **2.3 palette — via material LIBRARY.** Decided: **biomes index `materials[]`
+    directly.** The array is built from the whole library (slice i = `materials[i]`,
+    `BrushWorldSetTerrainLibrary` / `BrushSceneTerrainLibrary`); a biome
+    `palette[slot]` is a material index; the **default** for an unset slot is the
+    material index of the painted `terrainLayers[slot]` (so biome-less scenes are
+    unchanged — this fixed the "everything green / toggles dead" regression from a
+    zero/identity default). Shader double-taps the two biomes' palettes and lerps
+    by blend. `ChunkBiomeAt` does bilinear-on-blend (blocky-border fix).
+  - **2.4 per-biome grass-ground colour.** `uBiomeGrassColor[16]` + `uBiomeGroundOn`
+    drive the existing F3 tint; off when the scene defines no biomes.
+  - **Deviations:** only **albedo + normal** arrays (no ORH/surface array — POM
+    uses `uLayerHeight`, roughness stays scalar; per-biome height/roughness
+    deferred). **Per-slot tile** kept geometric — a biome's material tiles at its
+    slot's scale (per-material tile = a follow-up). Layer-3 normal is in the array
+    but unsampled.
+- **Launch road-carve — FIXED.** Not a config slot after all: `BrushWorldWaitResident`
+  drains all pending (re)bakes after the post-create setup (roads/sculpt/biomes),
+  called at the end of `SandboxInit`, so the terrain launches fully carved.
 
 ---
 

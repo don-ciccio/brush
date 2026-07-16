@@ -12,6 +12,7 @@
  ********************************************************************************************/
 
 #include "b_world.h"
+#include "b_assets.h" // BrushAssetsTextureArray (terrain layer arrays)
 #include "b_render.h"
 
 #include <math.h>
@@ -174,6 +175,15 @@ struct BrushWorld {
   bool hasRoadLayer;           // a road material is set -> composite it
 
   BrushBiomeClimate biomeClimate; // biome field config (biomeCount 0 = off)
+
+  // Terrain layer albedos + normals each packed into ONE sampler2DArray (Phase
+  // 2): removes the per-layer sampler binds and the 16-unit pressure. Normals
+  // are pre-normalised to plain RGB at build (no per-layer swizzle in-shader).
+  // Built from the material LIBRARY (biome-indexable) when set, else the 4
+  // painted layers. Rebuilt on SetLayers / SetTerrainLibrary.
+  Texture2D layerAlbedoArr, layerNormalArr;
+  BrushTerrainLayer libLayers[BRUSH_TERRAIN_ARRAY_MAX]; // array source (0 -> use w->layers)
+  int libCount;
 
   struct BrushChunkJobQueue *jobs;
 };
@@ -656,17 +666,54 @@ static void ComposeBiomeMap(BrushWorld *w, WorldChunk *chunk) {
   chunk->biomeValid = true;
 }
 
-// Sampler: the two dominant biomes + blend at a world point (nearest texel).
-// Phase 1 refines to bilinear-on-blend when foliage consumes it.
+// Sampler: the two dominant biomes + blend at a world point.
+// Uses nearest-neighbor for the discrete IDs, but bilinear interpolation for
+// the blend fraction to prevent stepped boundaries in foliage scattering.
 static void ChunkBiomeAt(void *ctx, float wx, float wz, BrushBiomeSample *out) {
   ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
   if (!h->c->biomeValid || h->c->biomePixels == NULL) {
     out->id0 = 0; out->id1 = 0; out->blend = 0.0f; // single implicit biome
     return;
   }
-  int i = ChunkGridIndex(h->w, h->c, wx, wz);
-  const unsigned char *px = &h->c->biomePixels[i * 4];
-  out->id0 = px[0]; out->id1 = px[1]; out->blend = (float)px[2] / 255.0f;
+  
+  int res = h->w->cfg.hmRes;
+  Vector3 o = ChunkOrigin(h->w, h->c->coord);
+  float step = h->w->cfg.chunkSize / (float)(res - 1);
+  float gx = (wx - o.x) / step;
+  float gz = (wz - o.z) / step;
+  
+  // 1. Nearest neighbor for discrete IDs
+  int ix = (int)(gx + 0.5f);
+  int iz = (int)(gz + 0.5f);
+  if (ix < 0) ix = 0; if (ix >= res) ix = res - 1;
+  if (iz < 0) iz = 0; if (iz >= res) iz = res - 1;
+  
+  const unsigned char *px = &h->c->biomePixels[(iz * res + ix) * 4];
+  out->id0 = px[0]; 
+  out->id1 = px[1];
+  
+  // 2. Bilinear interpolation for the blend fraction
+  // Shift by -0.5 to align texel centers with the grid points
+  float bx = gx - 0.5f;
+  float bz = gz - 0.5f;
+  int x0 = (int)floorf(bx);
+  int z0 = (int)floorf(bz);
+  int x1 = x0 + 1;
+  int z1 = z0 + 1;
+  float fx = bx - (float)x0;
+  float fz = bz - (float)z0;
+  
+  if (x0 < 0) x0 = 0; if (x0 >= res) x0 = res - 1;
+  if (x1 < 0) x1 = 0; if (x1 >= res) x1 = res - 1;
+  if (z0 < 0) z0 = 0; if (z0 >= res) z0 = res - 1;
+  if (z1 < 0) z1 = 0; if (z1 >= res) z1 = res - 1;
+  
+  float bl00 = (float)h->c->biomePixels[(z0 * res + x0) * 4 + 2] / 255.0f;
+  float bl10 = (float)h->c->biomePixels[(z0 * res + x1) * 4 + 2] / 255.0f;
+  float bl01 = (float)h->c->biomePixels[(z1 * res + x0) * 4 + 2] / 255.0f;
+  float bl11 = (float)h->c->biomePixels[(z1 * res + x1) * 4 + 2] / 255.0f;
+  
+  out->blend = Lerp(Lerp(bl00, bl10, fx), Lerp(bl01, bl11, fx), fz);
 }
 
 // Vertex colour by slope: green lowland fading to grey rock on steep faces.
@@ -1277,6 +1324,50 @@ static void DestroyChunkBuffers(WorldChunk *chunk) {
   }
 }
 
+// (Re)build the terrain layer texture ARRAY from the current layers. Main thread
+// only (GL). Sized to the largest layer albedo (clamped) so nothing softens vs
+// the old per-sampler path. Safe before the window is up (no-op then; SetLayers
+// runs again after create with the same layers, and its array-aware guard lets
+// the rebuild through).
+static void BuildLayerArrays(BrushWorld *w) {
+  if (!IsWindowReady()) return;
+  if (w->layerAlbedoArr.id != 0) {
+    UnloadTexture(w->layerAlbedoArr);
+    w->layerAlbedoArr = (Texture2D){0};
+  }
+  if (w->layerNormalArr.id != 0) {
+    UnloadTexture(w->layerNormalArr);
+    w->layerNormalArr = (Texture2D){0};
+  }
+  // Source: the biome-indexable material library if set (slice i = library[i]),
+  // else the 4 painted layers (identity/back-compat).
+  const BrushTerrainLayer *src = (w->libCount > 0) ? w->libLayers : w->layers;
+  int count = (w->libCount > 0) ? w->libCount : w->layerCount;
+  if (count <= 0) return;
+  Texture2D alb[BRUSH_TERRAIN_ARRAY_MAX], nrm[BRUSH_TERRAIN_ARRAY_MAX];
+  bool swz[BRUSH_TERRAIN_ARRAY_MAX];
+  int size = 512;
+  for (int i = 0; i < count; i++) {
+    alb[i] = src[i].albedo;
+    nrm[i] = src[i].normal;
+    swz[i] = src[i].normalSwizzled;
+    if (src[i].albedo.width > size) size = src[i].albedo.width;
+  }
+  if (size > 2048) size = 2048;
+  w->layerAlbedoArr = BrushAssetsTextureArray(alb, NULL, count, size, false);
+  w->layerNormalArr = BrushAssetsTextureArray(nrm, swz, count, size, true);
+}
+
+void BrushWorldSetTerrainLibrary(BrushWorld *w, const BrushTerrainLayer *lib,
+                                 int count) {
+  if (!w) return;
+  if (count < 0) count = 0;
+  if (count > BRUSH_TERRAIN_ARRAY_MAX) count = BRUSH_TERRAIN_ARRAY_MAX;
+  for (int i = 0; i < count; i++) w->libLayers[i] = lib[i];
+  w->libCount = count;
+  BuildLayerArrays(w); // repack the array from the library (render-only, no rebake)
+}
+
 // ---- lifecycle ------------------------------------------------------------
 
 BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
@@ -1318,6 +1409,7 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
     memcpy(w->layers, cfg.layers, sizeof(BrushTerrainLayer) * (size_t)lc);
     w->layerCount = lc;
   }
+  BuildLayerArrays(w); // pack the initial layers' albedos into the array
   w->unloadRadius = cfg.loadRadius + 1;
   w->origin = (BrushChunkCoord){0, 0};
   w->center = ChunkOf(w, spawn.x, spawn.z);
@@ -1368,6 +1460,22 @@ BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn) {
            w->center.x, w->center.z, w->chunkCount, w->cfg.chunkSize,
            (GetTime() - t0) * 1000.0);
   return w;
+}
+
+void BrushWorldWaitResident(BrushWorld *w) {
+  if (!w) return;
+  // Drain every pending (re)bake so edits applied AFTER create — roads carving
+  // the corridor, sculpt, the biome rebake — are baked into the mesh BEFORE the
+  // first frame, instead of the terrain visibly re-carving a beat after spawn.
+  for (;;) {
+    int pending = 0;
+    for (int i = 0; i < w->chunkCount; i++) {
+      ChunkState s = atomic_load(&w->chunks[i].state);
+      if (s == CHUNK_CPU_READY) FinalizeChunk(w, &w->chunks[i]);
+      else if (s == CHUNK_QUEUED || s == CHUNK_GENERATING) pending++;
+    }
+    if (pending == 0) break;
+  }
 }
 
 void BrushWorldUpdate(BrushWorld *w, Vector3 focus) {
@@ -1509,6 +1617,8 @@ void BrushWorldSubmit(BrushWorld *w, Camera3D camera) {
       sd.res = w->cfg.hmRes;
       memcpy(sd.layers, w->layers, sizeof(sd.layers));
       sd.layerCount = w->layerCount;
+      sd.albedoArr = w->layerAlbedoArr; // all layer albedos in one array
+      sd.normalArr = w->layerNormalArr; // all layer normals in one array
       sd.autoSlopeLayer = w->autoSlopeLayer;
       sd.autoSlopeStart = w->autoSlopeStart;
       sd.autoSlopeEnd = w->autoSlopeEnd;
@@ -1544,6 +1654,8 @@ float BrushWorldGroundHeight(BrushWorld *w, float wx, float wz) {
 
 void BrushWorldDestroy(BrushWorld *w) {
   if (!w) return;
+  if (w->layerAlbedoArr.id != 0) UnloadTexture(w->layerAlbedoArr);
+  if (w->layerNormalArr.id != 0) UnloadTexture(w->layerNormalArr);
   if (w->jobs) {
     if (w->jobs->started) {
       pthread_mutex_lock(&w->jobs->mutex);
@@ -1738,13 +1850,16 @@ void BrushWorldSetLayers(BrushWorld *w,
   if (count > BRUSH_TERRAIN_LAYERS) count = BRUSH_TERRAIN_LAYERS;
   BrushTerrainLayer next[BRUSH_TERRAIN_LAYERS] = {0};
   for (int i = 0; i < count; i++) next[i] = layers[i];
-  if (count == w->layerCount &&
-      memcmp(next, w->layers, sizeof(next)) == 0)
-    return; // unchanged: no rebake storm
+  bool same = (count == w->layerCount && memcmp(next, w->layers, sizeof(next)) == 0);
+  bool haveArr = (count == 0 || w->layerAlbedoArr.id != 0);
+  if (same && haveArr) return; // nothing to do
   memcpy(w->layers, next, sizeof(next));
   w->layerCount = count;
-  // Every resident chunk needs its splat pixels (re)baked.
-  SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
+  BuildLayerArrays(w); // (re)pack the layer albedos into the array
+  // Only the chunks' SPLAT PIXELS depend on the layer set — rebake them ONLY
+  // when the layers actually changed. Building a missing array (same layers)
+  // must NOT dirty every chunk, or terrain flickers/re-uploads at launch.
+  if (!same) SculptMarkDirty(w, -1e9f, -1e9f, 1e9f, 1e9f);
 }
 
 void BrushWorldRebakeAll(BrushWorld *w) {

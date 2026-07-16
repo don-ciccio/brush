@@ -26,6 +26,14 @@
 #include <rlgl.h>
 #include <raymath.h>
 
+// Raw GL for 2D texture arrays (rlgl has no array path). macOS core profile
+// exposes glTexImage3D et al. via <OpenGL/gl3.h>; other platforms would route
+// through glad — arrays are macOS-only for now (the engine's primary target).
+#if defined(__APPLE__)
+  #define GL_SILENCE_DEPRECATION
+  #include <OpenGL/gl3.h>
+#endif
+
 #include "b_physics.h" // model collision-shape cache (cook + JPH_Shape refs)
 
 #define STB_DXT_IMPLEMENTATION
@@ -1539,4 +1547,78 @@ Texture2D BrushAssetsSurfaceMap(const char *ao, const char *rough, const char *h
     SetTextureWrap(surf, TEXTURE_WRAP_REPEAT);
   }
   return surf;
+}
+
+Texture2D BrushAssetsTextureArray(const Texture2D *srcs, const bool *swizzled,
+                                  int count, int size, bool isNormal) {
+  Texture2D t = {0};
+  if (srcs == NULL || count <= 0 || size <= 0) return t;
+#if defined(__APPLE__)
+  unsigned int id = 0;
+  glGenTextures(1, &id);
+  if (id == 0) return t;
+  glBindTexture(GL_TEXTURE_2D_ARRAY, id);
+  glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, size, size, count, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, NULL);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+  // Normals: decode DXT5nm-or-RGB and re-encode as plain RGB, so the sampled
+  // array is uniformly RGB (no per-layer swizzle branch in the main shader).
+  static Shader s_norm = {0};
+  static int s_locSwz = -1;
+  static bool s_init = false;
+  if (isNormal && !s_init) {
+    const char *fs =
+        "#version 330\n"
+        "in vec2 fragTexCoord; out vec4 finalColor;\n"
+        "uniform sampler2D texture0; uniform float uSwz;\n"
+        "void main(){ vec4 s = texture(texture0, fragTexCoord); vec3 n;\n"
+        "  if (uSwz > 0.5) { vec2 xy = s.ag*2.0-1.0; n = vec3(xy, sqrt(max(1.0-dot(xy,xy),0.0))); }\n"
+        "  else n = s.xyz*2.0-1.0;\n"
+        "  finalColor = vec4(n*0.5+0.5, 1.0); }\n";
+    s_norm = LoadShaderFromMemory(NULL, fs);
+    s_locSwz = GetShaderLocation(s_norm, "uSwz");
+    s_init = true;
+  }
+
+  Color fill = isNormal ? (Color){128, 128, 255, 255} : (Color){255, 255, 255, 255};
+  RenderTexture2D rt = LoadRenderTexture(size, size);
+  for (int i = 0; i < count; i++) {
+    BeginTextureMode(rt);
+      ClearBackground(fill);
+      if (srcs[i].id != 0) {
+        float swz = (isNormal && swizzled && swizzled[i]) ? 1.0f : 0.0f;
+        if (isNormal) { BeginShaderMode(s_norm); SetShaderValue(s_norm, s_locSwz, &swz, SHADER_UNIFORM_FLOAT); }
+        DrawTexturePro(srcs[i],
+                       (Rectangle){0, 0, (float)srcs[i].width, (float)srcs[i].height},
+                       (Rectangle){0, 0, (float)size, (float)size}, (Vector2){0, 0}, 0.0f, WHITE);
+        if (isNormal) EndShaderMode();
+      }
+    EndTextureMode();
+    Image img = LoadImageFromTexture(rt.texture);
+    ImageFlipVertical(&img); // RT is stored bottom-up; match the source orientation
+    glBindTexture(GL_TEXTURE_2D_ARRAY, id);
+    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, size, size, 1, GL_RGBA,
+                    GL_UNSIGNED_BYTE, img.data);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    UnloadImage(img);
+  }
+  UnloadRenderTexture(rt);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, id);
+  glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+  t.id = id;
+  t.width = size;
+  t.height = size;
+  t.mipmaps = 1; // bookkeeping only; the GL texture has a full chain
+  t.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+#else
+  (void)srcs; (void)swizzled; (void)isNormal;
+  TraceLog(LOG_WARNING, "ASSETS: texture arrays are macOS-only for now");
+#endif
+  return t;
 }

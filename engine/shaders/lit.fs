@@ -48,12 +48,10 @@ uniform float uAoStrength;
 // planar-XZ at each layer's own tile scale. Layer 0's albedo/normal ride
 // texture0/texture2 (the material's maps); layers 1..3 sit on fixed units.
 uniform float uSplatEnabled;
-uniform sampler2D uSplatMap;
-uniform sampler2D uLayerAlbedo1;
-uniform sampler2D uLayerAlbedo2;
-uniform sampler2D uLayerAlbedo3;
-uniform sampler2D uLayerNormal1;
-uniform sampler2D uLayerNormal2;
+uniform sampler2D uSplatMap;   // R=layer0, G=layer1, B=layer2, A=layer3 weights
+uniform ivec4 uBiomePalette[16]; // Maps 16 biomes * 4 splat slots -> terrain array index
+uniform sampler2DArray uAlbedoArr; // all terrain layer albedos (Phase 2)
+uniform sampler2DArray uNormalArr; // all terrain layer normals, RGB-normalised
 uniform sampler2D uLayerHeight;  // displacement of the ONE POM terrain layer
 uniform int   uPomLayer;         // splat slot that gets POM (-1 = none)
 uniform float uPomTile;          // that layer's tile
@@ -74,6 +72,8 @@ uniform vec4 uLayerRoughness; // per-layer terrain roughness (0 smooth/shiny .. 
 // ground keeps some of its own detail under the dense near grass.
 uniform vec3  uGrassGroundColor;
 uniform float uGrassGroundStrength;
+uniform vec3  uBiomeGrassColor[16]; // per-biome grass-ground tint (Phase 2.4)
+uniform float uBiomeGroundOn;       // 1 = use per-biome colour instead of the single one
 uniform int   uGrassGrowLayer;
 uniform float uGrassGroundFar;
 uniform float uTerrainFarNormal; // 1 = Phase B (keep+amplify normal far), 0 = fade flat
@@ -252,6 +252,14 @@ vec3 SampleLayer(sampler2D tex, float tile, vec3 wp, vec3 triW, bool steep) {
            texture(tex, wp.xy / tile).rgb * triW.z;
 }
 
+// Same as SampleLayer but from a texture ARRAY layer (Phase 2 terrain layers).
+vec3 SampleLayerArr(sampler2DArray arr, float L, float tile, vec3 wp, vec3 triW, bool steep) {
+    if (!steep) return texture(arr, vec3((wp.xz + GG_WarpXZ(wp.xz, tile)) / tile, L)).rgb;
+    return texture(arr, vec3(wp.zy / tile, L)).rgb * triW.x +
+           texture(arr, vec3(wp.xz / tile, L)).rgb * triW.y +
+           texture(arr, vec3(wp.xy / tile, L)).rgb * triW.z;
+}
+
 // One splat layer's tangent-space bump lifted to world axes (UDN swizzle),
 // planar (domain-warped + distance mip-BIASed so the minified normal doesn't
 // alias into bands) or triplanar to match SampleLayer.
@@ -265,6 +273,23 @@ vec3 SampleLayerBump(sampler2D tex, float tile, vec3 wp, vec3 triW,
     vec3 tnX = DecodeNormal(texture(tex, wp.zy / tile), sw);
     vec3 tnY = DecodeNormal(texture(tex, wp.xz / tile), sw);
     vec3 tnZ = DecodeNormal(texture(tex, wp.xy / tile), sw);
+    return vec3(0.0, tnX.y, tnX.x) * triW.x +
+           vec3(tnY.x, 0.0, tnY.y) * triW.y +
+           vec3(tnZ.x, tnZ.y, 0.0) * triW.z;
+}
+
+// Array version of SampleLayerBump. The normal array is pre-normalised to plain
+// RGB at build time, so decode is a straight xyz*2-1 (no DXT5nm swizzle branch).
+vec3 SampleLayerBumpArr(sampler2DArray arr, float L, float tile, vec3 wp, vec3 triW,
+                        bool steep, float bias) {
+    if (!steep) {
+        vec2 uv = (wp.xz + GG_WarpXZ(wp.xz, tile)) / tile;
+        vec3 tn = texture(arr, vec3(uv, L), bias).xyz * 2.0 - 1.0;
+        return vec3(tn.x, 0.0, tn.y);
+    }
+    vec3 tnX = texture(arr, vec3(wp.zy / tile, L)).xyz * 2.0 - 1.0;
+    vec3 tnY = texture(arr, vec3(wp.xz / tile, L)).xyz * 2.0 - 1.0;
+    vec3 tnZ = texture(arr, vec3(wp.xy / tile, L)).xyz * 2.0 - 1.0;
     return vec3(0.0, tnX.y, tnX.x) * triW.x +
            vec3(tnY.x, 0.0, tnY.y) * triW.y +
            vec3(tnZ.x, tnZ.y, 0.0) * triW.z;
@@ -614,10 +639,27 @@ void main()
             }
         }
         #define WP(i) ((uPomLayer == (i)) ? wpPom : wp)
-        vec3 a = SampleLayer(texture0, uLayerTiles.x, WP(0), triW, steep) * sw.r;
-        if (uLayerCount > 1) a += SampleLayer(uLayerAlbedo1, uLayerTiles.y, WP(1), triW, steep) * sw.g;
-        if (uLayerCount > 2) a += SampleLayer(uLayerAlbedo2, uLayerTiles.z, WP(2), triW, steep) * sw.b;
-        if (uLayerCount > 3) a += SampleLayer(uLayerAlbedo3, uLayerTiles.w, WP(3), triW, steep) * sw.a;
+        vec2 buv = ((fragPosition.xz - uSplatOrigin) / uSplatSize * (uSplatRes - 1.0) + 0.5) / uSplatRes;
+        vec3 bdata = texture(uBiomeMap, buv).rgb;
+        int id0 = clamp(int(bdata.r * 255.0 + 0.5), 0, 15); // clamp: never index
+        int id1 = clamp(int(bdata.g * 255.0 + 0.5), 0, 15); // the palette OOB
+        float bblend = bdata.b;
+
+        ivec4 p0 = uBiomePalette[id0];
+        vec3 a0 = SampleLayerArr(uAlbedoArr, float(p0.x), uLayerTiles.x, WP(0), triW, steep) * sw.r;
+        if (uLayerCount > 1) a0 += SampleLayerArr(uAlbedoArr, float(p0.y), uLayerTiles.y, WP(1), triW, steep) * sw.g;
+        if (uLayerCount > 2) a0 += SampleLayerArr(uAlbedoArr, float(p0.z), uLayerTiles.z, WP(2), triW, steep) * sw.b;
+        if (uLayerCount > 3) a0 += SampleLayerArr(uAlbedoArr, float(p0.w), uLayerTiles.w, WP(3), triW, steep) * sw.a;
+        
+        vec3 a = a0;
+        if (id0 != id1 && bblend > 0.0) {
+            ivec4 p1 = uBiomePalette[id1];
+            vec3 a1 = SampleLayerArr(uAlbedoArr, float(p1.x), uLayerTiles.x, WP(0), triW, steep) * sw.r;
+            if (uLayerCount > 1) a1 += SampleLayerArr(uAlbedoArr, float(p1.y), uLayerTiles.y, WP(1), triW, steep) * sw.g;
+            if (uLayerCount > 2) a1 += SampleLayerArr(uAlbedoArr, float(p1.z), uLayerTiles.z, WP(2), triW, steep) * sw.b;
+            if (uLayerCount > 3) a1 += SampleLayerArr(uAlbedoArr, float(p1.w), uLayerTiles.w, WP(3), triW, steep) * sw.a;
+            a = mix(a0, a1, bblend);
+        }
         albedo = a; // vertex colour/tint intentionally excluded
 
         // Grass-ground tint: blend the terrain toward the grass colour where the
@@ -627,7 +669,12 @@ void main()
             float gmask = (uGrassGrowLayer < 0) ? 1.0 : clamp(sw[uGrassGrowLayer], 0.0, 1.0);
             float gdist = length(viewPos - fragPosition);
             float gramp = mix(0.6, 1.0, smoothstep(0.0, max(uGrassGroundFar, 1.0) * 0.9, gdist));
-            vec3 gcol = GG_MeadowColor(uGrassGroundColor, fragPosition.xz, gdist,
+            // Per-biome ground colour: blend the two biomes' colours by the biome
+            // map (id0/id1/bblend already decoded above), else the single colour.
+            vec3 gbase = (uBiomeGroundOn > 0.5)
+                ? mix(uBiomeGrassColor[id0], uBiomeGrassColor[id1], bblend)
+                : uGrassGroundColor;
+            vec3 gcol = GG_MeadowColor(gbase, fragPosition.xz, gdist,
                                    max(normalize(viewPos - fragPosition).y, 0.0) * 0.8);
             a = mix(a, gcol, uGrassGroundStrength * gmask * gramp);
             gGrassMask = gmask; // grass coverage for the sparkle (before the road composite)
@@ -638,9 +685,19 @@ void main()
             // Push the normal to coarser mips with distance so the minified tile
             // stops aliasing (the ground for extending the normal further out).
             float nbias = clamp((length(viewPos - fragPosition) - 12.0) * 0.05, 0.0, 2.5);
-            splatBump = SampleLayerBump(texture2, uLayerTiles.x, WP(0), triW, uLayerSwizzled.x, steep, nbias) * sw.r;
-            if (uLayerCount > 1) splatBump += SampleLayerBump(uLayerNormal1, uLayerTiles.y, WP(1), triW, uLayerSwizzled.y, steep, nbias) * sw.g;
-            if (uLayerCount > 2) splatBump += SampleLayerBump(uLayerNormal2, uLayerTiles.z, WP(2), triW, uLayerSwizzled.z, steep, nbias) * sw.b;        }
+            vec3 n0 = SampleLayerBumpArr(uNormalArr, float(p0.x), uLayerTiles.x, WP(0), triW, steep, nbias) * sw.r;
+            if (uLayerCount > 1) n0 += SampleLayerBumpArr(uNormalArr, float(p0.y), uLayerTiles.y, WP(1), triW, steep, nbias) * sw.g;
+            if (uLayerCount > 2) n0 += SampleLayerBumpArr(uNormalArr, float(p0.z), uLayerTiles.z, WP(2), triW, steep, nbias) * sw.b;
+            
+            splatBump = n0;
+            if (id0 != id1 && bblend > 0.0) {
+                ivec4 p1 = uBiomePalette[id1];
+                vec3 n1 = SampleLayerBumpArr(uNormalArr, float(p1.x), uLayerTiles.x, WP(0), triW, steep, nbias) * sw.r;
+                if (uLayerCount > 1) n1 += SampleLayerBumpArr(uNormalArr, float(p1.y), uLayerTiles.y, WP(1), triW, steep, nbias) * sw.g;
+                if (uLayerCount > 2) n1 += SampleLayerBumpArr(uNormalArr, float(p1.z), uLayerTiles.z, WP(2), triW, steep, nbias) * sw.b;
+                splatBump = mix(n0, n1, bblend);
+            }
+        }
         #undef WP
 
         // Road surface: composite its OWN material over the finished terrain

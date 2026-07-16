@@ -62,6 +62,17 @@ void BrushAssetsReleaseTexture(Texture2D tex);
 // ORH (R=AO, G=Roughness, B=Height) Texture2D caching it automatically.
 Texture2D BrushAssetsSurfaceMap(const char *ao, const char *rough, const char *height);
 
+// Build a GL_TEXTURE_2D_ARRAY from `count` resolved layer textures, GPU-blitting
+// each into a slice (decompresses BCn sources, resizes to `size`x`size`, and —
+// for normals — decodes DXT5nm/RGB to a uniform RGB encoding so the shader needs
+// no per-layer swizzle branch). Full mip chain, trilinear, REPEAT wrap. Empty
+// (id 0) slots get a neutral fill (white, or flat normal when isNormal).
+// `swizzled` (may be NULL) flags DXT5nm sources, used only when isNormal. The
+// returned Texture2D's `id` is an ARRAY texture — bind to a sampler2DArray, not
+// a sampler2D. id 0 on failure. macOS-only for now (raw GL); see the .c note.
+Texture2D BrushAssetsTextureArray(const Texture2D *srcs, const bool *swizzled,
+                                  int count, int size, bool isNormal);
+
 // Per frame: watch loaded sources for edits (30-frame stat cadence), hand
 // changed ones to the cook worker, and swap finished re-imports in on this
 // (main) thread. Returns true when any texture was replaced — holders of

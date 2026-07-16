@@ -377,7 +377,7 @@ static void SandboxInit(void *user) {
     BrushSceneFoliageLayer *fl = &s->scene.foliage[s->scene.foliageCount++];
     memset(fl, 0, sizeof(*fl));
     snprintf(fl->name, sizeof(fl->name), "grass");
-    fl->density = 0.5f; // patches/m^2 (each is a ~120-blade clump)
+    fl->density = 2.0f; // patches/m^2 (each is a ~40-blade clump)
     fl->drawDistance = 110.0f; // grass geometry to here; terrain green carries
     fl->lodDistance = 34.0f;   // the horizon beyond (pushing further rings/heats)
     fl->scale = 1.0f;
@@ -568,6 +568,12 @@ static void SandboxInit(void *user) {
 
   ApplySceneColliders(s);
   BrushSceneApplyRenderSettings(&s->scene); // scene carries its look
+  { // biome-indexable terrain array = the whole material library
+    BrushTerrainLayer lib[BRUSH_TERRAIN_ARRAY_MAX];
+    int libN = BrushSceneTerrainLibrary(&s->scene, lib, BRUSH_TERRAIN_ARRAY_MAX);
+    BrushWorldSetTerrainLibrary(s->world, lib, libN);
+  }
+  BrushSceneApplyBiomePalette(&s->scene);
   ApplyTerrainLayers(s);
   ApplySceneRoads(s);
 
@@ -627,6 +633,10 @@ static void SandboxInit(void *user) {
   s->camera.obstructUser = s;
   s->camera.groundHeightFn = CamGround;
   s->camera.groundHeightUser = s;
+
+  // Bake in every post-create edit (roads/sculpt/biomes) before the first frame
+  // so the terrain launches fully carved (no split-second heightmap re-settle).
+  BrushWorldWaitResident(s->world);
 
   TraceLog(LOG_INFO, "SANDBOX: ready — move with WASD, jump with Space");
 }
@@ -944,6 +954,7 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
     if (BrushSceneHotReload(&s->scene)) {
       ApplySceneColliders(s);
       BrushSceneApplyRenderSettings(&s->scene);
+      BrushSceneApplyBiomePalette(&s->scene);
       ApplyTerrainLayers(s);
       ApplySceneRoads(s); // roads are live scene data now
     }

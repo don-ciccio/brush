@@ -15,6 +15,13 @@
 #include <rlgl.h>
 #include <stdlib.h>
 
+// Raw GL to bind a sampler2DArray (rlgl only binds GL_TEXTURE_2D). macOS-only,
+// mirroring b_assets.c's array builder.
+#if defined(__APPLE__)
+  #define GL_SILENCE_DEPRECATION
+  #include <OpenGL/gl3.h>
+#endif
+
 #define BRUSH_MAX_DRAWS_PER_LAYER 1024
 
 typedef struct BrushDrawCmd {
@@ -176,13 +183,13 @@ void BrushRenderInit(int width, int height, float renderScale) {
   {
     int u;
     u = 1; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uSplatMap"), &u, SHADER_UNIFORM_INT);
-    u = 3; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo1"), &u, SHADER_UNIFORM_INT);
-    u = 4; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo2"), &u, SHADER_UNIFORM_INT);
-    u = 5; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerAlbedo3"), &u, SHADER_UNIFORM_INT);
-    u = 6; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal1"), &u, SHADER_UNIFORM_INT);
-    u = 7; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerNormal2"), &u, SHADER_UNIFORM_INT);
-    // (layer-3 normal map dropped to free a sampler unit for the road albedo;
-    //  the 4th terrain layer keeps its albedo but shades with the geo normal.)
+    // Unit 3 now holds the terrain albedo ARRAY (all layers) instead of the three
+    // discrete uLayerAlbedo1/2/3 (units 4,5 freed).
+    u = 3; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uAlbedoArr"), &u, SHADER_UNIFORM_INT);
+    // Unit 6 holds the terrain normal ARRAY (all layers) instead of the discrete
+    // uLayerNormal1/2 (unit 7 freed). Still samples layers 0..2 to match the old
+    // behaviour; layer 3's normal is now in the array too (free to enable later).
+    u = 6; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uNormalArr"), &u, SHADER_UNIFORM_INT);
     u = 9; SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uLayerHeight"), &u, SHADER_UNIFORM_INT);
     // Road surface (composited over the terrain blend): mask + own albedo/normal
     // on the high units (13..15) past the shadow cascades (10..12).
@@ -287,7 +294,7 @@ void BrushRenderApplyTimeOfDay(const struct BrushTimeOfDay *tod) {
 Vector3 BrushGetSunDir(void) { return g_r.sunDir; }
 
 void BrushRenderSetGrassGround(Vector3 color, float strength, int growLayer,
-                              float far) {
+                               float far) {
   if (g_r.lit.id == 0) return;
   if (strength < 0.0f) strength = 0.0f;
   if (strength > 1.0f) strength = 1.0f;
@@ -298,6 +305,29 @@ void BrushRenderSetGrassGround(Vector3 color, float strength, int growLayer,
   SetShaderValue(g_r.lit, g_r.locGrassGrowLayer, &growLayer, SHADER_UNIFORM_INT);
   SetShaderValue(g_r.lit, g_r.locGrassGroundFar, &far, SHADER_UNIFORM_FLOAT);
 }
+
+void BrushRenderSetBiomePalette(const int *palette) {
+  if (palette == NULL) return;
+  int loc = GetShaderLocation(g_r.lit, "uBiomePalette");
+  if (loc >= 0) {
+    SetShaderValueV(g_r.lit, loc, palette, SHADER_UNIFORM_IVEC4, 16);
+  }
+}
+
+void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count) {
+  // Per-biome grass-ground tint colour (16 vec3, sRGB). count 0 turns it OFF so
+  // the single uGrassGroundColor is used (a scene with no biome definitions —
+  // e.g. the fallback climate — must not tint the ground to black biome 0).
+  if (colors != NULL) {
+    int loc = GetShaderLocation(g_r.lit, "uBiomeGrassColor");
+    if (loc >= 0) SetShaderValueV(g_r.lit, loc, colors, SHADER_UNIFORM_VEC3, 16);
+  }
+  float on = (count > 0) ? 1.0f : 0.0f;
+  SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uBiomeGroundOn"), &on,
+                 SHADER_UNIFORM_FLOAT);
+}
+
+// --- Point lights ----------------------------------------------------------
 
 void BrushSetSkyEnabled(bool enabled) { g_r.skyEnabled = enabled; }
 
@@ -450,19 +480,19 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
     mat->maps[MATERIAL_MAP_DIFFUSE].texture = sp->layers[0].albedo;
   mat->maps[MATERIAL_MAP_NORMAL].texture = sp->layers[0].normal;
 
-  const int albedoUnit[4] = {0, 3, 4, 5}, normalUnit[4] = {0, 6, 7, 8};
   rlActiveTextureSlot(1);
   rlEnableTexture(sp->splat.id);
-  for (int i = 1; i < sp->layerCount && i < BRUSH_TERRAIN_LAYERS; i++) {
-    if (sp->layers[i].albedo.id != 0) {
-      rlActiveTextureSlot(albedoUnit[i]);
-      rlEnableTexture(sp->layers[i].albedo.id);
-    }
-    if (sp->layers[i].normal.id != 0) {
-      rlActiveTextureSlot(normalUnit[i]);
-      rlEnableTexture(sp->layers[i].normal.id);
-    }
+  // Albedos on unit 3, normals on unit 6 — each ALL layers in one sampler2DArray.
+#if defined(__APPLE__)
+  if (sp->albedoArr.id != 0) {
+    rlActiveTextureSlot(3);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, sp->albedoArr.id);
   }
+  if (sp->normalArr.id != 0) {
+    rlActiveTextureSlot(6);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, sp->normalArr.id);
+  }
+#endif
   // ONE "special" layer (first with a displacement map that wants POM and/or
   // height-blend, e.g. paving) binds its height to the one free unit (9); its
   // height then drives both POM and the height-based edge blend.

@@ -158,6 +158,12 @@ void BrushWorldPaintFoliage(BrushWorld *w, Vector3 center, float radius,
 // Create the world, start the worker, and block until the initial ring around
 // `spawn` is fully resident (avoids terrain pop-in on the first frame).
 BrushWorld *BrushWorldCreate(BrushWorldConfig cfg, Vector3 spawn);
+
+// Block until every pending chunk (re)bake finishes. Call ONCE after all the
+// post-create scene setup that dirties chunks (roads, sculpt, biomes) and before
+// the first frame, so the terrain launches fully carved instead of re-carving a
+// beat after spawn.
+void BrushWorldWaitResident(BrushWorld *w);
 void BrushWorldDestroy(BrushWorld *w);
 
 // Per-frame: recompute the desired ring around `focus`, queue new chunks,
@@ -259,6 +265,15 @@ void BrushWorldPaintC(BrushWorld *w, Vector3 center, float radius,
 // resident chunk dirty so they re-bake with the new field. climate->biomeCount
 // 0 (or a NULL climate) disables biomes: one implicit biome, biomeAt -> {0,0,0}.
 void BrushWorldSetBiomeClimate(BrushWorld *w, const BrushBiomeClimate *climate);
+
+// Terrain texture LIBRARY (Phase 2): the full set of materials biomes can index
+// into, packed into the terrain sampler2DArrays (slice i = library[i]). A biome
+// palette entry is a library index. Sets the array source; NOT a chunk rebake
+// (rendering only). count 0 reverts to the 4 painted layers. Max is
+// BRUSH_TERRAIN_ARRAY_MAX.
+#define BRUSH_TERRAIN_ARRAY_MAX 32
+void BrushWorldSetTerrainLibrary(BrushWorld *w, const BrushTerrainLayer *lib,
+                                 int count);
 
 // Auto-slope mask: terrain steeper than `startDeg` blends toward `layer`
 // (fully by `endDeg`) BENEATH the painted weights — pure shader, no data.

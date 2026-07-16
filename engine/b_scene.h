@@ -253,6 +253,11 @@ bool BrushSceneBlockProps(const BrushScene *s, const BrushSceneBlock *k,
 int BrushSceneTerrainLayers(const BrushScene *s,
                             BrushTerrainLayer out[BRUSH_TERRAIN_LAYERS]);
 
+// Resolve the WHOLE material library to terrain-layer slots (slice i =
+// materials[i]) for the biome-indexable terrain array (BrushWorldSetTerrainLibrary).
+// Biome palette entries are indices into this. Returns the count (<= maxN).
+int BrushSceneTerrainLibrary(const BrushScene *s, BrushTerrainLayer *out, int maxN);
+
 // Resolve one material-library name to a terrain-layer set (albedo/normal/tile).
 // Used for terrain layers and the independent road surface material. false if
 // the name is empty/unknown or the material has no albedo.
@@ -276,11 +281,13 @@ bool BrushSceneModelEmbeddedProps(const BrushSceneModelInstance *m,
 
 // --- Persisted render settings ("post" lines) --------------------------------
 // Apply the scene's saved tunables to the live render/post pipeline
-// (unknown keys warn once). Call after Load/HotReload, once render is up.
+// (unknown keys warn once). Applies the scene's post-processing settings to the live renderer.
 void BrushSceneApplyRenderSettings(const BrushScene *s);
 
-// Snapshot the live render/post tunables into the scene's post list so Save
-// persists them (the editor calls this right before saving).
+// Applies the scene's biome palette mapping to the live renderer.
+void BrushSceneApplyBiomePalette(const BrushScene *s);
+
+// Reads the live post-processing settings from the renderer into the scene.
 void BrushSceneCaptureRenderSettings(BrushScene *s);
 
 #ifdef __cplusplus

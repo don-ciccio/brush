@@ -756,6 +756,12 @@ static void ApplyTerrainLayers() {
     BrushBiomeClimate cl;
     BrushWorldSetBiomeClimate(g_world,
                               BrushSceneBiomeClimate(&g_scene, &cl) ? &cl : NULL);
+    { // biome-indexable terrain array = the whole material library
+        BrushTerrainLayer lib[BRUSH_TERRAIN_ARRAY_MAX];
+        int libN = BrushSceneTerrainLibrary(&g_scene, lib, BRUSH_TERRAIN_ARRAY_MAX);
+        BrushWorldSetTerrainLibrary(g_world, lib, libN);
+    }
+    BrushSceneApplyBiomePalette(&g_scene);
 }
 
 static void ReloadScene() {
@@ -764,6 +770,7 @@ static void ReloadScene() {
         g_tod.timeHours = g_scene.timeHours >= 0.0f ? g_scene.timeHours : 12.0f;
         RebuildAllColliders();
         BrushSceneApplyRenderSettings(&g_scene);
+        BrushSceneApplyBiomePalette(&g_scene);
         ApplyTerrainLayers();
         g_selectedType = ENTITY_NONE;
         g_selectedIdx = -1;
@@ -1257,7 +1264,7 @@ static bool OpenProjectAt(const char *dir) {
         BrushSceneFoliageLayer *fl = &g_scene.foliage[g_scene.foliageCount++];
         memset(fl, 0, sizeof(*fl));
         snprintf(fl->name, sizeof(fl->name), "grass");
-        fl->density = 0.5f; fl->drawDistance = 68.0f; fl->lodDistance = 26.0f;
+        fl->density = 2.0f; fl->drawDistance = 68.0f; fl->lodDistance = 26.0f;
         fl->scale = 1.0f; fl->scaleJitter = 0.35f; fl->heightOffset = -0.04f;
         fl->maxSlopeDeg = 42.0f; fl->windStrength = 1.0f; fl->farKeepRatio = 0.4f;
         fl->tint = (Vector3){1, 1, 1};

@@ -687,7 +687,7 @@ BrushFoliage *BrushFoliageCreate(void) {
   BrushFoliage *f = MemAlloc(sizeof(BrushFoliage));
   memset(f, 0, sizeof(*f));
   f->shader = BrushFoliageLoadShader();
-  f->defaultTuft = BrushFoliageMakeGrassPatch(120, 0.45f, 0.24f);
+  f->defaultTuft = BrushFoliageMakeGrassPatch(40, 0.25f, 0.24f);
   f->defaultGradient = BrushFoliageMakeGradientTex((Color){52, 78, 36, 255},
                                                    (Color){150, 180, 84, 255});
   f->windDir = (Vector2){0.9578f, 0.2873f}; // normalized (1, 0.3)

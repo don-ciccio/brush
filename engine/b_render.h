@@ -106,6 +106,16 @@ Vector3 BrushGetSunDir(void);
 void BrushRenderSetGrassGround(Vector3 color, float strength, int growLayer,
                               float far);
 
+// Uploads the biome palette mapping to the lit shader. `palette` must be an
+// array of 16 ivec4s (64 ints total), mapping each of the 16 biomes' 4 terrain
+// slots to a global texture array index.
+void BrushRenderSetBiomePalette(const int *palette);
+
+// Uploads the 16 per-biome grass-ground tint colours (sRGB). `count` is how many
+// biomes are actually defined; 0 turns the per-biome ground tint OFF (falls back
+// to the single BrushRenderSetGrassGround colour).
+void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count);
+
 // --- Point lights (DYNAMIC, never baked — see docs/roadmap.md) -------------
 // Submit per frame, like draws: the list clears after every execute, so
 // moving lights (a carried torch) are free. Colors are LINEAR and may exceed
@@ -206,7 +216,9 @@ typedef struct BrushSplatDraw {
   Texture2D roadMask;
   BrushTerrainLayer roadLayer;
   bool hasRoad;
-  Texture2D biome; // per-chunk biome map (F2 BIOME view; Phase 2 palette blend)
+  Texture2D biome;    // per-chunk biome map (F2 BIOME view; Phase 2 palette blend)
+  Texture2D albedoArr; // GL_TEXTURE_2D_ARRAY: all layer albedos (Phase 2)
+  Texture2D normalArr; // GL_TEXTURE_2D_ARRAY: all layer normals, RGB-normalised
 } BrushSplatDraw;
 
 // BrushRenderSubmitMesh with splat blending for exactly this draw.
