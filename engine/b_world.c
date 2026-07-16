@@ -538,6 +538,14 @@ static float ChunkHeightAt(void *ctx, float wx, float wz) {
   return SampleMeshHeight(h->w, h->c, wx, wz);
 }
 
+// LOD-independent height: the fine heightmap (sculpt/roads composed), bilinear.
+// Identical whatever LOD the chunk currently renders at — the stable input for
+// scatter DECISIONS (the mesh sampler above is for grounding to the visuals).
+static float ChunkHeightFineAt(void *ctx, float wx, float wz) {
+  ChunkHeightCtx *h = (ChunkHeightCtx *)ctx;
+  return SampleHeightmap(h->w, h->c, wx, wz);
+}
+
 // Nearest chunk-local grid index (hmRes^2, no apron) for a world XZ.
 static int ChunkGridIndex(const BrushWorld *w, const WorldChunk *c, float wx,
                           float wz) {
@@ -1097,7 +1105,10 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     if (chunk->pendingHandle && w->cfg.chunkFree)
       w->cfg.chunkFree(w->cfg.chunkUser, chunk->pendingHandle);
     ChunkHeightCtx hc = {w, chunk};
-    BrushChunkSamplers samplers = {ChunkHeightAt, ChunkDensityAt, ChunkSplatAt, ChunkRoadAt, ChunkBiomeAt, &hc};
+    BrushChunkSamplers samplers = {ChunkHeightAt,  ChunkHeightFineAt,
+                                   ChunkDensityAt, ChunkSplatAt,
+                                   ChunkRoadAt,    ChunkBiomeAt,
+                                   &hc};
     chunk->pendingHandle = w->cfg.chunkBake(w->cfg.chunkUser, chunk->coord, o,
                                             w->cfg.chunkSize, &samplers);
   }

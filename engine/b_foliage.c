@@ -1176,16 +1176,23 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
 
     if (!SurfacePasses(s, jx, jz, rEff)) continue;
 
-    float y = s->s->heightAt(s->s->ctx, jx, jz);
+    // DECISION height: LOD-independent (the fine heightmap). Every accept/
+    // reject below must key on this — the mesh-matched heightAt CHANGES when
+    // the chunk crosses an LOD ring and rebakes, and any decision keyed on it
+    // makes instances appear/vanish at ring boundaries ("foliage respawns at
+    // mid distance", trees popping from thin air on approach).
+    float (*fineAt)(void *, float, float) =
+        s->s->heightFineAt ? s->s->heightFineAt : s->s->heightAt;
+    float yd = fineAt(s->s->ctx, jx, jz);
     if (s->cfg->minHeight < s->cfg->maxHeight) {
-      if (y < s->cfg->minHeight || y > s->cfg->maxHeight) continue;
+      if (yd < s->cfg->minHeight || yd > s->cfg->maxHeight) continue;
       // Thin out over a fade band inside each limit rather than a hard ring:
       // grass fades to nothing AT the limit, so a blade grounded a few cm under
       // maxHeight (mesh surface sits below the 1 m heightmap on broad peaks)
       // doesn't survive as a stray band right at the ceiling.
       float band = fminf(2.0f, (s->cfg->maxHeight - s->cfg->minHeight) * 0.4f);
       if (band > 0.001f) {
-        float edge = fminf(y - s->cfg->minHeight, s->cfg->maxHeight - y);
+        float edge = fminf(yd - s->cfg->minHeight, s->cfg->maxHeight - yd);
         float keep = edge / band; // 0 at a limit -> 1 a full band inside
         if (keep < 1.0f) {
           float rp = (float)((h >> 7) & 0xffff) / 65535.0f;
@@ -1194,11 +1201,12 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
       }
     }
     
-    // Central-difference terrain normal (also drives the slope reject). Used to
-    // tilt the clump onto the surface so it doesn't float on steep ground.
+    // Central-difference terrain normal (also drives the slope reject) — from
+    // the FINE height so the slope decision is LOD-stable; the tilt it drives
+    // is a look, not a grounding, so fine-vs-mesh error is invisible.
     float e = 0.5f;
-    float hx = s->s->heightAt(s->s->ctx, jx + e, jz) - s->s->heightAt(s->s->ctx, jx - e, jz);
-    float hz = s->s->heightAt(s->s->ctx, jx, jz + e) - s->s->heightAt(s->s->ctx, jx, jz - e);
+    float hx = fineAt(s->s->ctx, jx + e, jz) - fineAt(s->s->ctx, jx - e, jz);
+    float hz = fineAt(s->s->ctx, jx, jz + e) - fineAt(s->s->ctx, jx, jz - e);
     float nlen = sqrtf(hx * hx + hz * hz + 4.0f * e * e);
     float nx = -hx / nlen, ny = (2.0f * e) / nlen, nz = -hz / nlen;
     if (s->cfg->maxSlopeDeg > 0.0f &&
@@ -1219,6 +1227,16 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
       }
     }
 
+    // GROUNDING height: trees use the FINE height (fully LOD-independent, so
+    // a tree never snaps when its chunk crosses an LOD ring — the sub-metre
+    // fine-vs-coarse-mesh error is invisible under a 10 m tree at 250 m, and
+    // racer grounded its always-visible trees the same way). Grass grounds to
+    // the RENDERED mesh: blades sit exactly on the surface, and when the mesh
+    // refines their Y moves WITH the terrain, which the eye forgives.
+    float y = s->cfg->tree ? yd : s->s->heightAt(s->s->ctx, jx, jz);
+    float (*groundAt)(void *, float, float) =
+        s->cfg->tree ? fineAt : s->s->heightAt;
+
     // Wide clumps: ground to the LOWEST of four footprint probes (capped) so a
     // big model on convex or steep ground can't hang its downhill edge in the
     // air — the centre tap alone leaves r-wide meshes floating on hills. Small
@@ -1226,11 +1244,10 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     // still conforms the base; this fixes what the tilt's 0.75 blend leaves.
     if (rEff > 0.6f) {
       float pr = rEff * 0.7f;
-      float ymin = fminf(
-          fminf(s->s->heightAt(s->s->ctx, jx + pr, jz),
-                s->s->heightAt(s->s->ctx, jx - pr, jz)),
-          fminf(s->s->heightAt(s->s->ctx, jx, jz + pr),
-                s->s->heightAt(s->s->ctx, jx, jz - pr)));
+      float ymin = fminf(fminf(groundAt(s->s->ctx, jx + pr, jz),
+                               groundAt(s->s->ctx, jx - pr, jz)),
+                         fminf(groundAt(s->s->ctx, jx, jz + pr),
+                               groundAt(s->s->ctx, jx, jz - pr)));
       if (ymin < y) y = fmaxf(ymin, y - rEff * 0.8f); // cap the sink
     }
 
@@ -1300,7 +1317,12 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
   for (int li = 0; li < f->layerCount; li++) {
     BrushFoliageLayer *L = &f->layers[li];
     float ds = f->distanceScale * f->qualityScale; // zoom * quality preset
-    float draw = L->cfg.drawDistance * ds;
+    // Trees keep their full draw distance on every quality preset: the outer
+    // tier is 2-tri billboards (cheap), and a preset that makes TREES vanish
+    // at 175 m reads as a bug, not a setting (racer never distance-culled
+    // trees at all). Quality still scales the expensive mesh tiers via lod/
+    // billboard distances below.
+    float draw = L->cfg.drawDistance * (L->cfg.tree ? f->distanceScale : ds);
     float lod = L->cfg.lodDistance * ds;
 
     float bbDist = (L->billboardDistance > 0.0f) ? L->billboardDistance * ds : 0.0f;

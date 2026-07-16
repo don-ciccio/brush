@@ -57,7 +57,14 @@ typedef struct BrushChunkCoord {
 // read this chunk's just-composed, chunk-local surface + overlays — all
 // lock-free (the arrays are immutable for the bake's duration). World XZ in.
 typedef struct BrushChunkSamplers {
-  float (*heightAt)(void *ctx, float wx, float wz);       // terrain Y
+  float (*heightAt)(void *ctx, float wx, float wz);       // terrain Y, matches
+                                                          // the chunk's CURRENT
+                                                          // LOD mesh (grounding)
+  // Fine-heightmap Y (hmRes bilinear, sculpt/roads composed) — LOD-INDEPENDENT.
+  // Scatter accept/reject decisions must use THIS one: heightAt changes when
+  // the chunk crosses an LOD ring and rebakes, and any decision keyed on it
+  // makes the instance set flicker at ring boundaries.
+  float (*heightFineAt)(void *ctx, float wx, float wz);
   float (*densityAt)(void *ctx, float wx, float wz, int foliageLayer); // paint multiplier (0..MAX_BOOST; 1 = base)
   void  (*splatAt)(void *ctx, float wx, float wz, float outWeights[4]); // terrain layer weights 0..1
   float (*roadAt)(void *ctx, float wx, float wz);         // road surface coverage 0..1 (for foliage exclusion)

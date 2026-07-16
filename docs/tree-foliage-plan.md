@@ -236,3 +236,16 @@ exactly as grass does (it already multiplies drawDistance).
   OCTAHEDRAL impostors: still deliberately deferred — single front-view
   billboards live at 90 m+ where parallax error is small; revisit only if
   orbiting mid-range trees visibly flat-cards after these fixes.
+- **LOD-ring scatter instability — FIXED (2026-07-16):** "foliage respawns at
+  mid distance" + residual thin-air tree pops = the scatter's accept/reject
+  (height band, slope) AND grounding sampled `heightAt` = the chunk's CURRENT
+  LOD mesh, so a ring crossing (rebake at a new mesh res) returned a
+  DIFFERENT instance set with different heights. Fix: new LOD-independent
+  `heightFineAt` sampler (fine heightmap, sculpt/roads composed) drives ALL
+  decisions; TREES also ground+probe on it (fully stable across rebakes —
+  the sub-metre fine-vs-mesh error is invisible under a 10 m tree); grass
+  keeps mesh grounding (sits on the rendered surface, moves WITH refines).
+  Also: tree drawDistance now ignores the quality preset (LOW made trees
+  vanish at 175 m — a bug, not a setting; racer never distance-culled trees).
+  NOTE: the handle swap was already atomic (pending->live at finalize), so
+  rebakes never blink — the instability was purely decision inputs.
