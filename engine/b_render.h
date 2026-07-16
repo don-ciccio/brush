@@ -116,6 +116,11 @@ void BrushRenderSetBiomePalette(const int *palette);
 // to the single BrushRenderSetGrassGround colour).
 void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count);
 
+// Editor paint helper: blend the lit terrain toward each region's biome colour
+// by `strength` (0 = off) so painted biome shapes are visible. Not used at
+// runtime; the editor drives it while the Biome paint tool is active.
+void BrushRenderSetBiomeOverlay(float strength);
+
 // --- Point lights (DYNAMIC, never baked — see docs/roadmap.md) -------------
 // Submit per frame, like draws: the list clears after every execute, so
 // moving lights (a carried torch) are free. Colors are LINEAR and may exceed

@@ -184,6 +184,9 @@ static bool g_paintActive = false; // sculpt-mode Paint tool (terrain layers)
 static int g_paintLayer = 1;       // painted layer (0 is the base coat)
 static bool g_roadActive = false;  // sculpt-mode Road spline tool
 static bool g_foliagePaintActive = false; // sculpt-mode foliage-density paint tool
+static bool g_biomePaintActive = false;   // sculpt-mode biome-id paint tool
+static int g_biomePaintId = -1;            // biome id the Biome tool stamps
+static int g_selectedBiome = -1;           // active biome in the Biomes panel
 static int g_selectedRoadIdx = -1;
 static int g_selectedNodeIdx = -1;
 static bool g_roadResyncPending = false; // a road changed; re-bake when idle
@@ -1520,6 +1523,11 @@ int main(int argc, char **argv) {
         }
         BrushTodUpdate(&g_tod, dt);
         BrushRenderApplyTimeOfDay(&g_tod);
+        // Biome paint helper: tint terrain by each region's biome colour while
+        // the Biome tool is active, so the painted shapes are visible.
+        bool biomeToolLive = g_biomePaintActive && g_mode == MODE_SCULPT &&
+                             g_scene.biomeCount > 0;
+        BrushRenderSetBiomeOverlay(biomeToolLive ? 0.55f : 0.0f);
         BrushWorldUpdate(g_world, g_camera.cam.position);
         BrushFoliageUpdate(g_foliage, (float)GetTime(), 1.0f);
         // Nothing is dynamic here, but Jolt's broadphase does its node
@@ -1608,7 +1616,8 @@ int main(int argc, char **argv) {
             RenderTexture2D *target = pp->smaaEnabled ? &pp->presentAA : &pp->present;
             BeginTextureMode(*target);
             BeginMode3D(g_camera.cam);
-            Color ringCol = g_foliagePaintActive                 ? LIME
+            Color ringCol = g_biomePaintActive                  ? ORANGE
+                            : g_foliagePaintActive              ? LIME
                             : g_paintActive                     ? MAGENTA
                             : (g_sculptOp == BRUSH_SCULPT_ADD)  ? GREEN
                             : (g_sculptOp == BRUSH_SCULPT_SMOOTH) ? SKYBLUE
@@ -2877,6 +2886,237 @@ int main(int argc, char **argv) {
             }
         }
 
+        // === Biomes ==========================================================
+        // Library of biome definitions (name, grass-ground tint, terrain
+        // palette). The FIELD that places them is the climate (Whittaker) plus
+        // the Biome paint tool; this panel is what those index into.
+        if (ImGui::CollapsingHeader("Biomes")) {
+            for (int i = 0; i < g_scene.biomeCount; i++) {
+                BrushSceneBiome *bm = &g_scene.biomes[i];
+                ImGui::PushID(i);
+                ImVec4 col(bm->grassColor.r / 255.0f, bm->grassColor.g / 255.0f,
+                           bm->grassColor.b / 255.0f, 1.0f);
+                ImGui::ColorButton("##sw", col,
+                                   ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker,
+                                   ImVec2(16, 16));
+                ImGui::SameLine();
+                if (ImGui::Selectable(TextFormat("%d: %s", bm->id,
+                                                 bm->name[0] ? bm->name : "(unnamed)"),
+                                      g_selectedBiome == i))
+                    g_selectedBiome = i;
+                ImGui::PopID();
+            }
+
+            if (ImGui::Button("Add Biome") && g_scene.biomeCount < BRUSH_MAX_BIOMES) {
+                // Smallest unused id in 0..15.
+                bool used[BRUSH_MAX_BIOMES] = {false};
+                for (int i = 0; i < g_scene.biomeCount; i++)
+                    if (g_scene.biomes[i].id >= 0 && g_scene.biomes[i].id < BRUSH_MAX_BIOMES)
+                        used[g_scene.biomes[i].id] = true;
+                int nid = 0; while (nid < BRUSH_MAX_BIOMES && used[nid]) nid++;
+                BrushSceneBiome *bm = &g_scene.biomes[g_scene.biomeCount];
+                *bm = (BrushSceneBiome){0};
+                bm->id = nid;
+                // No spaces: the scene format is space-delimited, so a space in
+                // the name would corrupt the biome line on the save round-trip.
+                snprintf(bm->name, sizeof(bm->name), "biome%d", nid);
+                bm->grassColor = (Color){90, 120, 70, 255};
+                bm->priority = 0.0f;
+                for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) bm->palette[j] = -1;
+                g_selectedBiome = g_scene.biomeCount++;
+                g_dirty = true;
+                ApplyTerrainLayers(); // biomeCount changed -> (re)activate climate
+            }
+
+            if (g_selectedBiome >= 0 && g_selectedBiome < g_scene.biomeCount) {
+                ImGui::Separator();
+                BrushSceneBiome *bm = &g_scene.biomes[g_selectedBiome];
+                char nameBuf[BRUSH_SCENE_NAME_MAX];
+                snprintf(nameBuf, sizeof(nameBuf), "%s", bm->name);
+                if (ImGui::InputText("Name", nameBuf, sizeof(nameBuf))) {
+                    // Space-delimited scene format: spaces would corrupt the
+                    // biome line on save, so map them to underscores.
+                    for (char *c = nameBuf; *c; c++)
+                        if (*c == ' ') *c = '_';
+                    snprintf(bm->name, sizeof(bm->name), "%s", nameBuf);
+                    g_dirty = true;
+                }
+                ImGui::Text("id %d", bm->id);
+                float gc[3] = {bm->grassColor.r / 255.0f, bm->grassColor.g / 255.0f,
+                               bm->grassColor.b / 255.0f};
+                if (ImGui::ColorEdit3("Grass tint", gc)) {
+                    bm->grassColor = (Color){(unsigned char)(gc[0] * 255.0f + 0.5f),
+                                             (unsigned char)(gc[1] * 255.0f + 0.5f),
+                                             (unsigned char)(gc[2] * 255.0f + 0.5f), 255};
+                    g_dirty = true;
+                    BrushSceneApplyBiomePalette(&g_scene);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Ground/far-grass tint for this biome (the F3 grass colour).");
+
+                ImGui::TextDisabled("Terrain palette (per splat slot)");
+                for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) {
+                    ImGui::PushID(100 + j);
+                    // -1 = default: this slot's painted terrain-layer material.
+                    const char *cur = (bm->palette[j] >= 0 &&
+                                       bm->palette[j] < g_scene.materialCount)
+                                          ? g_scene.materials[bm->palette[j]].name
+                                          : "(default)";
+                    if (ImGui::BeginCombo(TerrainSlotLabel(j), cur)) {
+                        if (ImGui::Selectable("(default)", bm->palette[j] < 0)) {
+                            bm->palette[j] = -1; g_dirty = true;
+                            BrushSceneApplyBiomePalette(&g_scene);
+                        }
+                        for (int m = 0; m < g_scene.materialCount; m++) {
+                            if (ImGui::Selectable(g_scene.materials[m].name, bm->palette[j] == m)) {
+                                bm->palette[j] = m; g_dirty = true;
+                                BrushSceneApplyBiomePalette(&g_scene);
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::PopID();
+                }
+
+                ImGui::Spacing();
+                if (ImGui::Button("Paint This Biome")) {
+                    g_mode = MODE_SCULPT;
+                    g_biomePaintActive = true;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
+                    g_biomePaintId = bm->id;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Sculpt mode -> drag to stamp this biome, shift-drag "
+                                      "to erase back to climate. The 'Biome' toolbar tool.");
+                ImGui::SameLine();
+                if (ImGui::Button("Delete Biome")) {
+                    for (int bi = g_selectedBiome; bi < g_scene.biomeCount - 1; bi++)
+                        g_scene.biomes[bi] = g_scene.biomes[bi + 1];
+                    g_scene.biomeCount--;
+                    g_selectedBiome = -1;
+                    g_dirty = true;
+                    ApplyTerrainLayers();
+                }
+            }
+
+            // --- Climate field (procedural placement) -----------------------
+            // Edits are applied on RELEASE (a climate change re-bakes every
+            // chunk), collected in s_climPending until the mouse lets go.
+            if (g_scene.biomeCount > 0) {
+                static bool s_climPending = false;
+                BrushBiomeClimate *cl = &g_scene.climate;
+                ImGui::Separator();
+                ImGui::TextDisabled("Climate (procedural placement)");
+
+                ImGui::SliderFloat("Temp region", &cl->tempScale, 60.0f, 2000.0f,
+                                   "%.0f m", ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("World metres per temperature-noise period\n"
+                                      "(larger = broader hot/cold regions).");
+                ImGui::SliderFloat("Moist region", &cl->moistScale, 60.0f, 2000.0f,
+                                   "%.0f m", ImGuiSliderFlags_Logarithmic);
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                ImGui::SliderFloat("Altitude lapse", &cl->lapse, 0.0f, 0.03f,
+                                   "%.4f /m");
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Temperature drop per metre above sea level:\n"
+                                      "high ground drifts toward the COLD rows.");
+                ImGui::SliderFloat("Sea level", &cl->seaLevel, -50.0f, 150.0f,
+                                   "%.0f m");
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                ImGui::SliderFloat("Border warp", &cl->warp, 0.0f, 300.0f, "%.0f m");
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Domain warp: how far borders meander\n"
+                                      "(0 = smooth noise contours).");
+                ImGui::SliderFloat("Border blend", &cl->blendRadius, 0.0f, 24.0f,
+                                   "%.1f m");
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Cross-fade width between biomes\n"
+                                      "(0 = hard borders).");
+                int seed = (int)cl->seed;
+                ImGui::SetNextItemWidth(120);
+                if (ImGui::DragInt("Seed", &seed, 1.0f, 1, 0x7fffffff))
+                    cl->seed = (unsigned int)seed;
+                if (ImGui::IsItemDeactivatedAfterEdit()) s_climPending = true;
+                ImGui::SameLine();
+                if (ImGui::Button("Reroll")) {
+                    cl->seed = (unsigned int)GetRandomValue(1, 0x7fffffff);
+                    s_climPending = true;
+                }
+
+                // Whittaker map: an 8x8 (temperature x moisture) grid of biome
+                // ids — THE "which climate gets which biome" authoring. Click or
+                // drag-paint cells with the biome selected in the list above.
+                ImGui::Spacing();
+                int assignIdx = (g_selectedBiome >= 0 &&
+                                 g_selectedBiome < g_scene.biomeCount)
+                                    ? g_selectedBiome : 0;
+                const BrushSceneBiome *ab = &g_scene.biomes[assignIdx];
+                ImGui::TextDisabled("Whittaker map — paints: %s",
+                                    ab->name[0] ? ab->name : TextFormat("%d", ab->id));
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Select a biome in the list above, then click or\n"
+                                      "drag cells to assign it to that climate band.");
+                ImGui::TextDisabled("cols: dry > wet   rows: cold (top) > hot");
+                const int WN = BRUSH_BIOME_WHITTAKER;
+                for (int t = 0; t < WN; t++) {
+                    for (int m = 0; m < WN; m++) {
+                        if (m > 0) ImGui::SameLine(0.0f, 2.0f);
+                        ImGui::PushID(3000 + t * WN + m);
+                        int cid = cl->whittaker[t * WN + m];
+                        // Cell colour = that biome's swatch; grey if the id has
+                        // no definition in the scene.
+                        const BrushSceneBiome *cb = NULL;
+                        for (int i = 0; i < g_scene.biomeCount; i++)
+                            if (g_scene.biomes[i].id == cid) { cb = &g_scene.biomes[i]; break; }
+                        ImVec4 col = cb ? ImVec4(cb->grassColor.r / 255.0f,
+                                                 cb->grassColor.g / 255.0f,
+                                                 cb->grassColor.b / 255.0f, 1.0f)
+                                        : ImVec4(0.24f, 0.24f, 0.24f, 1.0f);
+                        ImGui::PushStyleColor(ImGuiCol_Button, col);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+                        ImGui::Button(TextFormat("%d", cid), ImVec2(24, 24));
+                        ImGui::PopStyleColor(3);
+                        // Click OR drag-paint across cells; the re-bake waits in
+                        // s_climPending until the mouse is released.
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("temp %d/%d, moist %d/%d -> %s",
+                                              t + 1, WN, m + 1, WN,
+                                              cb ? (cb->name[0] ? cb->name
+                                                                : TextFormat("biome %d", cid))
+                                                 : TextFormat("undefined (%d)", cid));
+                            if (ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                                cl->whittaker[t * WN + m] != (unsigned char)ab->id) {
+                                cl->whittaker[t * WN + m] = (unsigned char)ab->id;
+                                s_climPending = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                if (ImGui::Button("Fill map with selected")) {
+                    for (int i = 0; i < WN * WN; i++)
+                        cl->whittaker[i] = (unsigned char)ab->id;
+                    s_climPending = true;
+                }
+
+                if (s_climPending && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    s_climPending = false;
+                    g_dirty = true;
+                    // Pushes the climate -> SetBiomeClimate sees the change and
+                    // rebakes every chunk; the foliage chunk hooks re-scatter as
+                    // each chunk lands. No g_foliageResyncPending (that would
+                    // queue a SECOND full rebake for the same edit).
+                    ApplyTerrainLayers();
+                }
+            }
+        }
+
         ImGui::End();
 
         // === Console =========================================================
@@ -3265,6 +3505,14 @@ int main(int argc, char **argv) {
                             float flow = fminf(g_brushStrength * 4.0f * dtStroke, 1.0f);
                             BrushWorldPaintC(g_world, g_cursorPos, g_brushRadius,
                                              flow, layer, pBc);
+                        } else if (g_biomePaintActive) {
+                            // Hard stamp of the selected biome; shift-drag erases
+                            // the override back to the climate field. Only the
+                            // painted chunks re-bake, and the foliage chunk hooks
+                            // re-scatter them — do NOT set g_foliageResyncPending
+                            // here (it forces a FULL world rebake per stroke).
+                            BrushWorldPaintBiome(g_world, g_cursorPos, g_brushRadius,
+                                                 g_biomePaintId, lower);
                         } else {
                             float strength;
                             if (g_sculptOp == BRUSH_SCULPT_ADD)
@@ -3408,37 +3656,45 @@ int main(int argc, char **argv) {
                 ImGui::SameLine();
                 ImGui::Checkbox("Snap", &g_surfaceSnap);
             } else {
-                bool sculpting = !g_paintActive && !g_roadActive && !g_foliagePaintActive;
+                bool sculpting = !g_paintActive && !g_roadActive &&
+                                 !g_foliagePaintActive && !g_biomePaintActive;
                 if (ToolButton(" Raise ", sculpting && g_sculptOp == BRUSH_SCULPT_ADD)) {
                     g_sculptOp = BRUSH_SCULPT_ADD;
-                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = g_biomePaintActive = false;
                 }
                 ImGui::SameLine();
                 if (ToolButton(" Smooth ", sculpting && g_sculptOp == BRUSH_SCULPT_SMOOTH)) {
                     g_sculptOp = BRUSH_SCULPT_SMOOTH;
-                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = g_biomePaintActive = false;
                 }
                 ImGui::SameLine();
                 if (ToolButton(" Flatten ", sculpting && g_sculptOp == BRUSH_SCULPT_FLATTEN)) {
                     g_sculptOp = BRUSH_SCULPT_FLATTEN;
-                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = g_biomePaintActive = false;
                 }
                 ImGui::SameLine();
                 if (ToolButton(" Paint ", g_paintActive)) {
                     g_paintActive = true;
-                    g_roadActive = g_foliagePaintActive = false;
+                    g_roadActive = g_foliagePaintActive = g_biomePaintActive = false;
                 }
                 ImGui::SameLine();
                 if (ToolButton(" Road ", g_roadActive)) {
                     g_roadActive = true;
-                    g_paintActive = g_foliagePaintActive = false;
+                    g_paintActive = g_foliagePaintActive = g_biomePaintActive = false;
                 }
                 ImGui::SameLine();
                 if (ToolButton(" Grass ", g_foliagePaintActive)) {
                     g_foliagePaintActive = true;
-                    g_paintActive = g_roadActive = false;
+                    g_paintActive = g_roadActive = g_biomePaintActive = false;
                     if (g_selectedFoliage < 0 && g_scene.foliageCount > 0)
                         g_selectedFoliage = 0;
+                }
+                ImGui::SameLine();
+                if (ToolButton(" Biome ", g_biomePaintActive)) {
+                    g_biomePaintActive = true;
+                    g_paintActive = g_roadActive = g_foliagePaintActive = false;
+                    if (g_biomePaintId < 0 && g_scene.biomeCount > 0)
+                        g_biomePaintId = g_scene.biomes[0].id;
                 }
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(140);
@@ -3504,6 +3760,36 @@ int main(int argc, char **argv) {
                                              ? g_scene.foliage[i].name : TextFormat("%d", i);
                         if (ImGui::Button(nm, ImVec2(0, 28))) g_selectedFoliage = i;
                         if (sel) ImGui::PopStyleColor();
+                        ImGui::PopID();
+                    }
+                }
+                // Biome tool: pick which biome to stamp (swatch tinted by its
+                // grass colour). Shift-drag erases the override back to climate.
+                if (g_biomePaintActive) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("|");
+                    if (g_scene.biomeCount == 0) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(1, 0.65f, 0.25f, 1),
+                                           "define biomes in Environment > Biomes");
+                    }
+                    for (int i = 0; i < g_scene.biomeCount; i++) {
+                        const BrushSceneBiome *bm = &g_scene.biomes[i];
+                        ImGui::SameLine();
+                        ImGui::PushID(2000 + i);
+                        bool sel = (g_biomePaintId == bm->id);
+                        ImVec4 col(bm->grassColor.r / 255.0f, bm->grassColor.g / 255.0f,
+                                   bm->grassColor.b / 255.0f, 1.0f);
+                        ImGui::PushStyleColor(ImGuiCol_Button, col);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, col);
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+                        const char *nm = bm->name[0] ? bm->name : TextFormat("%d", bm->id);
+                        if (ImGui::Button(sel ? TextFormat("[%s]", nm) : nm, ImVec2(0, 28)))
+                            g_biomePaintId = bm->id;
+                        ImGui::PopStyleColor(3);
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Stamp biome %d (%s). Shift-drag = erase to climate.",
+                                              bm->id, nm);
                         ImGui::PopID();
                     }
                 }

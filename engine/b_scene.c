@@ -44,6 +44,11 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
 
   char *cursor = text;
   int lineNo = 0;
+  // Biome palette tokens (material names or legacy indices), resolved AFTER
+  // the whole file parses so biome lines never depend on the materials
+  // appearing first in the file.
+  char palTok[BRUSH_MAX_BIOMES][BRUSH_TERRAIN_LAYERS][32];
+  memset(palTok, 0, sizeof(palTok));
   while (*cursor != '\0') {
     char *line = cursor;
     char *nl = strchr(cursor, '\n');
@@ -58,7 +63,6 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
     int version;
     float x, y, z, h, a, rx, ry, rz, sx, sy, sz, r, g, b, radius;
     int ir, ig, ib, flicker, n;
-    int bpal[4] = {-1, -1, -1, -1}; // biome palette slots (Phase 2)
     char w1[256], w2[256], w3[256], w4[256], w5[256];
 
     if (sscanf(p, "version %d", &version) == 1) {
@@ -139,22 +143,31 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
       if (sscanf(p, "biome_climate %*f %*f %*f %*f %*f %*f %d", &flicker) == 1)
         temp.climate.seed = (unsigned int)flicker;
     } else if (strncmp(p, "biome ", 6) == 0 &&
-               (n = sscanf(p, "biome %31s %d %d %d %d %f %d %d %d %d", w1,
-                           &flicker, &ir, &ig, &ib, &a, &bpal[0], &bpal[1],
-                           &bpal[2], &bpal[3])) >= 5) {
-      // biome <name> <id> <r> <g> <b> [priority] [p0 p1 p2 p3]. The `biome `
-      // guard (trailing space) keeps this off biome_climate / biome_whittaker.
+               (n = sscanf(p, "biome %31s %d %d %d %d %f %31s %31s %31s %31s",
+                           w1, &flicker, &ir, &ig, &ib, &a, w2, w3, w4,
+                           w5)) >= 5) {
+      // biome <name> <id> <r> <g> <b> [priority] [mat0 mat1 mat2 mat3]. The
+      // palette entries are MATERIAL NAMES ("-" = unset) so they survive the
+      // library being reordered/deleted; bare integers are the legacy index
+      // format. The `biome ` guard (trailing space) keeps this off
+      // biome_climate / biome_whittaker.
       if (temp.biomeCount < BRUSH_MAX_BIOMES && flicker >= 0 &&
           flicker < BRUSH_MAX_BIOMES) {
-        BrushSceneBiome *bm = &temp.biomes[temp.biomeCount++];
+        BrushSceneBiome *bm = &temp.biomes[temp.biomeCount];
         memset(bm, 0, sizeof(*bm));
         CopyField(bm->name, sizeof(bm->name), w1);
         bm->id = flicker;
         bm->grassColor = (Color){(unsigned char)ir, (unsigned char)ig,
                                  (unsigned char)ib, 255};
         bm->priority = (n >= 6) ? a : 0.0f;
-        for (int pi = 0; pi < BRUSH_TERRAIN_LAYERS; pi++)
-          bm->palette[pi] = bpal[pi];
+        const char *tk[BRUSH_TERRAIN_LAYERS] = {w2, w3, w4, w5};
+        for (int pi = 0; pi < BRUSH_TERRAIN_LAYERS; pi++) {
+          bm->palette[pi] = -1; // resolved from palTok after the parse loop
+          if (n >= 7 + pi)
+            snprintf(palTok[temp.biomeCount][pi], sizeof(palTok[0][0]), "%s",
+                     tk[pi]);
+        }
+        temp.biomeCount++;
       }
     } else if (sscanf(p, "post %23s %f", w1, &x) == 2) {
       if (temp.postCount < BRUSH_SCENE_MAX_POST) {
@@ -308,6 +321,22 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   }
   UnloadFileText(text);
 
+  // Resolve the biome palette tokens now that every material is parsed:
+  // "-"/empty = unset, all-digits = legacy material index, else material name.
+  for (int i = 0; i < temp.biomeCount; i++)
+    for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) {
+      const char *tk = palTok[i][j];
+      if (tk[0] == '\0' || strcmp(tk, "-") == 0) continue; // stays -1
+      bool digits = true;
+      for (const char *c = tk; *c; c++)
+        if ((*c < '0' || *c > '9') && !(*c == '-' && c == tk)) {
+          digits = false;
+          break;
+        }
+      temp.biomes[i].palette[j] =
+          digits ? atoi(tk) : BrushSceneFindMaterial(&temp, tk);
+    }
+
   temp.modTime = GetFileModTime(path);
   BrushSceneUnloadMaterials(s); // drop the outgoing scene's texture refs
   *s = temp;
@@ -415,13 +444,21 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
   }
 
   if (s->biomeCount > 0) {
-    fprintf(f, "\n# biome  name id  r g b  [priority] [p0 p1 p2 p3]\n");
+    // Palette slots are written as MATERIAL NAMES ("-" = unset) so they survive
+    // the material library being reordered or a material being deleted; the
+    // loader also still accepts the legacy bare-index form.
+    fprintf(f, "\n# biome  name id  r g b  [priority] [mat0 mat1 mat2 mat3]\n");
     for (int i = 0; i < s->biomeCount; i++) {
       const BrushSceneBiome *bm = &s->biomes[i];
-      fprintf(f, "biome %s %d %d %d %d %g %d %d %d %d\n",
-              bm->name[0] ? bm->name : "-", bm->id, bm->grassColor.r,
-              bm->grassColor.g, bm->grassColor.b, bm->priority, bm->palette[0],
-              bm->palette[1], bm->palette[2], bm->palette[3]);
+      fprintf(f, "biome %s %d %d %d %d %g", bm->name[0] ? bm->name : "-",
+              bm->id, bm->grassColor.r, bm->grassColor.g, bm->grassColor.b,
+              bm->priority);
+      for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) {
+        int pi = bm->palette[j];
+        fprintf(f, " %s", (pi >= 0 && pi < s->materialCount)
+                              ? s->materials[pi].name : "-");
+      }
+      fprintf(f, "\n");
     }
     fprintf(f, "biome_climate %g %g %g %g %g %g %u\n", s->climate.tempScale,
             s->climate.moistScale, s->climate.lapse, s->climate.seaLevel,
@@ -776,21 +813,33 @@ void BrushSceneApplyBiomePalette(const BrushScene *s) {
     int mi = s->terrainLayers[j][0] ? BrushSceneFindMaterial(s, s->terrainLayers[j]) : -1;
     def[j] = (mi >= 0) ? mi : 0;
   }
+  // The shader indexes uBiomePalette/uBiomeGrassColor by biome ID — which the
+  // editor's Add/Delete can decouple from LIST ORDER — so both tables are keyed
+  // by bm->id here, never by list position. IDs no biome defines fall back to
+  // the painted-layer palette and the FIRST defined biome's tint (never black:
+  // a stale whittaker cell or painted tile must not punch dark holes in the
+  // grass ground).
   int pal[BRUSH_MAX_BIOMES * 4];
+  Vector3 colors[BRUSH_MAX_BIOMES];
+  Color c0 = (s->biomeCount > 0) ? s->biomes[0].grassColor : (Color){0, 0, 0, 255};
   for (int i = 0; i < BRUSH_MAX_BIOMES; i++) {
+    for (int j = 0; j < 4; j++) pal[i * 4 + j] = def[j];
+    colors[i] = (Vector3){c0.r / 255.0f, c0.g / 255.0f, c0.b / 255.0f};
+  }
+  for (int i = 0; i < s->biomeCount; i++) {
+    const BrushSceneBiome *bm = &s->biomes[i];
+    if (bm->id < 0 || bm->id >= BRUSH_MAX_BIOMES) continue;
     for (int j = 0; j < 4; j++) {
-      int idx = (i < s->biomeCount) ? s->biomes[i].palette[j] : -1;
-      pal[i * 4 + j] = (idx >= 0) ? idx : def[j];
+      int idx = bm->palette[j];
+      // Bounds check: a stale index (material deleted since) renders as the
+      // painted default rather than whatever slice now sits at that slot.
+      if (idx >= 0 && idx < s->materialCount) pal[bm->id * 4 + j] = idx;
     }
+    colors[bm->id] = (Vector3){bm->grassColor.r / 255.0f,
+                               bm->grassColor.g / 255.0f,
+                               bm->grassColor.b / 255.0f};
   }
   BrushRenderSetBiomePalette(pal);
-
-  // Per-biome grass-ground tint colours (2.4). Off when no biomes are defined.
-  Vector3 colors[BRUSH_MAX_BIOMES];
-  for (int i = 0; i < BRUSH_MAX_BIOMES; i++) {
-    Color c = (i < s->biomeCount) ? s->biomes[i].grassColor : (Color){0, 0, 0, 255};
-    colors[i] = (Vector3){c.r / 255.0f, c.g / 255.0f, c.b / 255.0f};
-  }
   BrushRenderSetBiomeGrassColors(colors, s->biomeCount);
 }
 

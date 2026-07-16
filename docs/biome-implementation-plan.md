@@ -69,6 +69,134 @@ Each phase compiles, runs, and is independently verifiable. Constants:
 - **Launch road-carve — FIXED.** Not a config slot after all: `BrushWorldWaitResident`
   drains all pending (re)bakes after the post-create setup (roads/sculpt/biomes),
   called at the end of `SandboxInit`, so the terrain launches fully carved.
+- **Phase 3 authoring (steps 1–2) — DONE (branch, uncommitted).** The reason the
+  branch exists: biomes are now *editable*, not just procedural.
+  - **3.1 Biome library panel** (`Environment ▸ Biomes`): list/add/delete biomes,
+    edit name, grass-ground tint (live), and the 4-slot terrain palette as material
+    dropdowns (`(default)` = the painted `terrainLayers[slot]` material). Edits set
+    `g_dirty` + re-apply palette/climate immediately.
+  - **3.2 Biome paint brush**: sparse `BiomeTile` overlay (1 byte/sample,
+    `0xFF`=no override) keyed on the heightmap grid like splat/foliage;
+    `ComposeBiomeMap` reads the override before the climate lookup so the field
+    stays continuous across chunks. `BrushWorldPaintBiome` = hard discrete stamp,
+    only re-bakes touched chunks. Toolbar **Biome** tool + swatch strip (tinted by
+    grass colour); shift-drag erases to climate. Persisted in the sculpt blob
+    (**`BSC4`**, back-compatible).
+  - **3.3 Paint overlay helper**: `uBiomeOverlay` blends the lit terrain toward each
+    region's biome colour (0.55) while the Biome tool is live, so painted shapes
+    read against the ground. Editor-only, gated to `MODE_SCULPT` + biomes-exist +
+    normal view; zero at runtime.
+  - **3.4 Whittaker / climate editor — DONE (branch, uncommitted).** Climate
+    sliders (temp/moist region size — log scale, altitude lapse, sea level, border
+    warp, border blend, seed + Reroll) and the **8×8 Whittaker grid** (rows
+    cold→hot, cols dry→wet; cells coloured by the biome's swatch, grey =
+    undefined id). Click or **drag-paint** cells with the biome selected in the
+    list; "Fill map with selected" floods it. All edits collect in a pending flag
+    and apply **on mouse release** (one `ApplyTerrainLayers` → full re-bake +
+    foliage resync), never per drag-frame. Phase 3 authoring is COMPLETE.
+
+---
+
+## Performance notes (measured/assessed 2026-07-16)
+
+Biomes are **cheap**; the only lever worth watching is texture-array memory.
+
+- **Per-frame GPU — negligible.** The only added runtime cost is the terrain
+  shader **double-tapping** the albedo+normal arrays (`id0` and `id1`, lerp by
+  blend). Two guards keep it small: the **single-biome fast path** in
+  `ComposeBiomeMap` writes `blend=0` for uniform chunks so `if (id0!=id1 &&
+  bblend>0)` skips the 2nd tap — only the *border band* pays 2× — and the gym
+  audit shows terrain sampling is <2% of the frame (post+shadows dominate). No
+  per-frame CPU: biome maps are baked to textures; `biomeAt` is scatter-time only.
+- **Chunk bake (worker) — one-time, off-thread.** `ComposeBiomeMap` blend loop is
+  O(hmRes²·M²) with **M≤6** and the uniform fast-path; `BiomeRaw` is a few fbm
+  octaves per apron texel. Rides the existing bake, no extra pass.
+- **Memory — the one real lever.** `BuildLayerArrays` packs the **whole material
+  library** into `sampler2DArray`s: **RGBA8 (uncompressed), ≤2048², mipmapped, ×2**
+  (albedo+normal). Uncompressed because GPU-blit assembly can't read back `.ctex`.
+  Scales with **library size × resolution — NOT biome count or world extent**:
+  8 mats @512² ≈ 20 MB (fine) · 16 @1024² ≈ 170 MB · 32 @2048² ≈ ~1.3 GB (ceiling).
+  Every slice is full-res whether a biome uses it or not.
+- **Trivia:** biome paint tiles = 1 byte/sample sparse; per-chunk `biomeTex` = one
+  RGBA8 `hmRes²` map (~17 KB/chunk). Both negligible.
+
+**Discipline (no code needed now):** keep the terrain library to materials biomes
+actually use, and don't push the whole set to 2048². **Optimisations if it ever
+bites**, in effort order: (1) prune the array to *referenced* slices (dedup) —
+biggest win; (2) clamp array resolution independent of source (one line in
+`BuildLayerArrays`); (3) keep `blendRadius` modest (widens both the bake
+neighbourhood and the double-tap band); (4) *(big lift, likely unnecessary)*
+compressed BC7 arrays via a GPU path. Deferred — no current scene is close.
+
+### Code audit findings — FIXED (2026-07-16, pre-commit)
+
+A line-by-line audit of the new paths found five real defects (all fixed):
+
+1. **Data race (crash-grade):** `ComposeBiomeMap` read the biome paint tiles on
+   the bake worker WITHOUT `sculptMutex`, while main-thread strokes `MemRealloc`
+   the tile array. The Phase-0 "compose outside the lock" comment assumed a pure
+   function — the paint override broke that invariant. **Fix:** pre-read the
+   overrides under the mutex into a buffer (with a last-tile cache — strokes are
+   spatially coherent), keep the expensive climate noise outside the lock.
+2. **Full-world rebake per paint stroke:** the editor's biome-stroke handler set
+   `g_foliageResyncPending`, which runs `SyncFoliageToWorld` →
+   **`BrushWorldRebakeAll`**. The localized chunk rebake already re-scatters
+   foliage via the chunk hooks (why Grass paint never sets the flag). **Fix:**
+   removed — biome paint is now as cheap as splat paint (touched chunks only).
+3. **Double full rebake on climate edits:** climate apply called
+   `ApplyTerrainLayers` (→ `SetBiomeClimate` → rebake) AND set
+   `g_foliageResyncPending` (→ a second full rebake). **Fix:** flag removed.
+4. **Unguarded heavy setters:** `SetBiomeClimate` rebaked the whole world and
+   `SetTerrainLibrary` rebuilt both GPU arrays (per-slice RT blit + **pipeline
+   readback stall** + mipmap gen) on EVERY call — and both sit inside the
+   editor's `ApplyTerrainLayers`, which runs on scene reload, texture re-import,
+   and biome add/delete. **Fix:** memcmp no-change guards on both (mirroring the
+   `SetLayers` guard that fixed the launch flicker).
+5. **Save-loss bug (not perf):** `BrushWorldSculptAny` didn't count biome tiles,
+   so a biome-paint-only edit skipped the terrain-blob save — painted biomes
+   silently lost. **Fix:** `btileCount` added.
+
+Also: biome uniform locations are now cached in `g_r` (engine pattern; the
+overlay setter runs every editor frame and now early-outs on unchanged value).
+Audited and OK as-is: shader border double-tap (fast-pathed), per-chunk biome
+map memory (~17 KB), BSC4 undo-blob growth (1 B/sample), Whittaker grid ImGui
+cost, `ChunkBiomeAt` bilinear (scatter-time only).
+
+### Structural review — FIXED + notes (2026-07-16, pre-commit)
+
+A follow-up architectural review of the whole feature found three more defects
+(fixed) and some accepted trade-offs:
+
+1. **id-vs-list-order bug:** `BrushSceneApplyBiomePalette` filled
+   `uBiomePalette`/`uBiomeGrassColor` by **list position**, but the shader
+   indexes them by **biome ID**. Identical only while `biomes[i].id == i` —
+   one panel Delete+Add decouples them and palettes/tints attach to the wrong
+   biomes. **Fix:** both tables keyed by `bm->id`; stale material indices
+   bounds-checked; IDs no biome defines tint like the FIRST defined biome
+   (never black — stale whittaker cells/painted tiles must not punch holes).
+2. **Palette persisted as raw material indices** — the only index-based
+   material reference in the format (terrain layers are name-based), and the
+   Materials panel CAN delete ⇒ silent palette corruption on reorder/delete.
+   **Fix:** palettes now save as material NAMES ("-" = unset); the loader
+   accepts both (bare ints = legacy), resolving AFTER the full parse so file
+   order never matters. Verified by a new headless round-trip test
+   (`test_biome_roundtrip`, 40 checks: names, legacy ints, unknown names,
+   climate/whittaker survival — also re-guards the sscanf-prefix bug).
+3. **Space in the default biome name** (`"biome %d"`) would corrupt the
+   space-delimited format on the save round-trip. **Fix:** `"biome%d"` +
+   spaces→underscores in the name InputText.
+
+**Accepted trade-offs (documented, no code):** `priority` field is dormant
+(parsed/saved, never consumed — reserved for border dominance); deleting a
+biome leaves its id in whittaker cells/painted tiles/foliage gates, and a later
+Add reusing that id resurrects those regions (visible as grey cells in the
+grid; a "clear paint for id" API is a possible follow-up); the sampler's
+nearest-id + bilinear-blend is semantically approximate where neighbouring
+texels reference different biome pairs (invisible in practice — the field is
+continuous). Verified sound: point-filtered `biomeTex` (ids must never
+interpolate), one-directional data flow (scene → world → chunk map →
+shader/foliage), types-only `b_biome.h`, canonical-grid paint keying (seam-free
+by construction), BSC4 magic-versioned append format.
 
 ---
 

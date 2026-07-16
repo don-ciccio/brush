@@ -266,6 +266,14 @@ void BrushWorldPaintC(BrushWorld *w, Vector3 center, float radius,
 // 0 (or a NULL climate) disables biomes: one implicit biome, biomeAt -> {0,0,0}.
 void BrushWorldSetBiomeClimate(BrushWorld *w, const BrushBiomeClimate *climate);
 
+// Paint a biome-id override onto the world, masking over the procedural climate
+// field (like the splat/foliage paint tiles: sparse, on the heightmap grid,
+// persisted with the sculpt blob). Only the painted chunks re-bake. biomeId
+// 0..15 stamps that biome inside `radius`; erase clears the override back to
+// climate. No effect unless biomes are active (biomeCount > 0).
+void BrushWorldPaintBiome(BrushWorld *w, Vector3 center, float radius,
+                          int biomeId, bool erase);
+
 // Terrain texture LIBRARY (Phase 2): the full set of materials biomes can index
 // into, packed into the terrain sampler2DArrays (slice i = library[i]). A biome
 // palette entry is a library index. Sets the array source; NOT a chunk rebake

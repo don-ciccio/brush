@@ -122,6 +122,15 @@ typedef struct SplatTile {
   unsigned char *w; // tileRes * tileRes * 4 weights
 } SplatTile;
 
+// Sparse biome-paint tile: same grid/ownership; ONE byte per sample = a painted
+// biome-id override that masks over the climate field. 0xFF = no override (use
+// the procedural climate). Absent tile = all 0xFF (pure climate).
+#define BIOME_PAINT_NONE 0xFF
+typedef struct BiomeTile {
+  int tx, tz;
+  unsigned char *b; // tileRes * tileRes (biome id, or BIOME_PAINT_NONE)
+} BiomeTile;
+
 struct BrushChunkJobQueue; // fwd
 
 struct BrushWorld {
@@ -151,6 +160,8 @@ struct BrushWorld {
   int wtileCount, wtileCap;
   FoliageMaskTile *fmtiles; // foliage density paint (same mutex/keying)
   int fmtileCount, fmtileCap;
+  BiomeTile *btiles; // biome-id paint override (same mutex/keying)
+  int btileCount, btileCap;
   int tileRes;         // hmRes - 1 samples per tile side
   float gridStep;      // metres between grid samples (chunkSize / (hmRes-1))
   pthread_mutex_t sculptMutex;
@@ -397,6 +408,39 @@ static unsigned char *FoliageMaskRW(BrushWorld *w, long gx, long gz) {
   return &t->m[(lz * w->tileRes + lx) * 4];
 }
 
+// ---- biome-paint override tiles (same locking + ownership) -----------------
+
+static BiomeTile *BiomeFind(BrushWorld *w, int tx, int tz) {
+  for (int i = 0; i < w->btileCount; i++)
+    if (w->btiles[i].tx == tx && w->btiles[i].tz == tz) return &w->btiles[i];
+  return NULL;
+}
+
+static BiomeTile *BiomeGet(BrushWorld *w, int tx, int tz, bool create) {
+  BiomeTile *t = BiomeFind(w, tx, tz);
+  if (t != NULL || !create) return t;
+  if (w->btileCount == w->btileCap) {
+    w->btileCap = (w->btileCap == 0) ? 16 : w->btileCap * 2;
+    w->btiles = (BiomeTile *)MemRealloc(w->btiles,
+                                        sizeof(BiomeTile) * w->btileCap);
+  }
+  t = &w->btiles[w->btileCount++];
+  t->tx = tx;
+  t->tz = tz;
+  int n = w->tileRes * w->tileRes;
+  t->b = (unsigned char *)MemAlloc((unsigned int)n);
+  memset(t->b, BIOME_PAINT_NONE, (unsigned int)n); // no override anywhere
+  return t;
+}
+
+static unsigned char *BiomePaintRW(BrushWorld *w, long gx, long gz) {
+  int tx = (int)FloorDivL(gx, w->tileRes), tz = (int)FloorDivL(gz, w->tileRes);
+  BiomeTile *t = BiomeGet(w, tx, tz, true);
+  int lx = (int)(gx - (long)tx * w->tileRes);
+  int lz = (int)(gz - (long)tz * w->tileRes);
+  return &t->b[lz * w->tileRes + lx];
+}
+
 // ---- terrain build (worker thread; no GL) ---------------------------------
 
 // Bilinear sample of a chunk's heightmap at a world XZ — the exact surface the
@@ -616,14 +660,46 @@ static void ComposeBiomeMap(BrushWorld *w, WorldChunk *chunk) {
     chunk->biomePixels = (unsigned char *)MemAlloc((unsigned int)(sr * sr * 4));
   unsigned char *raw = (unsigned char *)MemAlloc((unsigned int)(ar * ar));
   unsigned char first = 0; bool uniform = true;
+  // The apron texel (x,z) maps to the global heightmap grid index bGx+(x-M),
+  // bGz+(z-M) — the same keying the paint tiles use — so a painted override is
+  // continuous across chunk borders exactly like the climate field.
+  long bGx = (long)chunk->coord.x * w->tileRes;
+  long bGz = (long)chunk->coord.z * w->tileRes;
+  // Painted overrides: pre-read under the sculpt mutex (main-thread strokes
+  // can realloc the tile array), THEN run the expensive climate noise outside
+  // the lock as before. An unpainted world allocates/locks nothing.
+  unsigned char *ov = NULL;
+  pthread_mutex_lock(&w->sculptMutex);
+  if (w->btileCount > 0) {
+    ov = (unsigned char *)MemAlloc((unsigned int)(ar * ar));
+    BiomeTile *lt = NULL; int ltx = 0, ltz = 0; bool lv = false; // last-tile
+    for (int z = 0; z < ar; z++)                                 // cache: the
+      for (int x = 0; x < ar; x++) {                             // scan stays
+        long gx = bGx + (x - M), gz = bGz + (z - M);             // in a tile
+        int tx = (int)FloorDivL(gx, w->tileRes);                 // for rows
+        int tz = (int)FloorDivL(gz, w->tileRes);
+        if (!lv || tx != ltx || tz != ltz) {
+          lt = BiomeFind(w, tx, tz);
+          ltx = tx; ltz = tz; lv = true;
+        }
+        ov[z * ar + x] =
+            lt ? lt->b[(gz - (long)tz * w->tileRes) * w->tileRes +
+                       (gx - (long)tx * w->tileRes)]
+               : BIOME_PAINT_NONE;
+      }
+  }
+  pthread_mutex_unlock(&w->sculptMutex);
   for (int z = 0; z < ar; z++)
     for (int x = 0; x < ar; x++) {
       float wx = o.x + (float)(x - M) * step;
       float wz = o.z + (float)(z - M) * step;
-      unsigned char id = BiomeIdAt(w, wx, wz);
+      // Painted override masks over the climate field; 0xFF = fall through.
+      unsigned char pov = ov ? ov[z * ar + x] : BIOME_PAINT_NONE;
+      unsigned char id = (pov != BIOME_PAINT_NONE) ? pov : BiomeIdAt(w, wx, wz);
       raw[z * ar + x] = id;
       if (x == 0 && z == 0) first = id; else if (id != first) uniform = false;
     }
+  if (ov) MemFree(ov);
   if (uniform || M == 0) { // single biome (or blending off) -> hard fill
     for (int z = 0; z < sr; z++)
       for (int x = 0; x < sr; x++) {
@@ -912,8 +988,9 @@ static void BuildCpu(BrushWorld *w, WorldChunk *chunk) {
     }
   }
 
-  // Biome field: pure function of the base heightFn + climate noise, so compose
-  // it OUTSIDE the sculpt lock (no shared mutable state, no lock contention).
+  // Biome field: the climate noise is a pure function of the base heightFn, so
+  // it runs OUTSIDE the sculpt lock; the painted overrides (mutable tiles) are
+  // pre-read under the lock inside ComposeBiomeMap itself.
   chunk->biomeValid = false;
   if (w->biomeClimate.biomeCount > 0) ComposeBiomeMap(w, chunk);
 
@@ -1363,7 +1440,17 @@ void BrushWorldSetTerrainLibrary(BrushWorld *w, const BrushTerrainLayer *lib,
   if (!w) return;
   if (count < 0) count = 0;
   if (count > BRUSH_TERRAIN_ARRAY_MAX) count = BRUSH_TERRAIN_ARRAY_MAX;
-  for (int i = 0; i < count; i++) w->libLayers[i] = lib[i];
+  // Same library -> skip the array rebuild: it GPU-blits every slice through a
+  // RenderTexture + READBACK (a full pipeline stall) + mipmap gen, so an
+  // unguarded call (every editor ApplyTerrainLayers) is a visible hitch.
+  // Zeroed-copy + memcmp mirrors the SetLayers guard.
+  BrushTerrainLayer next[BRUSH_TERRAIN_ARRAY_MAX] = {0};
+  for (int i = 0; i < count; i++) next[i] = lib[i];
+  bool same = (count == w->libCount &&
+               memcmp(next, w->libLayers, sizeof(next)) == 0);
+  bool haveArr = (count == 0 || w->layerAlbedoArr.id != 0);
+  if (same && haveArr) return;
+  memcpy(w->libLayers, next, sizeof(next));
   w->libCount = count;
   BuildLayerArrays(w); // repack the array from the library (render-only, no rebake)
 }
@@ -1682,6 +1769,8 @@ void BrushWorldDestroy(BrushWorld *w) {
   if (w->wtiles) MemFree(w->wtiles);
   for (int i = 0; i < w->fmtileCount; i++) MemFree(w->fmtiles[i].m);
   if (w->fmtiles) MemFree(w->fmtiles);
+  for (int i = 0; i < w->btileCount; i++) MemFree(w->btiles[i].b);
+  if (w->btiles) MemFree(w->btiles);
   pthread_mutex_destroy(&w->sculptMutex);
   // The material's diffuse texture is game-owned; don't unload it. Detach the
   // shared shader so UnloadMaterial doesn't free the engine's lit shader.
@@ -1868,8 +1957,14 @@ void BrushWorldRebakeAll(BrushWorld *w) {
 
 void BrushWorldSetBiomeClimate(BrushWorld *w, const BrushBiomeClimate *climate) {
   if (!w) return;
-  if (climate) w->biomeClimate = *climate;
-  else memset(&w->biomeClimate, 0, sizeof(w->biomeClimate)); // NULL -> biomes off
+  BrushBiomeClimate next;
+  memset(&next, 0, sizeof(next)); // NULL -> biomes off (and no padding garbage)
+  if (climate) next = *climate;
+  // Same climate -> no work. This runs inside every editor ApplyTerrainLayers
+  // (scene reload, texture re-import, palette edits) — without the guard each
+  // of those triggered a FULL world rebake.
+  if (memcmp(&next, &w->biomeClimate, sizeof(next)) == 0) return;
+  w->biomeClimate = next;
   BrushWorldRebakeAll(w); // re-compose every chunk's biome map
 }
 
@@ -1899,6 +1994,39 @@ void BrushWorldPaintFoliage(BrushWorld *w, Vector3 center, float radius,
   pthread_mutex_unlock(&w->sculptMutex);
 
   // Only the painted chunks re-bake (mask re-composes) + re-scatter.
+  SculptMarkDirty(w, center.x - radius, center.z - radius, center.x + radius,
+                  center.z + radius);
+}
+
+void BrushWorldPaintBiome(BrushWorld *w, Vector3 center, float radius,
+                          int biomeId, bool erase) {
+  if (radius <= 0.0f) return;
+  // A biome id is discrete (no blend weight to accumulate), so the stroke is a
+  // hard stamp: every grid sample inside the radius takes the id (or clears to
+  // BIOME_PAINT_NONE on erase). The soft border comes later, for free, from
+  // ComposeBiomeMap's neighbourhood blend over blendRadius.
+  unsigned char val =
+      erase ? BIOME_PAINT_NONE
+            : (unsigned char)((biomeId >= 0 && biomeId < BRUSH_MAX_BIOMES)
+                                  ? biomeId : 0);
+  float step = w->gridStep;
+  long g0x = (long)floorf((center.x - radius) / step);
+  long g1x = (long)ceilf((center.x + radius) / step);
+  long g0z = (long)floorf((center.z - radius) / step);
+  long g1z = (long)ceilf((center.z + radius) / step);
+  float r2 = radius * radius;
+
+  pthread_mutex_lock(&w->sculptMutex);
+  for (long gz = g0z; gz <= g1z; gz++)
+    for (long gx = g0x; gx <= g1x; gx++) {
+      float wx = (float)gx * step, wz = (float)gz * step;
+      float dx = wx - center.x, dz = wz - center.z;
+      if (dx * dx + dz * dz >= r2) continue;
+      *BiomePaintRW(w, gx, gz) = val;
+    }
+  pthread_mutex_unlock(&w->sculptMutex);
+
+  // Only the painted chunks re-bake (biome map re-composes) + re-scatter.
   SculptMarkDirty(w, center.x - radius, center.z - radius, center.x + radius,
                   center.z + radius);
 }
@@ -1935,12 +2063,16 @@ int BrushWorldSurfaceAt(BrushWorld *w, float wx, float wz) {
 }
 
 bool BrushWorldSculptAny(const BrushWorld *w) {
-  return w->tileCount > 0 || w->wtileCount > 0 || w->fmtileCount > 0;
+  // Any authored overlay that lives in the sculpt blob — biome paint included,
+  // or a biome-only edit would skip the save and be silently lost.
+  return w->tileCount > 0 || w->wtileCount > 0 || w->fmtileCount > 0 ||
+         w->btileCount > 0;
 }
 
 // Blob layout (also the .terrain file format). BSC2 appends the paint weights
-// after the height tiles; BSC3 appends the foliage density mask after that.
-// Older files (BSC1 heights-only, BSC2 heights+weights) still load.
+// after the height tiles; BSC3 appends the foliage density mask after that;
+// BSC4 appends the biome-paint override tiles (1 byte/sample) after that.
+// Older files (BSC1..BSC3) still load.
 //   u32 magic 'BSC3' | i32 tileRes | i32 count
 //   i32 rangeT0x rangeT0z rangeT1x rangeT1z   (tile range the blob covers)
 //   count  x { i32 tx, i32 tz, float[tileRes^2] }          (height deltas)
@@ -1951,11 +2083,12 @@ bool BrushWorldSculptAny(const BrushWorld *w) {
 #define SCULPT_MAGIC 0x31435342u  // "BSC1"
 #define SCULPT_MAGIC2 0x32435342u // "BSC2"
 #define SCULPT_MAGIC3 0x33435342u // "BSC3"
+#define SCULPT_MAGIC4 0x34435342u // "BSC4" (+ biome-paint tiles)
 
 static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
                                       int t1x, int t1z, int *outSize) {
   int n = w->tileRes * w->tileRes;
-  int count = 0, wcount = 0, fmcount = 0;
+  int count = 0, wcount = 0, fmcount = 0, bcount = 0;
   for (int i = 0; i < w->tileCount; i++) {
     SculptTile *t = &w->tiles[i];
     if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) count++;
@@ -1968,14 +2101,20 @@ static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
     FoliageMaskTile *t = &w->fmtiles[i];
     if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) fmcount++;
   }
+  for (int i = 0; i < w->btileCount; i++) {
+    BiomeTile *t = &w->btiles[i];
+    if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z) bcount++;
+  }
   int size = (int)(sizeof(unsigned int) + 7 * sizeof(int) +
                    (size_t)count * (2 * sizeof(int) + n * sizeof(float)) +
                    (size_t)wcount * (2 * sizeof(int) + (size_t)n * 4) +
                    sizeof(int) + // fmcount
-                   (size_t)fmcount * (2 * sizeof(int) + (size_t)n * 4));
+                   (size_t)fmcount * (2 * sizeof(int) + (size_t)n * 4) +
+                   sizeof(int) + // bcount
+                   (size_t)bcount * (2 * sizeof(int) + (size_t)n)); // 1 byte/sample
   unsigned char *blob = (unsigned char *)MemAlloc((unsigned int)size);
   unsigned char *p = blob;
-  *(unsigned int *)p = SCULPT_MAGIC3; p += 4;
+  *(unsigned int *)p = SCULPT_MAGIC4; p += 4;
   *(int *)p = w->tileRes; p += 4;
   *(int *)p = count; p += 4;
   *(int *)p = t0x; p += 4;
@@ -2005,6 +2144,14 @@ static unsigned char *SculptSerialize(BrushWorld *w, int t0x, int t0z,
     *(int *)p = t->tz; p += 4;
     memcpy(p, t->m, (size_t)n * 4); p += (size_t)n * 4;
   }
+  *(int *)p = bcount; p += 4;
+  for (int i = 0; i < w->btileCount; i++) {
+    BiomeTile *t = &w->btiles[i];
+    if (t->tx < t0x || t->tx > t1x || t->tz < t0z || t->tz > t1z) continue;
+    *(int *)p = t->tx; p += 4;
+    *(int *)p = t->tz; p += 4;
+    memcpy(p, t->b, (size_t)n); p += (size_t)n;
+  }
   if (outSize) *outSize = size;
   return blob;
 }
@@ -2025,10 +2172,13 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
   if (blob == NULL || size < 28) return;
   const unsigned char *p = blob;
   unsigned int magic = *(const unsigned int *)p;
-  if (magic != SCULPT_MAGIC && magic != SCULPT_MAGIC2 && magic != SCULPT_MAGIC3)
+  if (magic != SCULPT_MAGIC && magic != SCULPT_MAGIC2 &&
+      magic != SCULPT_MAGIC3 && magic != SCULPT_MAGIC4)
     return;
-  bool hasWeights = (magic == SCULPT_MAGIC2 || magic == SCULPT_MAGIC3);
-  bool hasMask = (magic == SCULPT_MAGIC3);
+  bool hasWeights = (magic == SCULPT_MAGIC2 || magic == SCULPT_MAGIC3 ||
+                     magic == SCULPT_MAGIC4);
+  bool hasMask = (magic == SCULPT_MAGIC3 || magic == SCULPT_MAGIC4);
+  bool hasBiome = (magic == SCULPT_MAGIC4);
   p += 4;
   int tileRes = *(const int *)p; p += 4;
   int count = *(const int *)p; p += 4;
@@ -2090,6 +2240,22 @@ void BrushWorldSculptRestore(BrushWorld *w, const unsigned char *blob,
       p += (size_t)n * 4;
     }
   }
+  if (hasBiome) {
+    // In-range biome tiles created after the snapshot return to no-override.
+    for (int i = 0; i < w->btileCount; i++) {
+      BiomeTile *t = &w->btiles[i];
+      if (t->tx >= t0x && t->tx <= t1x && t->tz >= t0z && t->tz <= t1z)
+        memset(t->b, BIOME_PAINT_NONE, (size_t)n);
+    }
+    int bcount = *(const int *)p; p += 4;
+    for (int i = 0; i < bcount; i++) {
+      int tx = *(const int *)p; p += 4;
+      int tz = *(const int *)p; p += 4;
+      BiomeTile *t = BiomeGet(w, tx, tz, true);
+      memcpy(t->b, p, (size_t)n);
+      p += (size_t)n;
+    }
+  }
   pthread_mutex_unlock(&w->sculptMutex);
 
   float tileWorld = w->gridStep * (float)w->tileRes;
@@ -2119,6 +2285,14 @@ bool BrushWorldSculptSave(BrushWorld *w, const char *path) {
   }
   for (int i = 0; i < w->fmtileCount; i++) {
     FoliageMaskTile *t = &w->fmtiles[i];
+    if (first) { t0x = t1x = t->tx; t0z = t1z = t->tz; first = false; }
+    if (t->tx < t0x) t0x = t->tx;
+    if (t->tx > t1x) t1x = t->tx;
+    if (t->tz < t0z) t0z = t->tz;
+    if (t->tz > t1z) t1z = t->tz;
+  }
+  for (int i = 0; i < w->btileCount; i++) {
+    BiomeTile *t = &w->btiles[i];
     if (first) { t0x = t1x = t->tx; t0z = t1z = t->tz; first = false; }
     if (t->tx < t0x) t0x = t->tx;
     if (t->tx > t1x) t1x = t->tx;

@@ -62,6 +62,8 @@ typedef struct BrushRenderState {
   int locHeightBlendLayer, locHeightBlendSharp;
   int locRoadEnabled, locRoadTile;
   int locRoadPom, locRoadPomScale, locRoadHeightBlend, locRoadBlendSharp, locRoadHasHeight;
+  int locBiomePalette, locBiomeGrassColor, locBiomeGroundOn, locBiomeOverlay;
+  float biomeOverlay; // last uploaded overlay strength (skip redundant sets)
   float specDefault; // uSpecStrength for draws without material props
   float terrainSpec; // uSpecStrength for terrain splat draws (near-matte)
   int locPointPos, locPointColor, locPointRadius, locPointCount;
@@ -168,6 +170,11 @@ void BrushRenderInit(int width, int height, float renderScale) {
     float on = (fn && fn[0] == '0') ? 0.0f : 1.0f;
     SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uTerrainFarNormal"), &on,
                    SHADER_UNIFORM_FLOAT); }
+  g_r.locBiomePalette = GetShaderLocation(g_r.lit, "uBiomePalette");
+  g_r.locBiomeGrassColor = GetShaderLocation(g_r.lit, "uBiomeGrassColor");
+  g_r.locBiomeGroundOn = GetShaderLocation(g_r.lit, "uBiomeGroundOn");
+  g_r.locBiomeOverlay = GetShaderLocation(g_r.lit, "uBiomeOverlay");
+  g_r.biomeOverlay = -1.0f; // force the first overlay upload after (re)load
   g_r.locLayerHeightOn = GetShaderLocation(g_r.lit, "uLayerHeightOn");
   g_r.locLayerHeightStart = GetShaderLocation(g_r.lit, "uLayerHeightStart");
   g_r.locLayerHeightFull = GetShaderLocation(g_r.lit, "uLayerHeightFull");
@@ -308,23 +315,31 @@ void BrushRenderSetGrassGround(Vector3 color, float strength, int growLayer,
 
 void BrushRenderSetBiomePalette(const int *palette) {
   if (palette == NULL) return;
-  int loc = GetShaderLocation(g_r.lit, "uBiomePalette");
-  if (loc >= 0) {
-    SetShaderValueV(g_r.lit, loc, palette, SHADER_UNIFORM_IVEC4, 16);
-  }
+  if (g_r.locBiomePalette >= 0)
+    SetShaderValueV(g_r.lit, g_r.locBiomePalette, palette, SHADER_UNIFORM_IVEC4,
+                    16);
 }
 
 void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count) {
   // Per-biome grass-ground tint colour (16 vec3, sRGB). count 0 turns it OFF so
   // the single uGrassGroundColor is used (a scene with no biome definitions —
   // e.g. the fallback climate — must not tint the ground to black biome 0).
-  if (colors != NULL) {
-    int loc = GetShaderLocation(g_r.lit, "uBiomeGrassColor");
-    if (loc >= 0) SetShaderValueV(g_r.lit, loc, colors, SHADER_UNIFORM_VEC3, 16);
-  }
+  if (colors != NULL && g_r.locBiomeGrassColor >= 0)
+    SetShaderValueV(g_r.lit, g_r.locBiomeGrassColor, colors, SHADER_UNIFORM_VEC3,
+                    16);
   float on = (count > 0) ? 1.0f : 0.0f;
-  SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uBiomeGroundOn"), &on,
-                 SHADER_UNIFORM_FLOAT);
+  SetShaderValue(g_r.lit, g_r.locBiomeGroundOn, &on, SHADER_UNIFORM_FLOAT);
+}
+
+void BrushRenderSetBiomeOverlay(float strength) {
+  // Editor paint helper: tint terrain toward each region's biome colour so the
+  // painted shapes are legible. 0 = off (the shipping/runtime default). Called
+  // every editor frame — skip the GL work unless the value actually changed.
+  if (strength < 0.0f) strength = 0.0f;
+  if (strength > 1.0f) strength = 1.0f;
+  if (strength == g_r.biomeOverlay) return;
+  g_r.biomeOverlay = strength;
+  SetShaderValue(g_r.lit, g_r.locBiomeOverlay, &strength, SHADER_UNIFORM_FLOAT);
 }
 
 // --- Point lights ----------------------------------------------------------

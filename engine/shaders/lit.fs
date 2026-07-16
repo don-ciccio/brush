@@ -74,6 +74,7 @@ uniform vec3  uGrassGroundColor;
 uniform float uGrassGroundStrength;
 uniform vec3  uBiomeGrassColor[16]; // per-biome grass-ground tint (Phase 2.4)
 uniform float uBiomeGroundOn;       // 1 = use per-biome colour instead of the single one
+uniform float uBiomeOverlay;        // editor paint helper: tint terrain by biome colour (0 = off)
 uniform int   uGrassGrowLayer;
 uniform float uGrassGroundFar;
 uniform float uTerrainFarNormal; // 1 = Phase B (keep+amplify normal far), 0 = fade flat
@@ -945,6 +946,19 @@ void main()
         vec3 b = texture(uBiomeMap, buv).rgb;
         color = mix(BiomeDebugColor(int(b.r * 255.0 + 0.5)),
                     BiomeDebugColor(int(b.g * 255.0 + 0.5)), b.b);
+    }
+
+    // Biome paint overlay (editor helper): tint the lit terrain toward each
+    // region's own biome colour (the swatch colour) so painted shapes read
+    // against the ground. Terrain only, off while a debug view is active.
+    if (uBiomeOverlay > 0.0 && uLayerView == 0 && uSplatEnabled > 0.5) {
+        vec2 ouv = ((fragPosition.xz - uSplatOrigin) / uSplatSize
+                        * (uSplatRes - 1.0) + 0.5) / uSplatRes;
+        vec3 ob = texture(uBiomeMap, ouv).rgb;
+        int oi0 = clamp(int(ob.r * 255.0 + 0.5), 0, 15);
+        int oi1 = clamp(int(ob.g * 255.0 + 0.5), 0, 15);
+        vec3 otint = mix(uBiomeGrassColor[oi0], uBiomeGrassColor[oi1], ob.b);
+        color = mix(color, otint, uBiomeOverlay);
     }
 
     finalColor = vec4(color, tex.a * colDiffuse.a * fragColor.a);
