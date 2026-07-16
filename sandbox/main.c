@@ -426,7 +426,9 @@ static void SandboxInit(void *user) {
         .avoidLayer = fl->avoidLayer,
         .avoidThreshold = fl->avoidThreshold,
         .avoidRoad = fl->avoidRoad,
-        .biomeId = fl->biomeId};
+        .biomeId = fl->biomeId,
+        .tree = fl->tree,
+        .billboardDist = fl->billboardDist};
     // Model palette: meshes + textures per resolved variant ({0} ->
     // procedural). ALL submeshes are carried (up to the cap), each with its
     // own material's albedo — a tree GLB keeps bark AND leaves.

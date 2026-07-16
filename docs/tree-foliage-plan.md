@@ -206,3 +206,20 @@ exactly as grass does (it already multiplies drawDistance).
   the lowest footprint edge touches ground, and (b) 4 road-coverage probes at
   0.8r (centre threshold tightened 0.5 -> 0.35). Small grass keeps the
   single-tap fast path bit-for-bit.
+- **Steps 3+4 DONE (2026-07-16):** `tree` flag end to end. Engine: tree
+  distance defaults when unset (0.004/m², 350/50 m; billboard = authored
+  `billboardDist` or min(90, draw/2)); thin-keep BYPASSED for tree layers
+  (`thinning` param on BrushFoliageCull); cull margins from real bounds —
+  per-layer `cullPad` = max variant extent (union radius OR height × scale ×
+  jitter) widens the instance FOV-cone test (new `pad` param), the cell
+  behind-camera test, and replaces the chunk-box `scale*10` guess; tree
+  impostor atlases scale with mesh height (64/m, 256–512 px) and get
+  mips + anisotropic (racer's anti-shimmer, trees.c:117). Scene: foliage
+  fields 30–31 (`tree`, `billboardDist`), old lines parse unchanged. Editor:
+  Tree checkbox (nudges 350/50/0.004/0.25/wind 0.15 once on toggle-ON) +
+  "Billboard From" slider (0 = auto). **Canopy wind needed NO work**: the
+  shader's bend is world-height-based with the base pinned (foliage.vs
+  `h = worldPos.y - baseWorld.y`) — trunk still, canopy sways; only
+  windStrength needs to stay low on tree layers (the nudge sets 0.15).
+  Grass regression: meadow placement identical. NEXT: step 5 — shadow
+  callback + foliage_depth cutout shader + instanced LOD shadow draw.

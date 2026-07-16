@@ -113,11 +113,15 @@ void BrushFoliageBuildGrid(BrushFoliageSet *set, Vector3 center, float width,
 // chunks by reusing the same batches (reset their counts once per frame first).
 // Pass billboardDistance > 0 and a non-NULL bbB for the 3-tier split (near <
 // lodDistance, far < billboardDistance, billboard < drawDistance); otherwise it
-// is a 2-tier near/far cull (bbB may be NULL).
+// is a 2-tier near/far cull (bbB may be NULL). `pad` widens the FOV-cone and
+// behind-camera tests by the layer's instance extent (a 15 m canopy must not
+// pop when its BASE leaves the cone); `thinning` false disables the outer-tier
+// density taper (tree layers: every instance draws to the cull edge).
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                      float billboardDistance, BrushFoliageDrawBatch *nearB,
-                      BrushFoliageDrawBatch *farB, BrushFoliageDrawBatch *bbB);
+                      float billboardDistance, float pad, bool thinning,
+                      BrushFoliageDrawBatch *nearB, BrushFoliageDrawBatch *farB,
+                      BrushFoliageDrawBatch *bbB);
 
 // Free the set's instance + grid buffers (safe on a zeroed/partial set).
 void BrushFoliageSetCleanup(BrushFoliageSet *set);
@@ -211,6 +215,14 @@ typedef struct BrushFoliageLayerConfig {
                         // mask, independent of the terrain layers)
   int   biomeId;        // grow only in this biome (-1 = all biomes); density is
                         // scaled by the biome weight so layers fade at borders
+  // Tree archetype (docs/tree-foliage-plan.md): never thins with distance (a
+  // vanishing tree is a bug, a vanishing tuft is a feature), tree-scale
+  // distance defaults when unset (350/50/90), taller impostor atlas, and the
+  // cull margins account for the real mesh extent. Canopy wind needs no flag:
+  // the shader's bend is world-height-based with the base pinned — keep the
+  // layer's windStrength LOW (~0.15) or a 15 m canopy sways metres.
+  bool  tree;
+  float billboardDist;  // mesh -> impostor switch (m); 0 = auto
 } BrushFoliageLayerConfig;
 
 typedef struct BrushFoliage BrushFoliage;

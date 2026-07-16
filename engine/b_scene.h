@@ -141,6 +141,9 @@ typedef struct BrushSceneFoliageLayer {
   float avoidThreshold; // 0..1 (0 -> default 0.5)
   bool  avoidRoad;     // exclude foliage from the road surface (default on)
   int   biomeId;       // grow only in biome N (-1 = all) — biome-gated scatter
+  bool  tree;          // tree archetype: no distance thinning, tree-scale
+                       // distance defaults, taller impostor atlas, cull margins
+  float billboardDist; // mesh -> impostor switch (m); 0 = auto
   Model modelRes[BRUSH_SCENE_FOLIAGE_MODELS]; // resolved (not saved)
   Texture2D albedoTex; // resolved (not saved)
 } BrushSceneFoliageLayer;

@@ -182,13 +182,16 @@ static bool CullWalkBegin(const BrushFoliageSet *set, Vector3 viewPos,
 // camera in third person). Returns false to skip.
 static inline bool InstanceVisible(const BrushFoliageSet *set, int i,
                                    Vector3 viewPos, float fwdX, float fwdZ,
-                                   float maxDist2, float *dist2Out) {
+                                   float maxDist2, float pad, float *dist2Out) {
   float dx = set->positions[i].x - viewPos.x;
   float dz = set->positions[i].z - viewPos.z;
   float dist2 = dx * dx + dz * dz;
   if (dist2 > maxDist2) return false;
   if (dist2 >= 36.0f) {
-    float projDist = dx * fwdX + dz * fwdZ;
+    // `pad` slackens the cone by the instance's extent: the tests are on the
+    // BASE point, but a wide/tall canopy is visible before its base enters
+    // the 60-degree cone (grass pad ~0, trees pad = their bounds).
+    float projDist = dx * fwdX + dz * fwdZ + pad;
     if (projDist < 0.0f) return false;                     // behind camera
     if (projDist * projDist < 0.25f * dist2) return false; // cos(60 deg)^2
   }
@@ -236,8 +239,9 @@ static inline bool BrushFoliageThinKeep(float x, float z, float dist,
 
 void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
                       Vector3 viewTarget, float drawDistance, float lodDistance,
-                      float billboardDistance, BrushFoliageDrawBatch *nearB,
-                      BrushFoliageDrawBatch *farB, BrushFoliageDrawBatch *bbB) {
+                      float billboardDistance, float pad, bool thinning,
+                      BrushFoliageDrawBatch *nearB, BrushFoliageDrawBatch *farB,
+                      BrushFoliageDrawBatch *bbB) {
   CullWalk w;
   if (!CullWalkBegin(set, viewPos, viewTarget, drawDistance, &w)) return;
 
@@ -258,7 +262,7 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
       float cwx = set->originX + (cx + 0.5f) * set->cellSize;
       float cwz = set->originZ + (cz + 0.5f) * set->cellSize;
       float projC = (cwx - viewPos.x) * w.fwdX + (cwz - viewPos.z) * w.fwdZ;
-      if (projC < -(w.cellRadiusWorld + 4.0f)) continue;
+      if (projC < -(w.cellRadiusWorld + 4.0f + pad)) continue;
 
       float dx = cwx - viewPos.x;
       float dz = cwz - viewPos.z;
@@ -279,7 +283,9 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
 
       if (fullyInCone && (fullyNear || fullyFar || fullyBB)) {
         BrushFoliageDrawBatch *dst = fullyNear ? nearB : (fullyFar ? farB : bbB);
-        bool thin = (dst == bbB); // outer tier tapers density into the terrain
+        // Outer tier tapers density into the terrain — unless thinning is off
+        // (tree layers: a vanishing tree is a bug, a vanishing tuft a feature).
+        bool thin = (dst == bbB) && thinning;
         for (int k = 0; k < cell->count; k++) {
           int i = set->gridIndices[cell->offset + k];
           if (thin && !BrushFoliageThinKeep(set->positions[i].x, set->positions[i].z,
@@ -292,7 +298,8 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
         for (int k = 0; k < cell->count; k++) {
           int i = set->gridIndices[cell->offset + k];
           float dist2;
-          if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, &dist2))
+          if (!InstanceVisible(set, i, viewPos, w.fwdX, w.fwdZ, maxDist2, pad,
+                               &dist2))
             continue;
           float dist = sqrtf(dist2);
           unsigned char mi = set->modelIdx ? set->modelIdx[i] : 0;
@@ -305,8 +312,9 @@ void BrushFoliageCull(const BrushFoliageSet *set, Vector3 viewPos,
             BatchAppend(farB, mi, set->transforms[i]);
           }
           if (useBB && dist >= billboardDistance - tFar &&
-              BrushFoliageThinKeep(set->positions[i].x, set->positions[i].z,
-                                   dist, billboardDistance, drawDistance)) {
+              (!thinning ||
+               BrushFoliageThinKeep(set->positions[i].x, set->positions[i].z,
+                                    dist, billboardDistance, drawDistance))) {
             BatchAppend(bbB, mi, set->transforms[i]);
           }
         }
@@ -661,6 +669,8 @@ typedef struct BrushFoliageLayer {
   RenderTexture2D impostorNrmRT[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // normal atlas
   bool hasImpostor[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   float billboardDistance; // 0 = no billboard band (2-tier)
+  float cullPad; // worst-case instance extent (m): widens the cull cone +
+                 // chunk frustum box so tall/wide models never pop at edges
   BrushFoliageDrawBatch nearB, farB, bbB; // per-model visible buffers (main thread)
   int lastNear, lastFar; // visible counts from the last draw (editor stats)
 } BrushFoliageLayer;
@@ -813,8 +823,16 @@ static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L,
   if (bw <= 0.001f) bw = 0.5f;
   if (bh <= 0.001f) bh = 1.0f;
 
+  // Atlas height: grass keeps the tuned 256; TREE variants scale with the
+  // real mesh height (a 15 m canopy at 256 px smears — racer sized impostors
+  // by height and filtered anisotropically for the same reason).
   int rtH = 256;
-  int rtW = (int)lroundf(256.0f * (2.0f * bw) / bh);
+  if (L->cfg.tree) {
+    rtH = (int)lroundf(64.0f * maxY);
+    if (rtH < 256) rtH = 256;
+    if (rtH > 512) rtH = 512;
+  }
+  int rtW = (int)lroundf((float)rtH * (2.0f * bw) / bh);
   if (rtW < 32) rtW = 32; if (rtW > 1024) rtW = 1024;
   RenderTexture2D albedoRT = LoadRenderTexture(rtW, rtH);
   RenderTexture2D nrmRT = LoadRenderTexture(rtW, rtH);
@@ -823,6 +841,16 @@ static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L,
   float D = bw + bh + 1.0f; // ortho eye distance (rotation-free front view)
   BrushFoliageBakePass(f, L, m, albedoRT, bw, bh, D, 1.0f); // albedo
   BrushFoliageBakePass(f, L, m, nrmRT, bw, bh, D, 2.0f);    // normal
+  if (L->cfg.tree) {
+    // Tree billboards live at 90-350 m — heavy minification. Racer's fix
+    // (trees.c): mips + anisotropic filtering, or the atlas shimmers into
+    // pixel dots at distance. Grass atlases stay bilinear (near-constant
+    // on-screen size across their short band).
+    GenTextureMipmaps(&albedoRT.texture);
+    GenTextureMipmaps(&nrmRT.texture);
+    SetTextureFilter(albedoRT.texture, TEXTURE_FILTER_ANISOTROPIC_8X);
+    SetTextureFilter(nrmRT.texture, TEXTURE_FILTER_ANISOTROPIC_8X);
+  }
   float zero = 0.0f;
   SetShaderValue(f->shader, f->locImpostorBake, &zero, SHADER_UNIFORM_FLOAT); // back to draw mode
 
@@ -843,9 +871,12 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   if (f->layerCount >= BRUSH_FOLIAGE_MAX_LAYERS) return -1;
   BrushFoliageLayer *L = &f->layers[f->layerCount];
   L->cfg = *cfg;
-  if (L->cfg.density <= 0.0f) L->cfg.density = 1.0f;
-  if (L->cfg.drawDistance <= 0.0f) L->cfg.drawDistance = 80.0f;
-  if (L->cfg.lodDistance <= 0.0f) L->cfg.lodDistance = L->cfg.drawDistance * 0.4f;
+  if (L->cfg.density <= 0.0f) L->cfg.density = L->cfg.tree ? 0.004f : 1.0f;
+  // Tree-scale distance defaults (spec: 50 near -> 90 billboard -> 350 cull).
+  if (L->cfg.drawDistance <= 0.0f) L->cfg.drawDistance = L->cfg.tree ? 350.0f : 80.0f;
+  if (L->cfg.lodDistance <= 0.0f)
+    L->cfg.lodDistance = L->cfg.tree ? fminf(50.0f, L->cfg.drawDistance * 0.15f)
+                                     : L->cfg.drawDistance * 0.4f;
   if (L->cfg.scale <= 0.0f) L->cfg.scale = 1.0f;
   if (L->cfg.farKeepRatio <= 0.0f) L->cfg.farKeepRatio = 0.4f;
   if (L->cfg.macroLow.x == 0 && L->cfg.macroLow.y == 0 && L->cfg.macroLow.z == 0)
@@ -870,6 +901,7 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   if (mc <= 0) mc = 1;
   if (mc > BRUSH_FOLIAGE_MODELS_PER_LAYER) mc = BRUSH_FOLIAGE_MODELS_PER_LAYER;
   L->meshCount = mc;
+  float layerExt = 0.6f; // worst-case variant extent (m, model units x variant scale)
   for (int m = 0; m < mc; m++) {
     int sc = (cfg->meshCount > 0) ? cfg->subCount[m] : 0;
     if (sc <= 0) sc = 1;
@@ -886,14 +918,15 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
     // built from it share the same grounded base, so nothing jumps at the LOD
     // boundary. Idempotent: re-running subtracts ~0 and skips the GPU update.
     if (fromModel) {
-      float minX = 1e9f, maxX = -1e9f, minY = 1e9f, minZ = 1e9f, maxZ = -1e9f;
+      float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f, minZ = 1e9f,
+            maxZ = -1e9f;
       for (int s = 0; s < L->subCount[m]; s++) {
         Mesh sm = cfg->meshes[m][s];
         if (!sm.vertices) continue;
         for (int v = 0; v < sm.vertexCount; v++) {
           float x = sm.vertices[v * 3], y = sm.vertices[v * 3 + 1], z = sm.vertices[v * 3 + 2];
           if (x < minX) minX = x; if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
+          if (y < minY) minY = y; if (y > maxY) maxY = y;
           if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
         }
       }
@@ -902,6 +935,11 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
       // so computing from the pre-grounding bounds is exact.
       L->cfg.baseRadius[m] =
           fmaxf(maxX - minX, maxZ - minZ) * 0.5f;
+      // Worst-case extent (radius or height) for the layer cull pad, at this
+      // variant's authored scale.
+      float vs = (cfg->meshScale[m] > 0.0f) ? cfg->meshScale[m] : 1.0f;
+      float ext = fmaxf(L->cfg.baseRadius[m], maxY - minY) * vs;
+      if (ext > layerExt) layerExt = ext;
       float ox = (minX + maxX) * 0.5f, oy = minY, oz = (minZ + maxZ) * 0.5f;
       if (fabsf(ox) > 1e-4f || fabsf(oy) > 1e-4f || fabsf(oz) > 1e-4f) {
         for (int s = 0; s < L->subCount[m]; s++) {
@@ -950,10 +988,20 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
   // Billboard band covers the outer ~60% of the far range (mesh near, impostor
   // far); 0 disables it. A wider band means the impostors dissolve (height-fade)
   // over a LONGER distance, melting into the ground/speckles instead of a hard
-  // bright edge. Kept short of drawDistance's fade so the swap hides.
-  L->billboardDistance = (f->impostor)
-      ? L->cfg.lodDistance + (L->cfg.drawDistance - L->cfg.lodDistance) * 0.4f
-      : 0.0f;
+  // bright edge. Kept short of drawDistance's fade so the swap hides. Authored
+  // billboardDist (or the tree default of 90 m) overrides the derivation.
+  L->billboardDistance =
+      (f->impostor)
+          ? ((L->cfg.billboardDist > 0.0f)
+                 ? L->cfg.billboardDist
+                 : (L->cfg.tree
+                        ? fminf(90.0f, L->cfg.drawDistance * 0.5f)
+                        : L->cfg.lodDistance +
+                              (L->cfg.drawDistance - L->cfg.lodDistance) * 0.4f))
+          : 0.0f;
+  // Worst-case instance extent for the cull margins (cone + chunk box): a
+  // 15 m canopy must not pop when its BASE leaves the view cone.
+  L->cullPad = layerExt * L->cfg.scale * (1.0f + L->cfg.scaleJitter);
 
   // Per-model visible buffers, each sized to the layer's worst-case (one variant
   // could dominate). The cull bounds-checks, so undersizing only drops instances.
@@ -1274,9 +1322,10 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       float dz = (camZ < minZ) ? (minZ - camZ) : ((camZ > maxZ) ? (camZ - maxZ) : 0.0f);
       if (dx * dx + dz * dz > draw * draw) continue;
 
-      // Frustum culling: chunk AABB with foliage height padding
-      // Pad X/Z to prevent large models/trees from popping when their root chunk is off-screen.
-      float pad = L->cfg.scale * 10.0f;
+      // Frustum culling: chunk AABB padded by the layer's worst-case instance
+      // extent (union mesh bounds x scale) so tall/wide models never pop when
+      // their root chunk leaves the frustum.
+      float pad = L->cullPad;
       if (pad < 5.0f) pad = 5.0f;
       BoundingBox chunkBox = {
         .min = { minX - pad, -50.0f, minZ - pad },
@@ -1285,7 +1334,8 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
       if (!BrushFrustumContainsBox(&frustum, chunkBox)) continue;
 
       BrushFoliageCull(&H->sets[li], cam.position, cam.target, draw, lod,
-                       bbDist, &L->nearB, &L->farB, &L->bbB);
+                       bbDist, L->cullPad, !L->cfg.tree, &L->nearB, &L->farB,
+                       &L->bbB);
     }
     int nc = 0, fc = 0, bc = 0;
     for (int m = 0; m < L->meshCount; m++) {

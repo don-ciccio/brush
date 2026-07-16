@@ -301,6 +301,8 @@ static void BuildFoliageLayers() {
         c.avoidThreshold = fl->avoidThreshold;
         c.avoidRoad = fl->avoidRoad;
         c.biomeId = fl->biomeId;
+        c.tree = fl->tree;
+        c.billboardDist = fl->billboardDist;
         // Model palette: meshes + textures per resolved variant ({0} ->
         // procedural). ALL of the model's submeshes are carried (up to the
         // cap), each with its own material's albedo — a tree GLB keeps its
@@ -2868,6 +2870,32 @@ int main(int argc, char **argv) {
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Keep this foliage off the road surface (its own\n"
                                       "coverage mask, independent of the terrain layers).");
+                if (ImGui::Checkbox("Tree", &fl->tree)) {
+                    if (fl->tree) {
+                        // Nudge tree-scale defaults once on flipping ON (all
+                        // still hand-editable afterwards). Trees: sparse, seen
+                        // far, gentle canopy sway, hard far-LOD decimation.
+                        fl->drawDistance = 350.0f;
+                        fl->lodDistance = 50.0f;
+                        fl->density = 0.004f;
+                        fl->farKeepRatio = 0.25f;
+                        fl->windStrength = 0.15f;
+                    }
+                    g_dirty = true; g_foliageResyncPending = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Tree archetype: never thins with distance, tree-scale\n"
+                                      "defaults (nudged when toggled ON), taller impostor\n"
+                                      "atlas, cull margins sized to the real mesh bounds.");
+                if (fl->tree) {
+                    if (ImGui::SliderFloat("Billboard From", &fl->billboardDist,
+                                           0.0f, 200.0f,
+                                           fl->billboardDist < 0.5f ? "auto" : "%.0f m"))
+                        { g_dirty = true; g_foliageResyncPending = true; }
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Distance where the 3D mesh hands over to the baked\n"
+                                          "billboard impostor (auto = min(90 m, half draw distance)).");
+                }
 
                 ImGui::Spacing();
                 if (g_selectedFoliage < BRUSH_FOLIAGE_PAINT_MAX) {
