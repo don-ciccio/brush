@@ -160,6 +160,8 @@ typedef struct BrushSceneBiome {
   // biome_mood line changes nothing).
   float moodExposure; // exposure multiplier
   float moodFog;      // volumetric-fog density multiplier
+  Color moodAmbient;  // ambient-light tint multiplier (white = neutral) — the
+                      // strongest lever: dark/cool forest, warm/bright desert
 } BrushSceneBiome;
 
 typedef struct BrushScene {

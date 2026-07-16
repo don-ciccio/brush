@@ -76,6 +76,7 @@ typedef struct BrushRenderState {
   Vector3 sunDir;   // the directional LIGHT (sun by day, moon at night)
   Vector3 sunColor;
   Vector3 ambient;  // ambient fill color (linear)
+  Vector3 biomeAmbientMul; // per-biome ambient mood multiplier (1,1,1 = neutral)
   Vector3 skySunDir; // the actual sun, even below the horizon (sky shading)
   Vector3 moonDir;
   bool skyEnabled;
@@ -170,6 +171,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
     float on = (fn && fn[0] == '0') ? 0.0f : 1.0f;
     SetShaderValue(g_r.lit, GetShaderLocation(g_r.lit, "uTerrainFarNormal"), &on,
                    SHADER_UNIFORM_FLOAT); }
+  g_r.biomeAmbientMul = (Vector3){1.0f, 1.0f, 1.0f}; // neutral mood
   g_r.locBiomePalette = GetShaderLocation(g_r.lit, "uBiomePalette");
   g_r.locBiomeGrassColor = GetShaderLocation(g_r.lit, "uBiomeGrassColor");
   g_r.locBiomeGroundOn = GetShaderLocation(g_r.lit, "uBiomeGroundOn");
@@ -269,7 +271,10 @@ Shader BrushGetLitShader(void) { return g_r.lit; }
 void BrushSetSun(Vector3 dir, Vector3 color, Vector3 ambient) {
   g_r.sunDir = Vector3Normalize(dir);
   g_r.sunColor = color;
-  g_r.ambient = ambient;
+  // Per-biome ambient mood: a multiplier over whatever authority set the
+  // ambient (time-of-day or a static-sun game), so a forest can read dark and
+  // cool under canopy without fighting the day/night cycle. Neutral = 1,1,1.
+  g_r.ambient = Vector3Multiply(ambient, g_r.biomeAmbientMul);
   g_r.skySunDir = g_r.sunDir; // static-sun games: sky follows the light
   SetShaderValue(g_r.lit, g_r.locSunDir, &g_r.sunDir, SHADER_UNIFORM_VEC3);
   SetShaderValue(g_r.lit, g_r.locSunColor, &g_r.sunColor,
@@ -329,6 +334,12 @@ void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count) {
                     16);
   float on = (count > 0) ? 1.0f : 0.0f;
   SetShaderValue(g_r.lit, g_r.locBiomeGroundOn, &on, SHADER_UNIFORM_FLOAT);
+}
+
+void BrushRenderSetBiomeAmbientMul(Vector3 mul) {
+  // Applied inside BrushSetSun, i.e. picked up on the next time-of-day apply
+  // (every frame in practice). Driven smoothed by BrushSceneUpdateBiomeMood.
+  g_r.biomeAmbientMul = mul;
 }
 
 void BrushRenderSetMaterialTiles(const float *tiles, int count) {

@@ -51,6 +51,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   memset(palTok, 0, sizeof(palTok));
   // Per-id mood lines, applied post-loop like the palette tokens.
   float moodExp[BRUSH_MAX_BIOMES], moodFog[BRUSH_MAX_BIOMES];
+  Color moodAmb[BRUSH_MAX_BIOMES];
   bool moodSet[BRUSH_MAX_BIOMES] = {false};
   while (*cursor != '\0') {
     char *line = cursor;
@@ -145,12 +146,18 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
                       &flicker) >= 6) {
       if (sscanf(p, "biome_climate %*f %*f %*f %*f %*f %*f %d", &flicker) == 1)
         temp.climate.seed = (unsigned int)flicker;
-    } else if (sscanf(p, "biome_mood %d %f %f", &flicker, &x, &y) == 3) {
-      // biome_mood <id> <exposureMul> <fogMul> — collected per ID, applied
-      // after the parse loop (order-independent, like the palette tokens).
+    } else if ((n = sscanf(p, "biome_mood %d %f %f %d %d %d", &flicker, &x, &y,
+                           &ir, &ig, &ib)) >= 3) {
+      // biome_mood <id> <exposureMul> <fogMul> [ambR ambG ambB] — collected
+      // per ID, applied after the parse loop (order-independent, like the
+      // palette tokens). The ambient tint is optional (older saves).
       if (flicker >= 0 && flicker < BRUSH_MAX_BIOMES) {
         moodExp[flicker] = x;
         moodFog[flicker] = y;
+        moodAmb[flicker] = (n >= 6)
+                               ? (Color){(unsigned char)ir, (unsigned char)ig,
+                                         (unsigned char)ib, 255}
+                               : (Color){255, 255, 255, 255};
         moodSet[flicker] = true;
       }
     } else if (strncmp(p, "biome ", 6) == 0 &&
@@ -173,6 +180,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         bm->priority = (n >= 6) ? a : 0.0f;
         bm->moodExposure = 1.0f; // neutral until a biome_mood line overrides
         bm->moodFog = 1.0f;
+        bm->moodAmbient = (Color){255, 255, 255, 255};
         const char *tk[BRUSH_TERRAIN_LAYERS] = {w2, w3, w4, w5};
         for (int pi = 0; pi < BRUSH_TERRAIN_LAYERS; pi++) {
           bm->palette[pi] = -1; // resolved from palTok after the parse loop
@@ -354,6 +362,7 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         moodSet[temp.biomes[i].id]) {
       temp.biomes[i].moodExposure = moodExp[temp.biomes[i].id];
       temp.biomes[i].moodFog = moodFog[temp.biomes[i].id];
+      temp.biomes[i].moodAmbient = moodAmb[temp.biomes[i].id];
     }
 
   temp.modTime = GetFileModTime(path);
@@ -481,9 +490,12 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
     }
     for (int i = 0; i < s->biomeCount; i++) { // only non-neutral moods
       const BrushSceneBiome *bm = &s->biomes[i];
-      if (bm->moodExposure != 1.0f || bm->moodFog != 1.0f)
-        fprintf(f, "biome_mood %d %g %g\n", bm->id, bm->moodExposure,
-                bm->moodFog);
+      bool ambNeutral = (bm->moodAmbient.r == 255 && bm->moodAmbient.g == 255 &&
+                         bm->moodAmbient.b == 255);
+      if (bm->moodExposure != 1.0f || bm->moodFog != 1.0f || !ambNeutral)
+        fprintf(f, "biome_mood %d %g %g %d %d %d\n", bm->id, bm->moodExposure,
+                bm->moodFog, bm->moodAmbient.r, bm->moodAmbient.g,
+                bm->moodAmbient.b);
     }
     fprintf(f, "biome_climate %g %g %g %g %g %g %u\n", s->climate.tempScale,
             s->climate.moistScale, s->climate.lapse, s->climate.seaLevel,
@@ -873,15 +885,20 @@ void BrushSceneUpdateBiomeMood(const BrushScene *s, const BrushBiomeSample *at,
   // Target mood = the two biomes at the camera blended by the field, matched
   // by ID (list order can differ). Missing/undefined ids are neutral.
   float te = 1.0f, tf = 1.0f;
+  Vector3 ta = {1.0f, 1.0f, 1.0f};
   if (s != NULL && s->biomeCount > 0 && at != NULL) {
     float e0 = 1.0f, f0 = 1.0f, e1 = 1.0f, f1 = 1.0f;
+    Vector3 a0 = {1, 1, 1}, a1 = {1, 1, 1};
     for (int i = 0; i < s->biomeCount; i++) {
       const BrushSceneBiome *bm = &s->biomes[i];
-      if (bm->id == at->id0) { e0 = bm->moodExposure; f0 = bm->moodFog; }
-      if (bm->id == at->id1) { e1 = bm->moodExposure; f1 = bm->moodFog; }
+      Vector3 amb = {bm->moodAmbient.r / 255.0f, bm->moodAmbient.g / 255.0f,
+                     bm->moodAmbient.b / 255.0f};
+      if (bm->id == at->id0) { e0 = bm->moodExposure; f0 = bm->moodFog; a0 = amb; }
+      if (bm->id == at->id1) { e1 = bm->moodExposure; f1 = bm->moodFog; a1 = amb; }
     }
     te = e0 + (e1 - e0) * at->blend;
     tf = f0 + (f1 - f0) * at->blend;
+    ta = Vector3Lerp(a0, a1, at->blend);
   }
   BrushPost *pp = BrushRenderGetPost();
   if (pp == NULL) return;
@@ -891,6 +908,9 @@ void BrushSceneUpdateBiomeMood(const BrushScene *s, const BrushBiomeSample *at,
   if (k > 1.0f) k = 1.0f;
   pp->biomeExposureMul += (te - pp->biomeExposureMul) * k;
   pp->biomeFogMul += (tf - pp->biomeFogMul) * k;
+  static Vector3 sAmb = {1.0f, 1.0f, 1.0f}; // eased ambient mood state
+  sAmb = Vector3Lerp(sAmb, ta, k);
+  BrushRenderSetBiomeAmbientMul(sAmb);
 }
 
 void BrushSceneCaptureRenderSettings(BrushScene *s) {

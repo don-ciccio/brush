@@ -121,6 +121,11 @@ void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count);
 // runtime; the editor drives it while the Biome paint tool is active.
 void BrushRenderSetBiomeOverlay(float strength);
 
+// Per-biome ambient mood: multiplies the ambient fill colour set by the
+// time-of-day (or a static sun) — 1,1,1 = neutral. Smoothed by the scene's
+// biome-mood update; don't drive it with raw per-frame targets.
+void BrushRenderSetBiomeAmbientMul(Vector3 mul);
+
 // Uploads metres-per-repeat per terrain-array slice (= per material), so a
 // biome palette that swaps a slot's material keeps that material's authored
 // tiling. Called from the world's array builder; slices >= count pad to 1.0.

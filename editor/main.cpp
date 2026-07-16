@@ -185,6 +185,8 @@ static int g_paintLayer = 1;       // painted layer (0 is the base coat)
 static bool g_roadActive = false;  // sculpt-mode Road spline tool
 static bool g_foliagePaintActive = false; // sculpt-mode foliage-density paint tool
 static bool g_biomePaintActive = false;   // sculpt-mode biome-id paint tool
+static BrushBiomeSample g_camBiome = {0, 0, 0.0f}; // biome under the camera
+static bool g_camBiomeValid = false;               // (Biomes panel readout)
 static int g_biomePaintId = -1;            // biome id the Biome tool stamps
 static int g_selectedBiome = -1;           // active biome in the Biomes panel
 static int g_selectedRoadIdx = -1;
@@ -1531,10 +1533,11 @@ int main(int argc, char **argv) {
         BrushWorldUpdate(g_world, g_camera.cam.position);
         BrushFoliageUpdate(g_foliage, (float)GetTime(), 1.0f);
         { // per-biome mood follows the editor camera too (live preview)
-            BrushBiomeSample bs;
-            bool have = g_world && BrushWorldBiomeAt(g_world, g_camera.cam.position.x,
-                                                     g_camera.cam.position.z, &bs);
-            BrushSceneUpdateBiomeMood(&g_scene, have ? &bs : NULL, dt);
+            g_camBiomeValid = g_world &&
+                              BrushWorldBiomeAt(g_world, g_camera.cam.position.x,
+                                                g_camera.cam.position.z, &g_camBiome);
+            BrushSceneUpdateBiomeMood(&g_scene,
+                                      g_camBiomeValid ? &g_camBiome : NULL, dt);
         }
         // Nothing is dynamic here, but Jolt's broadphase does its node
         // maintenance inside Update — without stepping, editing churn
@@ -2897,6 +2900,30 @@ int main(int argc, char **argv) {
         // palette). The FIELD that places them is the climate (Whittaker) plus
         // the Biome paint tool; this panel is what those index into.
         if (ImGui::CollapsingHeader("Biomes")) {
+            // Live readout: which biome the CAMERA is in and the mood values
+            // actually reaching the renderer — proves at a glance whether the
+            // field, the blend, and the mood pipeline are doing anything.
+            if (g_scene.biomeCount > 0) {
+                const char *n0 = "?", *n1 = "?";
+                for (int i = 0; i < g_scene.biomeCount; i++) {
+                    if (g_scene.biomes[i].id == g_camBiome.id0 && g_scene.biomes[i].name[0])
+                        n0 = g_scene.biomes[i].name;
+                    if (g_scene.biomes[i].id == g_camBiome.id1 && g_scene.biomes[i].name[0])
+                        n1 = g_scene.biomes[i].name;
+                }
+                if (!g_camBiomeValid)
+                    ImGui::TextDisabled("camera: (no biome data here)");
+                else if (g_camBiome.blend < 0.01f || g_camBiome.id0 == g_camBiome.id1)
+                    ImGui::TextDisabled("camera: %s", n0);
+                else
+                    ImGui::TextDisabled("camera: %s > %s (%.0f%%)", n0, n1,
+                                        g_camBiome.blend * 100.0f);
+                BrushPost *mpp = BrushRenderGetPost();
+                if (mpp)
+                    ImGui::TextDisabled("mood now: exposure %.2fx  fog %.2fx",
+                                        mpp->biomeExposureMul, mpp->biomeFogMul);
+                ImGui::Separator();
+            }
             for (int i = 0; i < g_scene.biomeCount; i++) {
                 BrushSceneBiome *bm = &g_scene.biomes[i];
                 ImGui::PushID(i);
@@ -2966,17 +2993,30 @@ int main(int argc, char **argv) {
                 // the camera enters the biome. Render-only (no rebake) — the
                 // per-frame mood update picks the values up live.
                 if (ImGui::SliderFloat("Mood: exposure", &bm->moodExposure,
-                                       0.5f, 1.5f, "%.2fx"))
+                                       0.25f, 2.0f, "%.2fx"))
                     g_dirty = true;
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Exposure multiplier inside this biome\n"
                                       "(<1 darker forest, >1 bright desert).");
-                if (ImGui::SliderFloat("Mood: fog", &bm->moodFog, 0.0f, 4.0f,
+                if (ImGui::SliderFloat("Mood: fog", &bm->moodFog, 0.0f, 8.0f,
                                        "%.2fx"))
                     g_dirty = true;
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Volumetric-fog density multiplier inside this\n"
-                                      "biome (needs Volumetric Fog enabled to show).");
+                                      "biome (needs Volumetric Fog enabled to show;\n"
+                                      "height fog thins above its top altitude).");
+                float ma[3] = {bm->moodAmbient.r / 255.0f, bm->moodAmbient.g / 255.0f,
+                               bm->moodAmbient.b / 255.0f};
+                if (ImGui::ColorEdit3("Mood: ambient", ma)) {
+                    bm->moodAmbient = (Color){(unsigned char)(ma[0] * 255.0f + 0.5f),
+                                              (unsigned char)(ma[1] * 255.0f + 0.5f),
+                                              (unsigned char)(ma[2] * 255.0f + 0.5f), 255};
+                    g_dirty = true;
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Ambient-light tint inside this biome — the strongest\n"
+                                      "mood lever (dark cool forest, warm bright desert).\n"
+                                      "White = neutral. Multiplies the time-of-day ambient.");
 
                 ImGui::TextDisabled("Terrain palette (per splat slot)");
                 for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) {
