@@ -167,7 +167,7 @@ void main() {
     //    reads as noise or banding.
     float grain = hash12(uv * uResolution + fract(uTime) * 1000.0);
     float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-    float grainIntensity = 0.001 * smoothstep(0.0, 0.18, luma) *
+    float grainIntensity = 0.0005 * smoothstep(0.0, 0.18, luma) *
                            (1.0 - smoothstep(0.82, 1.0, luma));
     col += (grain - 0.5) * grainIntensity;
 

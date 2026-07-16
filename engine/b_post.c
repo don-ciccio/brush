@@ -145,7 +145,11 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->blurPasses = 1;
   pp->exposure = EnvF("BRUSH_EXPOSURE", 1.0f);
   pp->sharpenEnabled = (getenv("BRUSH_NO_SHARPEN") == NULL);
-  pp->sharpenAmount = EnvF("BRUSH_SHARPEN", 0.10f);
+  // Bumped from 0.10: the HDR scene renders at logical res and upscales to the
+  // retina backbuffer, so fine detail (grass strands, POM relief) softens; a
+  // firmer CAS pass claws back definition without the ~4x heat of a full-res
+  // scene. BRUSH_SHARPEN overrides.
+  pp->sharpenAmount = EnvF("BRUSH_SHARPEN", 0.22f);
   pp->ssaoEnabled = (getenv("BRUSH_NO_SSAO") == NULL);
   pp->ssaoRadius = EnvF("BRUSH_SSAO_RADIUS", 0.5f);
   // Bias/strength are the donor's TUNED values. The bias operates in the
