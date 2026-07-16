@@ -249,3 +249,19 @@ exactly as grass does (it already multiplies drawDistance).
   vanish at 175 m — a bug, not a setting; racer never distance-culled trees).
   NOTE: the handle swap was already atomic (pending->live at finalize), so
   rebakes never blink — the instability was purely decision inputs.
+- **THE actual bug — blank impostor atlases (2026-07-16, found by
+  instrumentation after "nothing changed"):** the bake set `uFadeStart=0` but
+  never `uFadeEnd` (default 0) → `fadeNorm = clamp(D / max(0, 0.001)) = 1` →
+  `grassFade = 0` → **the model baked at ZERO HEIGHT: every impostor atlas in
+  brush was BLANK.** Billboards were being drawn (debug: 7k tree billboards
+  in-batch, hasImpostor=1) and rendering nothing. One bug = all field
+  symptoms: trees invisible past bbDist ("don't exist at distance"),
+  materializing at the mesh tier ("thin air on approach"), grass vanishing
+  past its bbDist ~48 m ("respawning at mid distance"). Fix: the bake pushes
+  uFadeEnd to 1e6 and disables the near fade-in. LESSONS: (a) the earlier
+  "billboard verified +21%" claim was perf-only — the tier was never
+  visually confirmed non-blank; (b) after two no-effect fixes, STOP and
+  instrument (BRUSH_FOLIAGE_DEBUG=1 now logs per-tier counts + dumps the
+  atlas PNG — both kept, env-gated). Grass far-field will look DENSER now
+  everywhere (the billboard band finally renders); re-tune dissolve if the
+  meadow horizon reads too thick.

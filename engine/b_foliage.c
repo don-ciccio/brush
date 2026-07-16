@@ -762,7 +762,17 @@ static void BrushFoliageBakePass(BrushFoliage *f, BrushFoliageLayer *L, int m,
   SetShaderValue(f->shader, f->locImpostorBake, &mode, SHADER_UNIFORM_FLOAT);
   SetShaderValue(f->shader, f->locTime, &zero, SHADER_UNIFORM_FLOAT);
   SetShaderValue(f->shader, f->locWindStr, &zero, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(f->shader, f->locFadeStart, &zero, SHADER_UNIFORM_FLOAT); // fragFade unused here
+  // The vertex height-fade MUST be neutralised for the bake: with uFadeEnd
+  // left at its default 0, fadeNorm = clamp(D / max(0, 0.001)) = 1 and
+  // heightScale collapses to ZERO — the model bakes at zero height and the
+  // atlas comes out BLANK (billboards drawn but invisible: "trees vanish at
+  // distance", "grass respawns mid-range"). Push the fade window far out and
+  // disable the near fade-in so the bake sees the full-height model.
+  float farEnd = 1e6f;
+  SetShaderValue(f->shader, f->locFadeStart, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeEnd, &farEnd, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeNearStart, &zero, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(f->shader, f->locFadeNearEnd, &zero, SHADER_UNIFORM_FLOAT);
   SetShaderValue(f->shader, f->locAlphaCutoff, &cutoff, SHADER_UNIFORM_FLOAT);
   SetShaderValue(f->shader, f->shader.locs[SHADER_LOC_VECTOR_VIEW], vp, SHADER_UNIFORM_VEC3);
 
@@ -853,6 +863,14 @@ static void BrushFoliageBakeImpostor(BrushFoliage *f, BrushFoliageLayer *L,
   }
   float zero = 0.0f;
   SetShaderValue(f->shader, f->locImpostorBake, &zero, SHADER_UNIFORM_FLOAT); // back to draw mode
+
+  // BRUSH_FOLIAGE_DEBUG: dump the atlases so "billboards drawn but invisible"
+  // is diagnosable by looking at the texture instead of guessing.
+  if (getenv("BRUSH_FOLIAGE_DEBUG")) {
+    Image a = LoadImageFromTexture(albedoRT.texture);
+    ExportImage(a, TextFormat("impostor_m%d.png", m));
+    UnloadImage(a);
+  }
 
   L->impostorRT[m] = albedoRT;
   L->impostorNrmRT[m] = nrmRT;
@@ -1367,6 +1385,29 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     }
     L->lastNear = nc;
     L->lastFar = fc + bc;
+    // BRUSH_FOLIAGE_DEBUG=1: once a second, the tier counts + distances that
+    // decide everything — the ground truth for "trees pop in" reports.
+    if (getenv("BRUSH_FOLIAGE_DEBUG")) {
+      static double lastLog = 0.0;
+      if (li == 0) { /* reset gate once per frame set */ }
+      double now = GetTime();
+      if (now - lastLog > 1.0) {
+        if (li == f->layerCount - 1) lastLog = now;
+        int resident = 0; // pre-cull instances across all active chunk sets
+        for (int ci = 0; ci < nv; ci++) {
+          FoliageChunkHandle *H = (FoliageChunkHandle *)views[ci].handle;
+          if (li < H->setCount) resident += H->sets[li].count;
+        }
+        TraceLog(LOG_INFO,
+                 "FOLIAGE L%d tree=%d near=%d far=%d bb=%d resident=%d "
+                 "chunks=%d imp=%d draw=%.0f lod=%.0f bbDist=%.0f q=%.2f "
+                 "cam=(%.0f,%.0f,%.0f)->(%.0f,%.0f)",
+                 li, L->cfg.tree, nc, fc, bc, resident, nv,
+                 (int)L->hasImpostor[0], draw, lod, bbDist, f->qualityScale,
+                 cam.position.x, cam.position.y, cam.position.z,
+                 cam.target.x, cam.target.z);
+      }
+    }
     if (nc == 0 && fc == 0 && bc == 0) continue;
 
     float wind = f->windStrength * L->cfg.windStrength;
