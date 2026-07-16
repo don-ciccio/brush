@@ -968,7 +968,9 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
         // capped (the tuft, already under budget, keeps its ratio unchanged).
         L->farMesh[m][s] = BrushFoliageBuildLODMeshTarget(
             L->nearMesh[m][s], L->cfg.farKeepRatio,
-            BRUSH_FOLIAGE_FAR_MAX_TRIS / L->subCount[m]);
+            (L->cfg.tree ? BRUSH_FOLIAGE_TREE_FAR_MAX_TRIS
+                         : BRUSH_FOLIAGE_FAR_MAX_TRIS) /
+                L->subCount[m]);
         L->hasFar[m][s] = true;
       } else {
         L->hasFar[m][s] = false;
@@ -1425,7 +1427,14 @@ static void FoliageSceneCb(void *user, Camera3D cam) {
     if (bc > 0) {
       float one = 1.0f;
       SetShaderValue(f->shader, f->locImpostor, &one, SHADER_UNIFORM_FLOAT);
-      BRUSH_FOLIAGE_SET_FADE(bbDist - tFar, bbDist, bbDist, draw);
+      // Grass dissolves across the WHOLE outer band (impostor cards melt into
+      // the terrain). TREES must not: a half-dissolved tree at 200 m reads as
+      // "trees don't exist at distance", and approaching one plays the grow
+      // backwards ("mushroom" spawn). Tree billboards hold full height and
+      // only dissolve over the final edge before the cull.
+      float bbFadeStart =
+          L->cfg.tree ? fmaxf(draw - tFar * 2.0f, bbDist) : bbDist;
+      BRUSH_FOLIAGE_SET_FADE(bbDist - tFar, bbDist, bbFadeStart, draw);
       for (int m = 0; m < L->meshCount; m++) {
         if (L->bbB.count[m] > 0 && L->hasImpostor[m])
           DrawMeshInstanced(L->billboardMesh[m], L->billboardMat[m],

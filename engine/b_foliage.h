@@ -45,6 +45,11 @@ extern "C" {
 // as the low-poly procedural tuft, with no visible loss (distant grass reads as
 // texture). Light meshes already under the budget keep their authored ratio.
 #define BRUSH_FOLIAGE_FAR_MAX_TRIS 500
+// Tree layers get a far-LOD budget of their own: 500 (grass-tuned) split
+// across submeshes shredded a 15k-tri canopy to ~250 unreadable scraps while
+// the trunk survived — trees approached "bark first, foliage later". Sparse
+// tree counts (~20 in the far band) keep 6000/instance well inside budget.
+#define BRUSH_FOLIAGE_TREE_FAR_MAX_TRIS 6000
 
 // One bucket of the uniform spatial grid: a [offset, offset+count) slice of the
 // set's flat `gridIndices` array.

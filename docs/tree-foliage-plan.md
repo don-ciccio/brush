@@ -223,3 +223,16 @@ exactly as grass does (it already multiplies drawDistance).
   windStrength needs to stay low on tree layers (the nudge sets 0.15).
   Grass regression: meadow placement identical. NEXT: step 5 — shadow
   callback + foliage_depth cutout shader + instanced LOD shadow draw.
+- **Field-reported tier bugs — FIXED (2026-07-16):** (1) trees invisible at
+  distance + "mushroom" grow on approach = the billboard tier's height
+  DISSOLVE spans the whole outer band (90→350 m) — a grass design ("melt
+  into terrain") that erases trees by ~250 m and plays the grow backwards as
+  you approach. Tree billboards now hold full height and dissolve only over
+  the final 2·tFar before the cull edge. (2) "bark first, foliage later" =
+  `BRUSH_FOLIAGE_FAR_MAX_TRIS 500` split per submesh gave the 15k-tri canopy
+  ~250 tris (unreadable scraps) while the 250-tri trunk survived; tree layers
+  now use `BRUSH_FOLIAGE_TREE_FAR_MAX_TRIS 6000` (~20 far-band trees keep it
+  cheap). Chunk residency (14×64 ≈ 900 m) was NOT the limiter.
+  OCTAHEDRAL impostors: still deliberately deferred — single front-view
+  billboards live at 90 m+ where parallax error is small; revisit only if
+  orbiting mid-range trees visibly flat-cards after these fixes.
