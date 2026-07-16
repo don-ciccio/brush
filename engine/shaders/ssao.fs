@@ -35,8 +35,17 @@ void main() {
     vec3 P = viewFromDepth(uv, depth);
 
     // View-space normal from depth derivatives, forced to face the camera.
-    vec3 n = normalize(cross(dFdx(P), dFdy(P)));
+    vec3 dpdx = dFdx(P);
+    vec3 dpdy = dFdy(P);
+    vec3 n = normalize(cross(dpdx, dpdy));
     if (n.z < 0.0) n = -n;
+
+    // Foliage/Edge rejection: if the depth discontinuity across this pixel is
+    // huge (like on overlapping alpha-tested grass strands), the reconstructed
+    // normal is chaotic garbage and SSAO will produce massive black noise.
+    float maxDerivative = max(length(dpdx), length(dpdy));
+    float validNormal = smoothstep(uRadius * 1.5, uRadius * 0.5, maxDerivative);
+    if (validNormal < 0.05) { finalColor = vec4(1.0); return; }
 
     // Per-pixel rotation from tiled noise → tangent basis (Gram-Schmidt).
     vec3 randomVec = normalize(vec3(texture(uNoise, uv * uNoiseScale).xy * 2.0 - 1.0, 0.0));
@@ -75,5 +84,6 @@ void main() {
     float distanceFade = smoothstep(40.0, 80.0, -P.z);
 
     float ao = 1.0 - (occlusion / float(KERNEL_SIZE)) * uStrength * (1.0 - distanceFade);
+    ao = mix(1.0, ao, validNormal);
     finalColor = vec4(vec3(clamp(ao, 0.0, 1.0)), 1.0);
 }
