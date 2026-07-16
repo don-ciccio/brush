@@ -996,6 +996,14 @@ static void SandboxUpdate(void *user, float dt, float alpha) {
 
   BrushOrbitCamUpdate(&s->camera, s->renderPos, s->vel, dt);
 
+  // Per-biome mood: ease exposure/fog toward the biome under the camera.
+  {
+    BrushBiomeSample bs;
+    bool have = BrushWorldBiomeAt(s->world, s->camera.cam.position.x,
+                                  s->camera.cam.position.z, &bs);
+    BrushSceneUpdateBiomeMood(&s->scene, have ? &bs : NULL, dt);
+  }
+
   // Drive the animator from gameplay state (per rendered frame). The
   // airborne flag is debounced through airTime (see fixedUpdate).
   float horizSpeed = sqrtf(s->vel.x * s->vel.x + s->vel.z * s->vel.z);

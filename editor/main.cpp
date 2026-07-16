@@ -1530,6 +1530,12 @@ int main(int argc, char **argv) {
         BrushRenderSetBiomeOverlay(biomeToolLive ? 0.55f : 0.0f);
         BrushWorldUpdate(g_world, g_camera.cam.position);
         BrushFoliageUpdate(g_foliage, (float)GetTime(), 1.0f);
+        { // per-biome mood follows the editor camera too (live preview)
+            BrushBiomeSample bs;
+            bool have = g_world && BrushWorldBiomeAt(g_world, g_camera.cam.position.x,
+                                                     g_camera.cam.position.z, &bs);
+            BrushSceneUpdateBiomeMood(&g_scene, have ? &bs : NULL, dt);
+        }
         // Nothing is dynamic here, but Jolt's broadphase does its node
         // maintenance inside Update — without stepping, editing churn
         // eventually aborts with "QuadTree: Out of nodes!".
@@ -2922,6 +2928,8 @@ int main(int argc, char **argv) {
                 snprintf(bm->name, sizeof(bm->name), "biome%d", nid);
                 bm->grassColor = (Color){90, 120, 70, 255};
                 bm->priority = 0.0f;
+                bm->moodExposure = 1.0f; // neutral mood
+                bm->moodFog = 1.0f;
                 for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) bm->palette[j] = -1;
                 g_selectedBiome = g_scene.biomeCount++;
                 g_dirty = true;
@@ -2953,6 +2961,22 @@ int main(int argc, char **argv) {
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Ground/far-grass tint for this biome (the F3 grass colour).");
+
+                // Mood: multipliers over the scene's post baseline, eased in as
+                // the camera enters the biome. Render-only (no rebake) — the
+                // per-frame mood update picks the values up live.
+                if (ImGui::SliderFloat("Mood: exposure", &bm->moodExposure,
+                                       0.5f, 1.5f, "%.2fx"))
+                    g_dirty = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Exposure multiplier inside this biome\n"
+                                      "(<1 darker forest, >1 bright desert).");
+                if (ImGui::SliderFloat("Mood: fog", &bm->moodFog, 0.0f, 4.0f,
+                                       "%.2fx"))
+                    g_dirty = true;
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Volumetric-fog density multiplier inside this\n"
+                                      "biome (needs Volumetric Fog enabled to show).");
 
                 ImGui::TextDisabled("Terrain palette (per splat slot)");
                 for (int j = 0; j < BRUSH_TERRAIN_LAYERS; j++) {

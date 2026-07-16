@@ -144,6 +144,8 @@ void BrushPostInit(BrushPost *pp, int width, int height, float renderScale) {
   pp->bloomIntensity = EnvF("BRUSH_BLOOM_INT", 0.32f);
   pp->blurPasses = 1;
   pp->exposure = EnvF("BRUSH_EXPOSURE", 1.0f);
+  pp->biomeExposureMul = 1.0f; // neutral until a biome mood drives them
+  pp->biomeFogMul = 1.0f;
   pp->sharpenEnabled = (getenv("BRUSH_NO_SHARPEN") == NULL);
   // Bumped from 0.10: the HDR scene renders at logical res and upscales to the
   // retina backbuffer, so fine detail (grass strands, POM relief) softens; a
@@ -475,16 +477,18 @@ void BrushPostRunNoPresent(BrushPost *pp, float time) {
   //     occludes the fog.
   if (pp->volFogEnabled) {
     // Ambient/sun colours are linear in brush (lit.fs treats them so).
-    float skyCol[3] = {pp->ambientColor.x * pp->exposure,
-                       pp->ambientColor.y * pp->exposure,
-                       pp->ambientColor.z * pp->exposure};
+    float fogExp = pp->exposure * pp->biomeExposureMul; // fog body tracks mood
+    float skyCol[3] = {pp->ambientColor.x * fogExp,
+                       pp->ambientColor.y * fogExp,
+                       pp->ambientColor.z * fogExp};
     float wind[2] = {0.82f, 0.40f}; // gentle horizontal drift
     // Keep most of the mist at midday: fade density by at most 40% as the
     // sun climbs (full density at dawn/dusk).
     float dayFade = (pp->sunDir.y - 0.10f) / (0.45f - 0.10f);
     if (dayFade < 0.0f) dayFade = 0.0f;
     if (dayFade > 1.0f) dayFade = 1.0f;
-    float mistDensity = pp->volFogDensity * (1.0f - 0.40f * dayFade);
+    float mistDensity =
+        pp->volFogDensity * (1.0f - 0.40f * dayFade) * pp->biomeFogMul;
 
     BeginTextureMode(pp->volFogTex);
     ClearBackground(BLANK);
@@ -623,7 +627,8 @@ void BrushPostRunNoPresent(BrushPost *pp, float time) {
   SetShaderValue(COMP.shader, COMP.locResolution, res, SHADER_UNIFORM_VEC2);
   SetShaderValue(COMP.shader, COMP.locBloomIntensity, &pp->bloomIntensity,
                  SHADER_UNIFORM_FLOAT);
-  SetShaderValue(COMP.shader, COMP.locExposure, &pp->exposure,
+  float moodExposure = pp->exposure * pp->biomeExposureMul;
+  SetShaderValue(COMP.shader, COMP.locExposure, &moodExposure,
                  SHADER_UNIFORM_FLOAT);
   SetShaderValue(COMP.shader, COMP.locTime, &time, SHADER_UNIFORM_FLOAT);
   SetShaderValue(COMP.shader, COMP.locDisplayP3, &pp->displayP3,

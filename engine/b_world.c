@@ -1170,6 +1170,21 @@ static WorldChunk *ChunkResident(BrushWorld *w, BrushChunkCoord c) {
   return NULL;
 }
 
+// Biome sample at an arbitrary world point (e.g. the camera, for per-biome
+// mood). Reads the resident chunk's composed map; false when biomes are off or
+// the chunk isn't resident yet (out stays the implicit biome 0).
+bool BrushWorldBiomeAt(BrushWorld *w, float wx, float wz,
+                       BrushBiomeSample *out) {
+  if (!w || !out) return false;
+  out->id0 = 0; out->id1 = 0; out->blend = 0.0f;
+  if (w->biomeClimate.biomeCount <= 0) return false;
+  WorldChunk *k = ChunkResident(w, ChunkOf(w, wx, wz));
+  if (k == NULL || !k->biomeValid || k->biomePixels == NULL) return false;
+  ChunkHeightCtx ctx = {w, k};
+  ChunkBiomeAt(&ctx, wx, wz, out);
+  return true;
+}
+
 static WorldChunk *AcquireSlot(BrushWorld *w, BrushChunkCoord c) {
   for (int i = 0; i < w->chunkCount; i++) {
     if (w->chunks[i].state == CHUNK_EMPTY) {

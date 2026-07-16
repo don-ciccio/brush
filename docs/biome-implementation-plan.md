@@ -170,6 +170,35 @@ Audited and OK as-is: shader border double-tap (fast-pathed), per-chunk biome
 map memory (~17 KB), BSC4 undo-blob growth (1 B/sample), Whittaker grid ImGui
 cost, `ChunkBiomeAt` bilinear (scatter-time only).
 
+### Phase 5 — per-biome mood (DONE 2026-07-16)
+
+The atmosphere half: crossing a biome border now changes the AIR, not just the
+ground. Deliberately built as **multipliers over the scene's authored post
+baseline** (never absolute values), so mood can't fight the scene's settings
+or the day/night authority:
+
+- `BrushSceneBiome` gains `moodExposure`/`moodFog` (default 1 = neutral);
+  scene line `biome_mood <id> <exposureMul> <fogMul>`, written only when
+  non-neutral, collected per-id and applied post-parse (order-independent,
+  same pattern as the palette tokens).
+- `BrushWorldBiomeAt(w, wx, wz, out)` — public biome sample at any world
+  point (reads the resident chunk's composed map; false = biomes off/chunk
+  not resident yet).
+- `BrushSceneUpdateBiomeMood(scene, sample, dt)` — called once per frame from
+  sandbox + editor with the CAMERA's biome sample; eases
+  `pp->biomeExposureMul`/`pp->biomeFogMul` toward the target with a ~2.5 s
+  exponential time constant (borders breathe, no stepping; the field's blend
+  pre-mixes the two biomes at the border on top).
+- b_post applies the multipliers at upload: composite exposure, volfog
+  density, and the fog body colour (fog brightness tracks mood exposure).
+- Editor: "Mood: exposure" (0.5–1.5x) and "Mood: fog" (0–4x) sliders per
+  biome; live in the viewport since the editor runs the same update.
+
+Verified: build clean, scene round-trip test extended (mood line BEFORE its
+biome exercises the per-id resolve; neutral biomes write nothing), editor +
+sandbox boot harnesses clean. NOTE: fog mood only shows when Volumetric Fog
+is enabled in the scene; exposure mood always works.
+
 ### Structural review — FIXED + notes (2026-07-16, pre-commit)
 
 A follow-up architectural review of the whole feature found three more defects

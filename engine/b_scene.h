@@ -155,6 +155,11 @@ typedef struct BrushSceneBiome {
   Color grassColor;
   float priority;
   int   palette[BRUSH_TERRAIN_LAYERS];
+  // Mood (Phase 5): multipliers over the scene's post baseline, applied with a
+  // slow blend as the camera crosses biomes. 1 = neutral (a biome with no
+  // biome_mood line changes nothing).
+  float moodExposure; // exposure multiplier
+  float moodFog;      // volumetric-fog density multiplier
 } BrushSceneBiome;
 
 typedef struct BrushScene {
@@ -286,6 +291,12 @@ void BrushSceneApplyRenderSettings(const BrushScene *s);
 
 // Applies the scene's biome palette mapping to the live renderer.
 void BrushSceneApplyBiomePalette(const BrushScene *s);
+
+// Per-biome mood: eases the post exposure/fog multipliers toward the biomes at
+// `at` (sample the world at the camera via BrushWorldBiomeAt). Call once per
+// frame; NULL `at` (or no biomes) eases back to neutral. dt in seconds.
+void BrushSceneUpdateBiomeMood(const BrushScene *s, const BrushBiomeSample *at,
+                               float dt);
 
 // Reads the live post-processing settings from the renderer into the scene.
 void BrushSceneCaptureRenderSettings(BrushScene *s);

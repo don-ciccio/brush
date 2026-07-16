@@ -274,6 +274,11 @@ void BrushWorldSetBiomeClimate(BrushWorld *w, const BrushBiomeClimate *climate);
 void BrushWorldPaintBiome(BrushWorld *w, Vector3 center, float radius,
                           int biomeId, bool erase);
 
+// Biome sample at an arbitrary world point (the camera, for per-biome mood).
+// False when biomes are off or the chunk isn't resident (out = biome 0).
+bool BrushWorldBiomeAt(BrushWorld *w, float wx, float wz,
+                       BrushBiomeSample *out);
+
 // Terrain texture LIBRARY (Phase 2): the full set of materials biomes can index
 // into, packed into the terrain sampler2DArrays (slice i = library[i]). A biome
 // palette entry is a library index. Sets the array source; NOT a chunk rebake

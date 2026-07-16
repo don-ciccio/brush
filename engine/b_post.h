@@ -95,6 +95,11 @@ typedef struct BrushPost {
   float bloomIntensity; // how strongly bloom is added back
   int blurPasses;       // gaussian ping-pong iterations per mip
   float exposure;       // pre-tonemap multiplier
+  // Per-biome mood (BrushSceneUpdateBiomeMood drives these each frame with a
+  // slow-smoothed value): multipliers over the scene's authored baseline so
+  // mood never fights the post settings. 1 = neutral.
+  float biomeExposureMul;
+  float biomeFogMul;
   bool sharpenEnabled;
   float sharpenAmount; // 0..1 CAS strength
   float displayP3;     // 1 = apply the sRGB->P3 gamut map (Apple wide-gamut)

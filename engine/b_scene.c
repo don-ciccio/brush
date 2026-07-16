@@ -49,6 +49,9 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
   // appearing first in the file.
   char palTok[BRUSH_MAX_BIOMES][BRUSH_TERRAIN_LAYERS][32];
   memset(palTok, 0, sizeof(palTok));
+  // Per-id mood lines, applied post-loop like the palette tokens.
+  float moodExp[BRUSH_MAX_BIOMES], moodFog[BRUSH_MAX_BIOMES];
+  bool moodSet[BRUSH_MAX_BIOMES] = {false};
   while (*cursor != '\0') {
     char *line = cursor;
     char *nl = strchr(cursor, '\n');
@@ -142,6 +145,14 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
                       &flicker) >= 6) {
       if (sscanf(p, "biome_climate %*f %*f %*f %*f %*f %*f %d", &flicker) == 1)
         temp.climate.seed = (unsigned int)flicker;
+    } else if (sscanf(p, "biome_mood %d %f %f", &flicker, &x, &y) == 3) {
+      // biome_mood <id> <exposureMul> <fogMul> — collected per ID, applied
+      // after the parse loop (order-independent, like the palette tokens).
+      if (flicker >= 0 && flicker < BRUSH_MAX_BIOMES) {
+        moodExp[flicker] = x;
+        moodFog[flicker] = y;
+        moodSet[flicker] = true;
+      }
     } else if (strncmp(p, "biome ", 6) == 0 &&
                (n = sscanf(p, "biome %31s %d %d %d %d %f %31s %31s %31s %31s",
                            w1, &flicker, &ir, &ig, &ib, &a, w2, w3, w4,
@@ -160,6 +171,8 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
         bm->grassColor = (Color){(unsigned char)ir, (unsigned char)ig,
                                  (unsigned char)ib, 255};
         bm->priority = (n >= 6) ? a : 0.0f;
+        bm->moodExposure = 1.0f; // neutral until a biome_mood line overrides
+        bm->moodFog = 1.0f;
         const char *tk[BRUSH_TERRAIN_LAYERS] = {w2, w3, w4, w5};
         for (int pi = 0; pi < BRUSH_TERRAIN_LAYERS; pi++) {
           bm->palette[pi] = -1; // resolved from palTok after the parse loop
@@ -336,6 +349,12 @@ bool BrushSceneLoad(BrushScene *s, const char *path) {
       temp.biomes[i].palette[j] =
           digits ? atoi(tk) : BrushSceneFindMaterial(&temp, tk);
     }
+  for (int i = 0; i < temp.biomeCount; i++)
+    if (temp.biomes[i].id >= 0 && temp.biomes[i].id < BRUSH_MAX_BIOMES &&
+        moodSet[temp.biomes[i].id]) {
+      temp.biomes[i].moodExposure = moodExp[temp.biomes[i].id];
+      temp.biomes[i].moodFog = moodFog[temp.biomes[i].id];
+    }
 
   temp.modTime = GetFileModTime(path);
   BrushSceneUnloadMaterials(s); // drop the outgoing scene's texture refs
@@ -459,6 +478,12 @@ bool BrushSceneSave(BrushScene *s, const char *path) {
                               ? s->materials[pi].name : "-");
       }
       fprintf(f, "\n");
+    }
+    for (int i = 0; i < s->biomeCount; i++) { // only non-neutral moods
+      const BrushSceneBiome *bm = &s->biomes[i];
+      if (bm->moodExposure != 1.0f || bm->moodFog != 1.0f)
+        fprintf(f, "biome_mood %d %g %g\n", bm->id, bm->moodExposure,
+                bm->moodFog);
     }
     fprintf(f, "biome_climate %g %g %g %g %g %g %u\n", s->climate.tempScale,
             s->climate.moistScale, s->climate.lapse, s->climate.seaLevel,
@@ -841,6 +866,31 @@ void BrushSceneApplyBiomePalette(const BrushScene *s) {
   }
   BrushRenderSetBiomePalette(pal);
   BrushRenderSetBiomeGrassColors(colors, s->biomeCount);
+}
+
+void BrushSceneUpdateBiomeMood(const BrushScene *s, const BrushBiomeSample *at,
+                               float dt) {
+  // Target mood = the two biomes at the camera blended by the field, matched
+  // by ID (list order can differ). Missing/undefined ids are neutral.
+  float te = 1.0f, tf = 1.0f;
+  if (s != NULL && s->biomeCount > 0 && at != NULL) {
+    float e0 = 1.0f, f0 = 1.0f, e1 = 1.0f, f1 = 1.0f;
+    for (int i = 0; i < s->biomeCount; i++) {
+      const BrushSceneBiome *bm = &s->biomes[i];
+      if (bm->id == at->id0) { e0 = bm->moodExposure; f0 = bm->moodFog; }
+      if (bm->id == at->id1) { e1 = bm->moodExposure; f1 = bm->moodFog; }
+    }
+    te = e0 + (e1 - e0) * at->blend;
+    tf = f0 + (f1 - f0) * at->blend;
+  }
+  BrushPost *pp = BrushRenderGetPost();
+  if (pp == NULL) return;
+  // Slow exponential blend (~2.5 s time constant) so crossing a border
+  // breathes instead of stepping; borders also pre-blend via the field.
+  float k = 1.0f - expf(-dt / 2.5f);
+  if (k > 1.0f) k = 1.0f;
+  pp->biomeExposureMul += (te - pp->biomeExposureMul) * k;
+  pp->biomeFogMul += (tf - pp->biomeFogMul) * k;
 }
 
 void BrushSceneCaptureRenderSettings(BrushScene *s) {
