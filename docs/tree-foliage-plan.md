@@ -195,3 +195,14 @@ exactly as grass does (it already multiplies drawDistance).
   FPS — and poppy flower HEADS now render (they were the lost second submesh
   all along; the old meshes[0]-only conversion was why poppies looked like
   "a single thin strand").
+- **Fallout fixes (field-reported):** full-size clumps exposed that ALL
+  placement tests were centre-point-only — wide models floated their downhill
+  edge on steep/convex hills and hung canopies over roads ("avoid roads works
+  for one layer not the other" = it worked for small meshes, failed for wide
+  ones). Fix = footprint-aware placement: AddLayer computes each variant's
+  union XZ half-extent (`cfg.baseRadius`, engine-filled); the scatter picks
+  the variant/scale FIRST (same hash bits — deterministic-identical), then
+  wide instances (r > 0.6 m) get (a) 4-probe MIN-grounding capped at 0.8r so
+  the lowest footprint edge touches ground, and (b) 4 road-coverage probes at
+  0.8r (centre threshold tightened 0.5 -> 0.35). Small grass keeps the
+  single-tap fast path bit-for-bit.

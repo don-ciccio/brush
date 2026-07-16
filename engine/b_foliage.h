@@ -196,6 +196,11 @@ typedef struct BrushFoliageLayerConfig {
   Texture2D albedos[BRUSH_FOLIAGE_MODELS_PER_LAYER][BRUSH_FOLIAGE_SUBMESHES];
   int subCount[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   float meshScale[BRUSH_FOLIAGE_MODELS_PER_LAYER]; // per-variant scale x layer scale (0 -> 1)
+  // ENGINE-COMPUTED (AddLayer fills from the union bounds; callers leave 0):
+  // per-variant XZ half-extent in model units. Drives footprint-aware
+  // placement — wide clumps ground to their lowest edge and keep their
+  // canopy off roads (the centre-point tests alone let big models overhang).
+  float baseRadius[BRUSH_FOLIAGE_MODELS_PER_LAYER];
   int meshCount;        // 0 -> a single procedural tuft
   // Surface-layer auto-exclusion (reads the terrain splat weights).
   int   growLayer;      // grow only where terrain layer N dominates (-1 = any)

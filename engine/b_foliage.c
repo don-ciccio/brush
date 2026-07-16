@@ -897,6 +897,11 @@ int BrushFoliageAddLayer(BrushFoliage *f, const BrushFoliageLayerConfig *cfg) {
           if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
         }
       }
+      // Footprint radius (union XZ half-extent, model units) for the scatter's
+      // footprint-aware grounding + road margin. Extents are shift-invariant,
+      // so computing from the pre-grounding bounds is exact.
+      L->cfg.baseRadius[m] =
+          fmaxf(maxX - minX, maxZ - minZ) * 0.5f;
       float ox = (minX + maxX) * 0.5f, oy = minY, oz = (minZ + maxZ) * 0.5f;
       if (fabsf(ox) > 1e-4f || fabsf(oy) > 1e-4f || fabsf(oz) > 1e-4f) {
         for (int s = 0; s < L->subCount[m]; s++) {
@@ -1031,12 +1036,23 @@ typedef struct {
 } ScatterCtx;
 
 // True if this position passes the layer's surface-layer rules (grow/avoid).
-static bool SurfacePasses(const ScatterCtx *s, float x, float z) {
+// `r` = the instance's scaled footprint radius: the road exclusion must hold
+// for the whole CLUMP, not just its centre point — a wide model placed on the
+// shoulder used to pass the centre test and hang its canopy over the road.
+static bool SurfacePasses(const ScatterCtx *s, float x, float z, float r) {
   // Roads are a separate coverage mask (not a splat slot), so exclude foliage
   // from them here rather than via avoidLayer.
-  if (s->cfg->avoidRoad && s->s->roadAt &&
-      s->s->roadAt(s->s->ctx, x, z) > 0.5f)
-    return false;
+  if (s->cfg->avoidRoad && s->s->roadAt) {
+    if (s->s->roadAt(s->s->ctx, x, z) > 0.35f) return false;
+    if (r > 0.6f) { // wide clump: probe the footprint's compass points too
+      float pr = r * 0.8f;
+      if (s->s->roadAt(s->s->ctx, x + pr, z) > 0.5f ||
+          s->s->roadAt(s->s->ctx, x - pr, z) > 0.5f ||
+          s->s->roadAt(s->s->ctx, x, z + pr) > 0.5f ||
+          s->s->roadAt(s->s->ctx, x, z - pr) > 0.5f)
+        return false;
+    }
+  }
   if (!s->s->splatAt || (s->cfg->growLayer < 0 && s->cfg->avoidLayer < 0))
     return true;
   float w[4];
@@ -1098,7 +1114,17 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
     float jx = bx + (r1 - 0.5f) * cw;
     float jz = bz + (r2 - 0.5f) * cd;
 
-    if (!SurfacePasses(s, jx, jz)) continue;
+    // Variant + scale FIRST: the surface tests and grounding below are
+    // footprint-aware, and the footprint depends on which variant landed here.
+    // (Same hash bits as before — placement stays deterministic.)
+    unsigned char mi = (s->meshCount > 1)
+                           ? (unsigned char)((h >> 9) % (unsigned)s->meshCount) : 0;
+    float vscale = (s->cfg->meshScale[mi] > 0.0f) ? s->cfg->meshScale[mi] : 1.0f;
+    float sc = s->cfg->scale * vscale *
+               (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
+    float rEff = s->cfg->baseRadius[mi] * sc; // scaled footprint radius (m)
+
+    if (!SurfacePasses(s, jx, jz, rEff)) continue;
 
     float y = s->s->heightAt(s->s->ctx, jx, jz);
     if (s->cfg->minHeight < s->cfg->maxHeight) {
@@ -1143,14 +1169,22 @@ static void FoliagePlace(void *ud, BrushFoliageSet *set, int *index, int maxCoun
       }
     }
 
-    // Random model variant (deterministic per instance), then scale by that
-    // variant's own factor so mixed meshes (rock + grass) size independently.
-    unsigned char mi = (s->meshCount > 1)
-                           ? (unsigned char)((h >> 9) % (unsigned)s->meshCount) : 0;
-    float vscale = (s->cfg->meshScale[mi] > 0.0f) ? s->cfg->meshScale[mi] : 1.0f;
+    // Wide clumps: ground to the LOWEST of four footprint probes (capped) so a
+    // big model on convex or steep ground can't hang its downhill edge in the
+    // air — the centre tap alone leaves r-wide meshes floating on hills. Small
+    // grass (r <= 0.6 m) keeps the single-tap fast path. The slope tilt below
+    // still conforms the base; this fixes what the tilt's 0.75 blend leaves.
+    if (rEff > 0.6f) {
+      float pr = rEff * 0.7f;
+      float ymin = fminf(
+          fminf(s->s->heightAt(s->s->ctx, jx + pr, jz),
+                s->s->heightAt(s->s->ctx, jx - pr, jz)),
+          fminf(s->s->heightAt(s->s->ctx, jx, jz + pr),
+                s->s->heightAt(s->s->ctx, jx, jz - pr)));
+      if (ymin < y) y = fmaxf(ymin, y - rEff * 0.8f); // cap the sink
+    }
+
     float yaw = r1 * 6.2831853f;
-    float sc = s->cfg->scale * vscale *
-               (1.0f + (r2 - 0.5f) * 2.0f * s->cfg->scaleJitter);
     // The mesh base is baked to Y=0 at layer setup (AddLayer grounds + centres
     // the geometry), so the scatter point maps straight to the terrain height.
     int i = *index;
