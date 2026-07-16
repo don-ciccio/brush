@@ -54,7 +54,7 @@ typedef struct BrushRenderState {
   int locHeightScale, locParallax, locParallaxShadow;
   int pomQuality; // 0 = off, 1 = POM, 2 = POM + self-shadow (BRUSH_POM)
   int locSplatEnabled, locSplatOrigin, locSplatSize, locSplatRes;
-  int locLayerTiles, locLayerSwizzled, locLayerCount, locAutoSlope;
+  int locMatTile, locLayerSwizzled, locLayerCount, locAutoSlope;
   int locLayerRoughness; // per-layer terrain roughness (shiny/matte)
   int locGrassGroundColor, locGrassGroundStrength, locGrassGrowLayer, locGrassGroundFar;
   int locLayerHeightOn, locLayerHeightStart, locLayerHeightFull;
@@ -152,7 +152,7 @@ void BrushRenderInit(int width, int height, float renderScale) {
   g_r.locSplatOrigin = GetShaderLocation(g_r.lit, "uSplatOrigin");
   g_r.locSplatSize = GetShaderLocation(g_r.lit, "uSplatSize");
   g_r.locSplatRes = GetShaderLocation(g_r.lit, "uSplatRes");
-  g_r.locLayerTiles = GetShaderLocation(g_r.lit, "uLayerTiles");
+  g_r.locMatTile = GetShaderLocation(g_r.lit, "uMatTile");
   g_r.locLayerRoughness = GetShaderLocation(g_r.lit, "uLayerRoughness");
   g_r.locLayerSwizzled = GetShaderLocation(g_r.lit, "uLayerSwizzled");
   g_r.locLayerCount = GetShaderLocation(g_r.lit, "uLayerCount");
@@ -329,6 +329,19 @@ void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count) {
                     16);
   float on = (count > 0) ? 1.0f : 0.0f;
   SetShaderValue(g_r.lit, g_r.locBiomeGroundOn, &on, SHADER_UNIFORM_FLOAT);
+}
+
+void BrushRenderSetMaterialTiles(const float *tiles, int count) {
+  // Metres-per-repeat per terrain-array slice (= per material). Pushed by
+  // BuildLayerArrays whenever the array source changes; unused slices pad to
+  // 1.0 so a stale palette index can never divide UVs by zero.
+  float mt[32];
+  if (count < 0) count = 0;
+  if (count > 32) count = 32;
+  for (int i = 0; i < 32; i++)
+    mt[i] = (i < count && tiles[i] > 0.01f) ? tiles[i] : 1.0f;
+  if (g_r.locMatTile >= 0)
+    SetShaderValueV(g_r.lit, g_r.locMatTile, mt, SHADER_UNIFORM_FLOAT, 32);
 }
 
 void BrushRenderSetBiomeOverlay(float strength) {
@@ -592,7 +605,6 @@ static void ApplySplat(const BrushDrawCmd *cmd, Material *mat,
   SetShaderValue(g_r.lit, g_r.locSplatOrigin, origin, SHADER_UNIFORM_VEC2);
   SetShaderValue(g_r.lit, g_r.locSplatSize, &size, SHADER_UNIFORM_FLOAT);
   SetShaderValue(g_r.lit, g_r.locSplatRes, &res, SHADER_UNIFORM_FLOAT);
-  SetShaderValue(g_r.lit, g_r.locLayerTiles, tiles, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerRoughness, rough, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerSwizzled, swiz, SHADER_UNIFORM_VEC4);
   SetShaderValue(g_r.lit, g_r.locLayerCount, &lc, SHADER_UNIFORM_INT);

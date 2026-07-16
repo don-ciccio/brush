@@ -1433,6 +1433,11 @@ static void BuildLayerArrays(BrushWorld *w) {
   if (size > 2048) size = 2048;
   w->layerAlbedoArr = BrushAssetsTextureArray(alb, NULL, count, size, false);
   w->layerNormalArr = BrushAssetsTextureArray(nrm, swz, count, size, true);
+  // Per-slice tile scales ride along: the shader tiles each palette-selected
+  // material at ITS authored metres-per-repeat, not the painted slot's.
+  float mt[BRUSH_TERRAIN_ARRAY_MAX];
+  for (int i = 0; i < count; i++) mt[i] = src[i].tile;
+  BrushRenderSetMaterialTiles(mt, count);
 }
 
 void BrushWorldSetTerrainLibrary(BrushWorld *w, const BrushTerrainLayer *lib,

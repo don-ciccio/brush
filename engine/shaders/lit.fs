@@ -61,7 +61,11 @@ uniform float uHeightBlendSharp; // transition band (smaller = crisper)
 uniform vec2 uSplatOrigin; // chunk world origin (xz)
 uniform float uSplatSize;  // chunk world size (m)
 uniform float uSplatRes;   // splat texture resolution per side
-uniform vec4 uLayerTiles;  // metres per repeat, per layer
+// Metres-per-repeat PER ARRAY SLICE (= per material), so a biome palette that
+// swaps a slot's material keeps that material's authored tiling instead of
+// inheriting the painted slot's scale. Indexed by the palette entries.
+// (POM stays slot-level via uPomTile: displacement isn't in the array.)
+uniform float uMatTile[32];
 uniform vec4 uLayerSwizzled; // DXT5nm flag per layer
 uniform int uLayerCount;
 uniform vec4 uLayerRoughness; // per-layer terrain roughness (0 smooth/shiny .. 1 matte)
@@ -647,18 +651,18 @@ void main()
         float bblend = bdata.b;
 
         ivec4 p0 = uBiomePalette[id0];
-        vec3 a0 = SampleLayerArr(uAlbedoArr, float(p0.x), uLayerTiles.x, WP(0), triW, steep) * sw.r;
-        if (uLayerCount > 1) a0 += SampleLayerArr(uAlbedoArr, float(p0.y), uLayerTiles.y, WP(1), triW, steep) * sw.g;
-        if (uLayerCount > 2) a0 += SampleLayerArr(uAlbedoArr, float(p0.z), uLayerTiles.z, WP(2), triW, steep) * sw.b;
-        if (uLayerCount > 3) a0 += SampleLayerArr(uAlbedoArr, float(p0.w), uLayerTiles.w, WP(3), triW, steep) * sw.a;
-        
+        vec3 a0 = SampleLayerArr(uAlbedoArr, float(p0.x), uMatTile[p0.x], WP(0), triW, steep) * sw.r;
+        if (uLayerCount > 1) a0 += SampleLayerArr(uAlbedoArr, float(p0.y), uMatTile[p0.y], WP(1), triW, steep) * sw.g;
+        if (uLayerCount > 2) a0 += SampleLayerArr(uAlbedoArr, float(p0.z), uMatTile[p0.z], WP(2), triW, steep) * sw.b;
+        if (uLayerCount > 3) a0 += SampleLayerArr(uAlbedoArr, float(p0.w), uMatTile[p0.w], WP(3), triW, steep) * sw.a;
+
         vec3 a = a0;
         if (id0 != id1 && bblend > 0.0) {
             ivec4 p1 = uBiomePalette[id1];
-            vec3 a1 = SampleLayerArr(uAlbedoArr, float(p1.x), uLayerTiles.x, WP(0), triW, steep) * sw.r;
-            if (uLayerCount > 1) a1 += SampleLayerArr(uAlbedoArr, float(p1.y), uLayerTiles.y, WP(1), triW, steep) * sw.g;
-            if (uLayerCount > 2) a1 += SampleLayerArr(uAlbedoArr, float(p1.z), uLayerTiles.z, WP(2), triW, steep) * sw.b;
-            if (uLayerCount > 3) a1 += SampleLayerArr(uAlbedoArr, float(p1.w), uLayerTiles.w, WP(3), triW, steep) * sw.a;
+            vec3 a1 = SampleLayerArr(uAlbedoArr, float(p1.x), uMatTile[p1.x], WP(0), triW, steep) * sw.r;
+            if (uLayerCount > 1) a1 += SampleLayerArr(uAlbedoArr, float(p1.y), uMatTile[p1.y], WP(1), triW, steep) * sw.g;
+            if (uLayerCount > 2) a1 += SampleLayerArr(uAlbedoArr, float(p1.z), uMatTile[p1.z], WP(2), triW, steep) * sw.b;
+            if (uLayerCount > 3) a1 += SampleLayerArr(uAlbedoArr, float(p1.w), uMatTile[p1.w], WP(3), triW, steep) * sw.a;
             a = mix(a0, a1, bblend);
         }
         albedo = a; // vertex colour/tint intentionally excluded
@@ -686,16 +690,16 @@ void main()
             // Push the normal to coarser mips with distance so the minified tile
             // stops aliasing (the ground for extending the normal further out).
             float nbias = clamp((length(viewPos - fragPosition) - 12.0) * 0.05, 0.0, 2.5);
-            vec3 n0 = SampleLayerBumpArr(uNormalArr, float(p0.x), uLayerTiles.x, WP(0), triW, steep, nbias) * sw.r;
-            if (uLayerCount > 1) n0 += SampleLayerBumpArr(uNormalArr, float(p0.y), uLayerTiles.y, WP(1), triW, steep, nbias) * sw.g;
-            if (uLayerCount > 2) n0 += SampleLayerBumpArr(uNormalArr, float(p0.z), uLayerTiles.z, WP(2), triW, steep, nbias) * sw.b;
-            
+            vec3 n0 = SampleLayerBumpArr(uNormalArr, float(p0.x), uMatTile[p0.x], WP(0), triW, steep, nbias) * sw.r;
+            if (uLayerCount > 1) n0 += SampleLayerBumpArr(uNormalArr, float(p0.y), uMatTile[p0.y], WP(1), triW, steep, nbias) * sw.g;
+            if (uLayerCount > 2) n0 += SampleLayerBumpArr(uNormalArr, float(p0.z), uMatTile[p0.z], WP(2), triW, steep, nbias) * sw.b;
+
             splatBump = n0;
             if (id0 != id1 && bblend > 0.0) {
                 ivec4 p1 = uBiomePalette[id1];
-                vec3 n1 = SampleLayerBumpArr(uNormalArr, float(p1.x), uLayerTiles.x, WP(0), triW, steep, nbias) * sw.r;
-                if (uLayerCount > 1) n1 += SampleLayerBumpArr(uNormalArr, float(p1.y), uLayerTiles.y, WP(1), triW, steep, nbias) * sw.g;
-                if (uLayerCount > 2) n1 += SampleLayerBumpArr(uNormalArr, float(p1.z), uLayerTiles.z, WP(2), triW, steep, nbias) * sw.b;
+                vec3 n1 = SampleLayerBumpArr(uNormalArr, float(p1.x), uMatTile[p1.x], WP(0), triW, steep, nbias) * sw.r;
+                if (uLayerCount > 1) n1 += SampleLayerBumpArr(uNormalArr, float(p1.y), uMatTile[p1.y], WP(1), triW, steep, nbias) * sw.g;
+                if (uLayerCount > 2) n1 += SampleLayerBumpArr(uNormalArr, float(p1.z), uMatTile[p1.z], WP(2), triW, steep, nbias) * sw.b;
                 splatBump = mix(n0, n1, bblend);
             }
         }

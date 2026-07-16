@@ -121,6 +121,11 @@ void BrushRenderSetBiomeGrassColors(const Vector3 *colors, int count);
 // runtime; the editor drives it while the Biome paint tool is active.
 void BrushRenderSetBiomeOverlay(float strength);
 
+// Uploads metres-per-repeat per terrain-array slice (= per material), so a
+// biome palette that swaps a slot's material keeps that material's authored
+// tiling. Called from the world's array builder; slices >= count pad to 1.0.
+void BrushRenderSetMaterialTiles(const float *tiles, int count);
+
 // --- Point lights (DYNAMIC, never baked — see docs/roadmap.md) -------------
 // Submit per frame, like draws: the list clears after every execute, so
 // moving lights (a carried torch) are free. Colors are LINEAR and may exceed

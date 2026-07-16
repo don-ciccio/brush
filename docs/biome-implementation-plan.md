@@ -63,9 +63,17 @@ Each phase compiles, runs, and is independently verifiable. Constants:
     drive the existing F3 tint; off when the scene defines no biomes.
   - **Deviations:** only **albedo + normal** arrays (no ORH/surface array — POM
     uses `uLayerHeight`, roughness stays scalar; per-biome height/roughness
-    deferred). **Per-slot tile** kept geometric — a biome's material tiles at its
-    slot's scale (per-material tile = a follow-up). Layer-3 normal is in the array
-    but unsampled.
+    deferred). Layer-3 normal is in the array but unsampled.
+  - **Per-material tile — DONE (follow-up landed 2026-07-16).** `uMatTile[32]`
+    (metres-per-repeat per array slice) replaces the per-slot `uLayerTiles` in
+    all 12 array-sample calls, so a palette-swapped material keeps ITS authored
+    tiling instead of inheriting the painted slot's. Pushed from
+    `BuildLayerArrays` (both library and 4-layer fallback), unused slices pad
+    to 1.0 (no div-by-zero from stale indices). Bit-identical for default
+    palettes (slot tile WAS the painted material's tile). POM stays slot-level
+    via `uPomTile` — displacement isn't in the array, so the palette can't
+    retarget it anyway. Verified: lit.fs compiles + links via the editor
+    screenshot harness (silent default-shader fallback is the failure mode).
 - **Launch road-carve — FIXED.** Not a config slot after all: `BrushWorldWaitResident`
   drains all pending (re)bakes after the post-create setup (roads/sculpt/biomes),
   called at the end of `SandboxInit`, so the terrain launches fully carved.
